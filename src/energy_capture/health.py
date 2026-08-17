@@ -529,7 +529,7 @@ def _fsync_dir(directory: Path) -> None:
 # --------------------------------------------------------------------- server
 
 
-_HTTP_REASONS = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 503: "Service Unavailable"}
+_HTTP_REASONS = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 500: "Internal Server Error", 503: "Service Unavailable"}
 
 #: Guard rails for a socket that may be anything at all. The health endpoint is
 #: unauthenticated on the container network; keep it impossible to wedge.
@@ -540,6 +540,13 @@ _READ_TIMEOUT_S = 10.0
 
 class HealthServer:
     """``GET /healthz`` over stdlib asyncio — no web framework (PLAN.md §5).
+
+    It also serves the two read-only dashboard routes owned by
+    :mod:`energy_capture.dashboard` — ``GET /ui`` (the HTML page) and
+    ``GET /ui/data`` (the JSON snapshot it polls) — on the same port, so the
+    container still exposes exactly one. They are dispatched *before* the status
+    paths and share nothing with them: :data:`DEFAULT_HEALTH_PATHS` behave
+    exactly as they did.
 
     Usage::
 
@@ -621,6 +628,13 @@ class HealthServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             method, target = await self._read_request(reader)
+            ui = await self._respond_ui(method, target)
+            if ui is not None:
+                status, payload, content_type = ui
+                await self._send_bytes(
+                    writer, status, payload, content_type, head_only=method == "HEAD"
+                )
+                return
             status, body = self._respond(method, target)
             await self._send(writer, status, body, head_only=method == "HEAD")
         except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
@@ -648,6 +662,61 @@ class HealthServer:
                 break
         return (method, target)
 
+    async def _respond_ui(self, method: str, target: str) -> tuple[int, bytes, str] | None:
+        """The two dashboard routes, or ``None`` when this is not one of them.
+
+        ``GET /ui`` serves ``static/dashboard.html``; ``GET /ui/data`` serves the
+        JSON snapshot the page polls. Everything else — including every path in
+        :data:`DEFAULT_HEALTH_PATHS` — falls through to :meth:`_respond`
+        untouched. Imported lazily so the health server keeps starting even if
+        the dashboard module cannot be imported, and every failure inside it
+        becomes a JSON 500 rather than a dead socket: ``/healthz`` must not be
+        able to break because a browser tab asked for a chart.
+
+        ``build_snapshot`` runs in a **worker thread**. It is synchronous SQLite
+        plus a scan of the spool, and this event loop is also running the poll
+        loops, the keepalive and the WebSocket reader (PLAN.md §5: one process).
+        A browser refreshing every 5s must not be able to stall data collection —
+        and the spool grows without bound whenever the uploader is failing, which
+        is exactly when someone is watching this page. The snapshot builder opens
+        its own connection with ``check_same_thread=False`` and closes it before
+        returning, so it is safe off-loop.
+        """
+        if method not in {"GET", "HEAD"}:
+            return None
+        path = target.split("?", 1)[0].split("#", 1)[0] or "/"
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/") or "/"
+
+        try:
+            from energy_capture import dashboard
+        except Exception as exc:  # pragma: no cover - import-time failure only
+            self._log.warning("dashboard_unavailable", error=f"{type(exc).__name__}: {exc}")
+            return None
+
+        if path == dashboard.UI_PAGE_PATH:
+            try:
+                return (200, dashboard.render_page().encode("utf-8"), dashboard.PAGE_CONTENT_TYPE)
+            except Exception as exc:
+                return self._ui_error("dashboard page could not be read", exc)
+        if path == dashboard.UI_DATA_PATH:
+            try:
+                snapshot = await asyncio.to_thread(dashboard.build_snapshot, self._store)
+            except Exception as exc:
+                return self._ui_error("dashboard snapshot failed", exc)
+            payload = (
+                json.dumps(snapshot, ensure_ascii=False, default=_jsonable) + "\n"
+            ).encode("utf-8")
+            return (200, payload, "application/json")
+        return None
+
+    def _ui_error(self, message: str, exc: BaseException) -> tuple[int, bytes, str]:
+        """A dashboard failure, logged and returned as JSON the page can display."""
+        detail = _format_error(exc)
+        self._log.warning("dashboard_request_failed", detail=message, error=detail)
+        body = json.dumps({"error": message, "detail": detail}, ensure_ascii=False) + "\n"
+        return (500, body.encode("utf-8"), "application/json")
+
     def _respond(self, method: str, target: str) -> tuple[int, dict[str, Any]]:
         if method not in {"GET", "HEAD"}:
             if not method:
@@ -671,10 +740,24 @@ class HealthServer:
         payload = (json.dumps(body, indent=2, ensure_ascii=False, default=_jsonable) + "\n").encode(
             "utf-8"
         )
+        await self._send_bytes(
+            writer, status, payload, "application/json", head_only=head_only
+        )
+
+    async def _send_bytes(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        payload: bytes,
+        content_type: str,
+        *,
+        head_only: bool = False,
+    ) -> None:
+        """Write one response. The only place a response head is constructed."""
         reason = _HTTP_REASONS.get(status, "OK" if status < 400 else "Error")
         head = (
             f"HTTP/1.1 {status} {reason}\r\n"
-            "Content-Type: application/json\r\n"
+            f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(payload)}\r\n"
             "Cache-Control: no-store\r\n"
             "Connection: close\r\n"

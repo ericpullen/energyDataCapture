@@ -2586,6 +2586,73 @@ directory path containing a space, all three name-collision recovery paths, and
 foreground SIGTERM → `container stop --time 30` → exit 0. `deploy/README.md` leads with a
 table of every assumption that is still a guess.
 
+## 164. PLAN.md §11's health server serves `/healthz` only — it now also serves `/ui` and `/ui/data`
+
+**The spec.** PLAN.md §11 specifies one HTTP surface: *"a small HTTP health server"* serving
+`GET /healthz` (plus the aliases `/health`, `/`, `/status.json`) with the status document
+and a derived `health` block. No other route is contemplated.
+
+**What was built.** The same `HealthServer`, on the same port, now also answers two
+**read-only** dashboard routes owned by `energy_capture/dashboard.py`:
+
+| route | serves |
+|---|---|
+| `GET /ui` | `static/dashboard.html` — one self-contained file: no framework, no build step, no CDN, no external asset of any kind. It renders with the network unplugged. |
+| `GET /ui/data` | a JSON snapshot of the live spool plus `status.json`, which the page polls every 5s. |
+
+**Why.** Between the spool and S3 this pipeline is invisible. `status.json` says whether a
+poller succeeded; it says nothing about *what the house is doing*, and the measurements
+themselves only become queryable once they are Parquet in a bucket — hours later, through
+DuckDB or Athena. There was no way to stand in the kitchen and watch the numbers move, and
+no way to see the one thing this project is built around: that a gap is visible as a gap.
+The page shows the live values, the last 30 minutes per channel, the `<=3` biggest watt
+channels overlaid, the HVAC readings with the enums decoded to words, and the last six
+local hours aggregated with `sample_count` / expected / coverage / kWh beside every mean.
+
+**Why on the health port rather than a second one.** A second port means a second
+`-p`/`ports:` mapping in two deployment paths, a second thing to firewall and a second
+listener to supervise, for a page the same process is already able to serve. PLAN.md §5's
+"one container, one process" argues for one socket.
+
+**What it costs.** Nothing measurable, and deliberately so:
+
+- **Zero new dependencies.** `pyproject.toml` and `uv.lock` are untouched. The module
+  imports only the standard library (`sqlite3`, `json`, `threading`, `importlib.resources`)
+  plus `energy_capture` itself. The page is vanilla JS and inline SVG.
+- **Read-only, on its own connection.** The spool is opened `mode=ro` **and**
+  `PRAGMA query_only`, with a 2s busy timeout, and closed per request. A test asserts a
+  write through that handle fails. Nothing in `dashboard.py` writes anything, anywhere.
+- **Off the event loop.** `build_snapshot` runs in a worker thread
+  (`asyncio.to_thread`), because the loop serving this page is the loop running the poll
+  loops, the keepalive and the WebSocket reader. A browser refreshing every 5s must not be
+  able to stall collection — least of all when the uploader is failing and the spool is
+  growing, which is exactly when someone is watching.
+- **`/healthz` is unchanged, byte for byte.** The UI paths are matched before the status
+  paths and share no code with them; a test pins the existing behaviour of every path in
+  `DEFAULT_HEALTH_PATHS`, and every failure inside the dashboard becomes a JSON 500 on the
+  UI route rather than anything the probe can see.
+- **The kWh math is not reinvented.** `dashboard.hourly_rollup` mirrors `stages/rollup.sql`
+  step for step — bucket on `hour_start_utc`, exclude `DAY_GRAIN_METRICS`, no row for an
+  empty hour, `kwh` for watts only and `NULL` otherwise — and `dashboard.KWH_FORMULA`
+  quotes the formula verbatim so a future editor changing one notices the other. It is a
+  documented mirror, not a second definition: the SQL is DuckDB over Parquet with two
+  registered relations, this is live SQLite rows.
+
+**The route is unauthenticated, like `/healthz`.** It exposes the same status document
+plus measurements, and nothing else: no `.env` value, no token, no cache from
+`/data/tokens`. That was checked by diffing the served JSON against every value in `.env`
+and every field of both token caches — only the HVAC equipment serial (already the
+`device_id` of every Bryant row) and the timezone name appear. Bind the port to the LAN
+you trust, exactly as for `/healthz`.
+
+**One operational warning learned the hard way.** SQLite's shared-memory locking is not
+coherent across a VM or network-filesystem boundary. `deploy/`'s bind mount makes
+`data/spool.db` visible on the Mac, but reading it **from the host while the container is
+writing it** — including with `mode=ro`, which still writes the `-shm` WAL index — can
+report `database disk image is malformed`, and can cause it. Read the spool from inside
+the container, or use `/ui/data`, which is served by the process that owns the file. The
+snapshot builder now says so in the error it puts on the page.
+
 ---
 
 # Status — what is done, and what has never been executed

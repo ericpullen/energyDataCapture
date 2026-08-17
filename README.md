@@ -478,6 +478,19 @@ unhealthy, because in `hybrid` the REST fallback is still landing rows and an un
 container would be a false alarm; read the `leviton_ws` section for the socket's own
 state.
 
+**`GET /ui` — the live dashboard**, on the same port (`http://localhost:8080/ui`). Open it
+to watch the data arrive instead of waiting for it to reach S3: latest value per channel
+with a 30-minute sparkline, the three biggest watt channels overlaid, the HVAC readings
+with `mode` / `fan` / `stage` decoded to words, and the last six local hours aggregated —
+mean, `sample_count` / expected, coverage and kWh, with **no row at all** for an hour that
+collected nothing. Lines **break** across a gap and the gap is shaded; a reading of 0 (the
+load was off) is drawn and worded differently from an absent sample (the collector was
+down). `GET /ui/data` is the same snapshot as JSON if you would rather read it with `jq`.
+It is one self-contained HTML file — no framework, no CDN, no external asset, so it works
+with the network unplugged — it opens the spool **read-only**, and it adds no dependency
+(DEVIATIONS.md #164). Like `/healthz`, it is unauthenticated: expose the port only to a
+network you trust.
+
 Inside `energycap run` there is one asyncio process hosting the poll loops, the Leviton
 bandwidth keepalive (`PUT {"bandwidth": 1}` every 50s, never 0), the Leviton WebSocket
 subscriber and its watchdog, a small scheduler, and the health server. The keepalive is

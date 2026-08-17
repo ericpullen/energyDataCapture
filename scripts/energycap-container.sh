@@ -427,6 +427,38 @@ cmd_run() {
     -p "${port}:${port}"
   )
 
+  # The blackstart inventory is the source of truth for circuit LABELS (PLAN.md
+  # §9), and it lives outside this repo — so inside the container the path in
+  # .env does not exist and every blackstart-labelled channel degrades to its
+  # raw channel_id ("breaker_p19" instead of "Water heater"). Measured, not
+  # theorised: the dashboard reported `blackstart inventory not joined
+  # (DimBuildError)` on the first containerised run.
+  #
+  # Mount it read-only at a fixed in-container path and point the setting at it.
+  # Read-only because this process has no business writing the inventory, and
+  # because a bind mount of someone else's repo should not be writable by us.
+  local inventory=""
+  inventory=$(sed -n 's/^[[:space:]]*BLACKSTART_INVENTORY_PATH[[:space:]]*=[[:space:]]*\(.*\)$/\1/p' \
+                "${ENV_FILE}" 2>/dev/null | tail -n 1)
+  inventory=${inventory%%[[:space:]]}
+  case "${inventory}" in "~/"*) inventory="${HOME}/${inventory#\~/}" ;; esac
+
+  # NOTE: container 1.2.2 cannot bind-mount a single FILE — `--mount` on a file
+  # fails with "path '...' is not a directory" (Docker allows it; this does not).
+  # So mount the containing DIRECTORY read-only and point at the file inside it.
+  if [ -n "${inventory}" ] && [ -f "${inventory}" ]; then
+    local inv_dir inv_file
+    inv_dir=$(cd "$(dirname "${inventory}")" && pwd)
+    inv_file=$(basename "${inventory}")
+    args+=( --mount "type=bind,source=${inv_dir},target=/inventory,readonly" )
+    args+=( -e "BLACKSTART_INVENTORY_PATH=/inventory/${inv_file}" )
+  elif [ -n "${inventory}" ]; then
+    warn "BLACKSTART_INVENTORY_PATH in ${ENV_FILE} does not point at a file on this host,
+  so it cannot be mounted. Channels that take their label from the blackstart
+  inventory will fall back to their raw channel_id (e.g. 'breaker_p19' rather
+  than 'Water heater'). Everything else is unaffected."
+  fi
+
   if [ "${detach}" -eq 1 ]; then
     # Interactive convenience ONLY. Never put --detach in the LaunchAgent: see
     # the comment on the foreground path below.

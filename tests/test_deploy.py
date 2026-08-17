@@ -181,3 +181,32 @@ def test_the_deployment_documents_do_not_overstate_what_was_proven() -> None:
         "verified end to end in production",
     ):
         assert overclaim not in deploy.lower(), f"deploy/README.md overclaims: {overclaim!r}"
+
+
+def test_the_blackstart_inventory_is_mounted_as_a_directory_not_a_file() -> None:
+    """container 1.2.2 cannot bind-mount a single file.
+
+    `--mount type=bind,source=<a file>` fails outright with "path '...' is not a
+    directory" — Docker allows it, this does not. Measured: the container exited
+    status 1 on first attempt. The wrapper therefore mounts the inventory's
+    parent directory read-only and points the setting at the file inside it.
+
+    Without the inventory, every blackstart-labelled channel degrades to its raw
+    channel_id ("breaker_p19" rather than "Water heater"), which is exactly the
+    semantic layer PLAN.md §9 exists to provide.
+    """
+    body = SCRIPT.read_text(encoding="utf-8")
+
+    assert "target=/inventory,readonly" in body, (
+        "the inventory must be mounted read-only at a directory target"
+    )
+    assert "BLACKSTART_INVENTORY_PATH=/inventory/" in body, (
+        "the in-container setting must point at the file inside the mounted dir"
+    )
+    # The file-target form is what failed; it must not come back.
+    assert "target=/inventory/montfort.json" not in body, (
+        "container 1.2.2 cannot bind-mount a single file — mount the directory"
+    )
+    # Read-only is deliberate: this process has no business writing someone
+    # else's inventory repo.
+    assert "readonly" in body
