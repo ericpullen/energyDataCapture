@@ -32,7 +32,7 @@ These are the correctness contract. Violating one is a bug even if every test pa
 
 ## Commands
 
-`uv` is not yet installed on this machine (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Docker is at `/usr/local/bin/docker`. Python 3.12.7 via pyenv.
+`uv` is installed at `~/.local/bin/uv` (add it to PATH). Python 3.12.7 via pyenv. Docker is at `/usr/local/bin/docker` but **has no running daemon here**, and Apple's `container` CLI is **not installed** — which is why neither image has ever been built.
 
 ```bash
 uv sync                          # install deps from pyproject.toml
@@ -49,9 +49,15 @@ uv run energycap backfill --start ... --end ...
 uv run energycap build-dim
 uv run energycap create-glue-tables
 
-docker compose up -d && docker compose logs -f
+# Two container runtimes, one Dockerfile. Neither has ever been built here.
+./scripts/energycap-container.sh build           # Apple `container` — preferred on the Mac Mini
+./scripts/energycap-container.sh run             # foreground; launchd KeepAlive supervises it
+docker compose up -d && docker compose logs -f   # Docker — fallback, and required off Apple silicon
 curl localhost:8080/healthz
 ```
+
+`deploy/README.md` is the deployment guide for the Apple `container` + launchd path
+(no compose, no restart policy, no healthcheck there — see DEVIATIONS.md #163).
 
 Every scheduled stage is also a standalone CLI command over an arbitrary date range — keep it that way when adding stages.
 

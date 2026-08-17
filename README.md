@@ -154,7 +154,9 @@ measurement would be worse than seeing a null label.
 
 ## Setup
 
-Prerequisites: [`uv`](https://astral.sh/uv), Docker, and an S3 bucket. Python 3.12+.
+Prerequisites: [`uv`](https://astral.sh/uv), a container runtime, and an S3 bucket. Python
+3.12+. Two runtimes are supported and the choice is made for you by the hardware — see
+[Running it](#running-it-apple-container-or-docker) below.
 
 ```bash
 git clone <this repo> && cd energyDataCapture
@@ -182,7 +184,8 @@ $EDITOR config/channel_map.json                 # paste the hub ids over the PLA
 uv run energycap build-dim --dry-run            # check the join before writing anything
 uv run energycap build-dim                      # -> energy/dim_channel/dim_channel.parquet
 uv run energycap create-glue-tables             # Athena tables + their comments
-docker compose up -d && docker compose logs -f  # the collector itself
+./scripts/energycap-container.sh build          # the image (Apple container; see below)
+./scripts/energycap-container.sh run            # the collector itself, in the foreground
 curl localhost:8080/healthz
 ```
 
@@ -191,12 +194,42 @@ row: it prints the live hierarchy plus ready-to-paste `channel_map.json` entries
 anything not yet mapped, and writes `config/live_channels.json` beside the map so
 `build-dim` can warn about unmapped channels without a second live call.
 
-> **Unproven, honestly:** the Docker image in this repo has **never been built**, and
-> nothing here has ever written to AWS. `discover` and `poll --once` have run against the
-> live Leviton and Carrier clouds (2026-08-17 — see
+> **Unproven, honestly:** the image in this repo has **never been built — by either
+> runtime**, and nothing here has ever written to AWS. `discover` and `poll --once` have
+> run against the live Leviton and Carrier clouds (2026-08-17 — see
 > [Settled by the first live run](#settled-by-the-first-live-run-2026-08-17)); every stage
 > after the spool has not. The test suite itself stays fixture-driven, with an autouse
 > guard that refuses any non-loopback socket. See [Known-unproven](#known-unproven).
+
+### Running it: Apple `container` or Docker
+
+One `Dockerfile`, shared. Two ways to run what it builds:
+
+| | Apple [`container`](https://github.com/apple/container) + launchd | Docker + compose |
+|---|---|---|
+| when | **Preferred on this Apple-silicon Mac Mini** | Fallback here, and **required** on Intel Macs and Linux |
+| build | `./scripts/energycap-container.sh build` | `docker compose build` |
+| run | `./scripts/energycap-container.sh run` | `docker compose up -d` |
+| supervision | launchd `KeepAlive` ([`deploy/com.duckbillhq.energycap.plist`](deploy/com.duckbillhq.energycap.plist)) | `restart: unless-stopped` |
+| `/data` | host bind mount (`./data`) — spool readable from the Mac | named volume `energycap-data` |
+| healthcheck | **none** — `container` has no such concept; poll `/healthz` yourself | `healthcheck:` in compose |
+| log rotation | **none** — launchd appends forever; add a `newsyslog` stanza | `json-file`, 10 MB × 5 |
+
+Apple's `container` has no compose, no restart policy, no healthcheck and no
+`depends_on`, so the deployment is a wrapper script plus a LaunchAgent rather than a
+compose file. **[`deploy/README.md`](deploy/README.md) is the full guide** — installation,
+the launchd commands, the line-by-line table of what compose gave us and what replaces
+it, the uid trap on the bind mount, and why an unattended reboot needs auto-login.
+
+The two paths do **not** share state (bind mount vs. named volume) and must never run at
+the same time: that is two collectors, two spools, and both hammering the same clouds.
+
+`docker-compose.yml` is unchanged, still correct, and still the only option off Apple
+silicon.
+
+**Neither path has ever been built or run**, here or anywhere: there is no `container`
+CLI and no Docker daemon on the development machine. See
+[Known-unproven](#known-unproven) #2.
 
 ---
 
@@ -403,6 +436,19 @@ honest, and it is what makes `ws` a measurement rather than a convenience.
 
 ## Operating it
 
+Under Apple `container` + launchd on the Mac Mini
+([`deploy/README.md`](deploy/README.md) has the rest):
+
+```bash
+./scripts/energycap-container.sh status         # subsystem, container, IP, /healthz, data dir
+./scripts/energycap-container.sh logs -f        # structured JSON, one object per line
+curl -s localhost:8080/healthz | jq
+launchctl kickstart -k gui/$(id -u)/com.duckbillhq.energycap   # restart
+launchctl bootout     gui/$(id -u)/com.duckbillhq.energycap    # stop for real
+```
+
+Under Docker (the fallback, and the only path off Apple silicon):
+
 ```bash
 docker compose up -d
 docker compose logs -f            # structured JSON, one object per line
@@ -410,9 +456,17 @@ curl -s localhost:8080/healthz | jq
 docker compose restart            # the SQLite spool on /data survives; nothing is lost
 ```
 
+Either way the SQLite spool on `/data` survives a restart, so nothing is lost. **Under
+launchd, `energycap-container.sh stop` is not a stop** — `KeepAlive` starts it straight
+back up, which is the whole point of it; `launchctl bootout` is the real one.
+
 `GET /healthz` (also `/health`, `/`, `/status.json`) serves `/data/status.json` plus a
 derived `health` block, and returns **503** when a poller's last success is older than
-3× its poll interval. That is also the container's healthcheck. `status.json` is the
+3× its poll interval. Under Docker that is also the container's healthcheck; **under
+Apple `container` nothing polls it** — the runtime has no healthcheck concept, and
+`KeepAlive` only ever sees the process die, so a wedged-but-alive collector goes unnoticed
+until someone looks (`deploy/README.md` sketches the watchdog that would close this).
+`status.json` is the
 operational dashboard: per-source `last_success_utc` / `consecutive_failures`, the last
 hour uploaded, the last day compacted and rolled, the spool's pending row count, and the
 `leviton_ingest` / `leviton_ws` sections described in
@@ -1329,9 +1383,17 @@ entirely offline; beyond the first live poll above, most of the *world* is still
    cycle" is still outstanding. The suite itself remains fixture-driven and offline —
    `tests/conftest.py` installs an autouse guard that refuses any non-loopback socket, so
    no test has ever seen a live response.
-2. **The Docker image has never been built here**, so `docker compose up -d` is unproven —
-   including the build-time steps that bake in DuckDB's `httpfs` extension and assert the
-   `America/Kentucky/Louisville` timezone resolves inside the image.
+2. **The image has never been built here under EITHER runtime**, so neither `docker
+   compose up -d` nor `./scripts/energycap-container.sh run` is proven. There is no
+   Docker daemon and no Apple `container` CLI on this machine, so `container build` and
+   `docker build` have both never run — including the build-time steps that bake in
+   DuckDB's `httpfs` extension and assert the `America/Kentucky/Louisville` timezone
+   resolves inside the image. The Apple `container` path adds its own unverified surface
+   on top: the wrapper's flags come from Apple's published command reference rather than
+   from a successful run, the LaunchAgent has never been loaded, and whether uid 10001
+   inside the VM can write a host bind mount over virtiofs is the single most likely
+   thing to break. Every assumption is tabulated in
+   [`deploy/README.md`](deploy/README.md).
 3. **The Carrier status field map still has UNVERIFIED entries.** Fields observed in a
    real captured response are distinguished in the source from fields that merely exist in
    the introspected schema (`damperposition`, `occupancy`, `zones[].name`, parts of the

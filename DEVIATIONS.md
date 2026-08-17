@@ -2479,6 +2479,115 @@ at 0.0.
 
 ---
 
+# Step 10: deployment on Apple's `container` (#163)
+
+## 163. PLAN.md §5 says "One Docker container (compose, `restart: unless-stopped`)" — there is now a second, non-compose path
+
+**The spec.** PLAN.md §5 opens: *"One Docker container (compose, `restart:
+unless-stopped`), one long-running process (`energycap run`)"*, and §16's definition of
+done names `docker compose up` on the Mac Mini. This is not a §2 locked decision, but it
+is a §5 statement about the runtime, so it is recorded here rather than quietly diverged
+from.
+
+**What changed, and why.** The deployment target is an Apple-silicon Mac Mini, and Apple
+shipped [`container`](https://github.com/apple/container) v1.0.0 on 2026-06-09: a native,
+lightweight, per-container-VM runtime that is the better fit for this machine than Docker
+Desktop. It builds this repo's `Dockerfile` unchanged. So there are now **two runtimes,
+one image**:
+
+- `scripts/energycap-container.sh` + `deploy/com.duckbillhq.energycap.plist` — Apple
+  `container` supervised by launchd. **Preferred on this Mac.**
+- `docker-compose.yml` — **unchanged, still correct, still supported**, and still the
+  **only** option on an Intel Mac or a Linux box. Nothing was removed or deprecated.
+
+`Dockerfile` was not modified either. `init: true` has no equivalent under `container`
+and needs none (`runtime.py` installs its own SIGTERM/SIGINT handlers and spawns no
+children to reap); `HEALTHCHECK`, `EXPOSE` and `STOPSIGNAL` are inert under a runtime with
+no healthcheck concept rather than wrong; and the health server already binds `0.0.0.0`,
+so `-p` reaches it.
+
+**Why compose could not simply be carried over.** Apple's `container` has **no compose,
+no `restart:` policy of any kind, no healthcheck, and no `depends_on`.** Each of those is
+a real loss, and each one is either replaced or admitted:
+
+| `docker-compose.yml` | Replacement under `container` |
+|---|---|
+| `restart: unless-stopped` | **launchd `KeepAlive`** (plain `<true/>`: restart on any exit) with `ThrottleInterval 30`. Semantics differ: compose's `unless-stopped` remembers a manual stop; KeepAlive does not, so `launchctl bootout`/`disable` is the manual stop. |
+| `healthcheck:` | **Nothing automatic — an admitted regression.** `/healthz` still returns 503 when a poller's last success is older than 3× its interval (§11), but nothing polls it and nothing acts on it. KeepAlive only ever sees the process *die*, so a wedged-but-alive collector goes unnoticed until someone looks. `deploy/README.md` sketches the `StartInterval` watchdog that would close this; it is not built. |
+| `stop_grace_period: 30s` | **`container stop --time 30`**, issued from a TERM/INT trap in the wrapper, plus **`ExitTimeOut 45`** in the plist so launchd's default 20s does not SIGKILL the wrapper mid-shutdown. |
+| `init: true` | Nothing needed — see above. |
+| `depends_on` | Not used; there is one service by design (§5: no database, no queue, no sidecar). |
+| named volume `energycap-data` | **A host bind mount** (`-v <repo>/data:/data`). Upside: `spool.db` is directly readable from the Mac. Downside: the uid trap below. |
+| `env_file:` / `ports:` | `--env-file` / `-p`, both supported. |
+| `logging: json-file, max-size 10m, max-file 5` | **Not replaced — a real regression.** launchd appends to `StandardOutPath` forever. `deploy/README.md` gives a `/etc/newsyslog.d/energycap.conf` stanza, but installing it needs `sudo` and is an operator action, not something the wrapper can do. |
+
+**The supervised process runs the container in the FOREGROUND, and that is
+load-bearing.** launchd supervises a *process*, not a container. `--detach` in
+`ProgramArguments` would make `container run` return instantly, the wrapper exit 0,
+KeepAlive restart it, and the result is a throttled restart loop with several collectors
+racing over one SQLite spool — not a supervisor. It is written down in the script, the
+plist and `deploy/README.md`.
+
+**It is a LaunchAgent, not a LaunchDaemon,** because the `container` subsystem is itself a
+per-user launchd service (`com.apple.container.*`): root would see a different subsystem
+that knows nothing about the image. The consequence is that the collector only starts
+once the owning user has logged in, so an unattended Mac Mini needs auto-login (**which
+FileVault makes impossible**), `pmset autorestart 1` and `pmset sleep 0`. That trade —
+at-rest disk encryption against unattended restart — is the operator's to make
+consciously; `.env` and the token caches live on that disk.
+
+**Three failure modes this deployment has that compose did not**, all handled in the
+wrapper and documented:
+
+1. **The name-collision wedge.** `--rm` should drop the container record, but an
+   ungraceful shutdown (launchd's `ExitTimeOut` expiring, a power cut) can leave the name
+   taken. Compose restarted the *same* container; KeepAlive issues a fresh
+   `container run` every time, so one stale record would block **every** restart, once per
+   `ThrottleInterval`, forever — a permanent data outage from a power cut. `run` now
+   tries `container stop`, then whichever of `delete`/`rm`/`remove` **`container --help`
+   actually advertises**. That subcommand is not in the reference this was built against,
+   so it is probed, never assumed; nothing invented is ever on an executable path.
+2. **The uid trap.** The image runs as uid 10001. Docker's named volume sidestepped
+   ownership entirely; a virtiofs bind mount does not, and how it maps uids is
+   **unverified**. Worse, `data/status.json` and `data/tokens/` are mode 600 owned by the
+   host user after a host-side `discover`/`poll --once` (cardinal rule 8), which uid 10001
+   cannot touch. The wrapper checks and **warns loudly rather than refusing to start** —
+   the mapping may well be permissive, and hard-failing on a guess would be worse.
+3. **`--env-file` promises less than Docker's.** The whole documented contract is
+   "key=value format, ignores `#` comments and blank lines": no quote stripping, no
+   trailing-whitespace trimming, no `${VAR}` interpolation. A `TZ_LOCAL` with an inline
+   comment would silently mis-assign every LOCAL-date partition (cardinal rule 4). The
+   committed `.env.example` is already clean; the wrapper lints a hand-edited `.env` on
+   every run and reports **key names and line numbers only, never values**.
+
+**Preflight severity is deliberately split.** A non-zero exit from
+`container system status` is fatal; output that merely *looks* stopped only warns. We have
+never seen what that command prints, and a wrong guess about its wording, made fatal, would
+turn a healthy machine into a permanent outage under KeepAlive. The real `container`
+command a moment later gets to be the authority.
+
+**`plutil -lint` is not an XML check, and it hid a real defect.** The template passed
+`plutil -lint` cleanly while its comments still contained `--`, which the XML
+specification forbids inside a comment. Apple's parser is lenient; Python's `plistlib` and
+`xmllint` are not, and either rejects the whole file. The comments now spell the flags out
+in words, and `tests/test_deploy.py` parses the template with `plistlib` precisely so a
+lenient linter cannot certify a malformed file again. That file is the only automated
+check on any of this: `bash -n` on the wrapper, the strict plist parse, and the two
+mistakes that would otherwise be silent — a detach flag reaching `ProgramArguments`, and an
+`ExitTimeOut` that does not outlive the wrapper's 30-second graceful stop.
+
+**None of it has been executed.** There is no `container` CLI and no Docker daemon on this
+machine, so **the image has never been built by either runtime** and the LaunchAgent has
+never been loaded. What was verified is only what could be: `bash -n`, `plutil -lint`, and
+every host-side code path driven end to end against a stub `container` on `PATH` —
+preflight failures, the uid warning, the `.env` lint (including a decoy file with a quoted
+secret, which was never printed), `HEALTH_PORT` parsing, argv boundaries through a data
+directory path containing a space, all three name-collision recovery paths, and
+foreground SIGTERM → `container stop --time 30` → exit 0. `deploy/README.md` leads with a
+table of every assumption that is still a guess.
+
+---
+
 # Status — what is done, and what has never been executed
 
 **This is the honest final state. PLAN.md §16's definition of done is roughly half met.**
@@ -2511,10 +2620,13 @@ set and the backoff ladder describe what we want rather than what happened, and
 the load-bearing ones were verified by reverting them and are pinned end-to-end at the
 rows; how they compose is measured rather than assumed (#162).
 
-`uv run pytest -q` → **1382 passed, 0 skipped**, in ~25 s, with no network and no AWS.
+`uv run pytest -q` → **1394 passed, 0 skipped**, in ~25 s, with no network and no AWS.
+(It was 1382 before step 10; `tests/test_deploy.py` adds the 12 — the only automated check
+on the deployment assets, and the file that caught the malformed XML comment in #163.)
 (It was 1221 passed / 1 skipped at the end of step 7, 1222 / 0 before step 8, 1280 / 0
-after it, and 1359 / 0 at the end of step 9's first pass; the WebSocket ingester, its
-reconciliation tests and #159–#162's regression pins account for the rest.)
+after it, 1359 / 0 at the end of step 9's first pass and 1382 / 0 after #159–#162; the
+WebSocket ingester, its reconciliation tests and those regression pins account for the
+rest.)
 
 ## Never executed — the outer half, minus one live poll
 
@@ -2546,9 +2658,17 @@ is "probably fine".
 - **No AWS call of any kind.** No S3 write, no atomic temp-key→copy→delete, no read-back
   row-count verify, no Glue `CreateTable`, no Athena query, no DynamoDB `Scan`. The Glue
   tests drive an in-process fake (#100); `moto`'s Glue backend is unusable here.
-- **The Docker image has never been built and `docker compose up` has never run** — including
-  the build steps that bake in DuckDB's `httpfs` extension and assert that
-  `America/Kentucky/Louisville` resolves inside the image (#48).
+- **THE IMAGE HAS NEVER BEEN BUILT UNDER EITHER RUNTIME.** Not by `docker build`, not by
+  `container build`: there is no Docker daemon on this machine and no Apple `container`
+  CLI either (#163). So `docker compose up` has never run, `scripts/energycap-container.sh`
+  has never run, and `deploy/com.duckbillhq.energycap.plist` has never been loaded —
+  including the build steps that bake in DuckDB's `httpfs` extension and assert that
+  `America/Kentucky/Louisville` resolves inside the image (#48). The `container` path adds
+  its own unverified surface on top: the wrapper's flags come from Apple's published
+  command reference rather than a successful run, and whether uid 10001 can write a host
+  bind mount over virtiofs is the single likeliest thing to break (#163). `bash -n`,
+  `plutil -lint` and a stub-`container` exercise of every host-side path are all that has
+  actually been proven.
 - **No end-to-end cycle against a real bucket.** §16's
   `poll`→`upload`→`compact-daily`→`rollup`→`build-dim`→`create-glue-tables` has never been
   run against anything but local temp directories.
@@ -2562,9 +2682,31 @@ is "probably fine".
 
 Do these deliberately, and capture evidence before freezing anything.
 
-1. **`docker compose build` and `docker compose up -d`.** The image, the `httpfs` bake, the
-   timezone inside the container, the `/data` mount, and `curl localhost:8080/healthz`.
-   This is the first thing that can fail, and nothing downstream matters until it passes.
+1. **Build the image and start the collector. THE IMAGE HAS NEVER BEEN BUILT UNDER EITHER
+   RUNTIME** — no `docker build`, no `container build`, ever (#163). This is the first
+   thing that can fail, and nothing downstream matters until it passes. Whichever runtime
+   you use, what is on trial here is the image, the `httpfs` bake, the timezone inside the
+   container, the `/data` mount, and `curl localhost:8080/healthz`.
+
+   On this Apple-silicon Mac Mini, the preferred path (`deploy/README.md`):
+
+   ```bash
+   container system start
+   ./scripts/energycap-container.sh build
+   ./scripts/energycap-container.sh run          # foreground, by hand, before launchd
+   ```
+
+   Then, in order: confirm `.dockerignore` was honoured and **`/app/.env` is not in the
+   image**; expect the uid trap (#163) on the bind mount (`permission denied` or
+   `unable to open database file` on `/data/spool.db`) and fix ownership before concluding
+   anything else is broken; only then install the LaunchAgent and prove it survives a real
+   reboot with `container system status` running and `/healthz` answering 200. Every flag
+   in that wrapper came from Apple's published command reference, not from a run — read
+   its output, do not trust it.
+
+   Off Apple silicon, or as the fallback here: `docker compose build && docker compose up -d`.
+   Do **not** run both paths at once: they use different storage (named volume vs. bind
+   mount), so that is two collectors, two spools, and both polling the same clouds.
 2. ~~**`energycap discover --dump dump.json` (mode 0600).**~~ **DONE 2026-08-17.** It
    answered the Leviton questions at once — the **real hub ids** (now in
    `config/channel_map.json`), the CT `channel` numbers and the breaker `position`s — and
