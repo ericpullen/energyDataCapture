@@ -154,10 +154,30 @@ def test_the_readme_presents_both_runtimes() -> None:
     assert "deploy/README.md" in readme
 
 
-def test_the_deployment_documents_do_not_claim_this_has_been_run() -> None:
-    """CLAUDE.md rule: never overstate. The image has never been built at all."""
+def test_the_deployment_documents_do_not_overstate_what_was_proven() -> None:
+    """CLAUDE.md rule: never overstate.
+
+    The image WAS built and run on Apple ``container`` 1.2.2 on 2026-08-17, so the
+    original blanket "never been run" caveat is now itself the overstatement. What
+    must not rot is the boundary: the supervision story that replaces compose's
+    ``restart:`` — the LaunchAgent, KeepAlive, reboot survival — is still entirely
+    unexercised, and Docker's build is now the untested one. If a future edit
+    claims either has been proven, this fails.
+    """
     deploy = " ".join(DEPLOY_README.read_text(encoding="utf-8").split())
-    assert "has ever been run" in deploy, "deploy/README.md no longer opens with the caveat"
-    assert "never been built by either runtime" in deploy, (
-        "deploy/README.md no longer says the image has never been built at all"
+
+    # The LaunchAgent is the load-bearing unproven piece; it must stay flagged.
+    assert "LaunchAgent has never been loaded" in deploy, (
+        "deploy/README.md no longer admits the LaunchAgent is unexercised"
     )
+    # Docker is now the untested path, and saying so is the honest inversion.
+    assert "docker build" in deploy.lower() and "never" in deploy, (
+        "deploy/README.md no longer records that the Docker build is unproven"
+    )
+    # And it must not have swung the other way into claiming a full success.
+    for overclaim in (
+        "fully tested in production",
+        "proven in production",
+        "verified end to end in production",
+    ):
+        assert overclaim not in deploy.lower(), f"deploy/README.md overclaims: {overclaim!r}"

@@ -194,12 +194,13 @@ row: it prints the live hierarchy plus ready-to-paste `channel_map.json` entries
 anything not yet mapped, and writes `config/live_channels.json` beside the map so
 `build-dim` can warn about unmapped channels without a second live call.
 
-> **Unproven, honestly:** the image in this repo has **never been built — by either
-> runtime**, and nothing here has ever written to AWS. `discover` and `poll --once` have
-> run against the live Leviton and Carrier clouds (2026-08-17 — see
+> **Unproven, honestly:** nothing here has ever written to AWS. The collector itself has
+> run against the live Leviton and Carrier clouds, both natively and **inside the
+> container** (2026-08-17 — see
 > [Settled by the first live run](#settled-by-the-first-live-run-2026-08-17)); every stage
-> after the spool has not. The test suite itself stays fixture-driven, with an autouse
-> guard that refuses any non-loopback socket. See [Known-unproven](#known-unproven).
+> after the spool has not. `docker build` has still never run, and the LaunchAgent has
+> never been loaded. The test suite itself stays fixture-driven, with an autouse guard
+> that refuses any non-loopback socket. See [Known-unproven](#known-unproven).
 
 ### Running it: Apple `container` or Docker
 
@@ -1383,16 +1384,20 @@ entirely offline; beyond the first live poll above, most of the *world* is still
    cycle" is still outstanding. The suite itself remains fixture-driven and offline —
    `tests/conftest.py` installs an autouse guard that refuses any non-loopback socket, so
    no test has ever seen a live response.
-2. **The image has never been built here under EITHER runtime**, so neither `docker
-   compose up -d` nor `./scripts/energycap-container.sh run` is proven. There is no
-   Docker daemon and no Apple `container` CLI on this machine, so `container build` and
-   `docker build` have both never run — including the build-time steps that bake in
-   DuckDB's `httpfs` extension and assert the `America/Kentucky/Louisville` timezone
-   resolves inside the image. The Apple `container` path adds its own unverified surface
-   on top: the wrapper's flags come from Apple's published command reference rather than
-   from a successful run, the LaunchAgent has never been loaded, and whether uid 10001
-   inside the VM can write a host bind mount over virtiofs is the single most likely
-   thing to break. Every assumption is tabulated in
+2. **The image is built and runs under Apple `container`; Docker is now the untested
+   path.** On 2026-08-17 the image was built with `container build` (1.2.2, macOS 27,
+   arm64) and run via `./scripts/energycap-container.sh run`: 12 poll cycles, both
+   sources, zero errors, `/healthz` answering 200 on the published port, the WebSocket
+   connecting from inside the container, rows landing in the host's `data/spool.db`
+   through the bind mount, and a clean SIGTERM drain. The build-time steps that bake in
+   DuckDB's `httpfs` and assert `America/Kentucky/Louisville` both passed in-image, and
+   `.dockerignore` is honoured (no `.env` in the image). The uid-over-virtiofs question —
+   previously flagged as the most likely thing to break — is **answered**: virtiofs does
+   not enforce guest ownership, so uid 10001 writes a host-owned mount unchanged.
+   What is still unproven here: **`docker build` has never run** (no daemon on this
+   machine), and **the LaunchAgent has never been loaded**, so KeepAlive, the throttle
+   and reboot survival — the entire supervision story that replaces compose's
+   `restart:` — remain untested. Details and the re-check triggers are in
    [`deploy/README.md`](deploy/README.md).
 3. **The Carrier status field map still has UNVERIFIED entries.** Fields observed in a
    real captured response are distinguished in the source from fields that merely exist in
@@ -1427,23 +1432,28 @@ entirely offline; beyond the first live poll above, most of the *world* is still
    enforced for them is the part that was wrong before — a test fails if any example, in
    either dialect, cuts a bucket key out of the naive `ts_local` wall clock or hardcodes a
    24-hour day.
-7. **The Leviton WebSocket has never been connected.** Everything in
-   [How Leviton values are kept fresh](#how-leviton-values-are-kept-fresh) is built and
-   fully tested offline against a fake transport — no socket has ever been opened from
-   this environment, and `tests/conftest.py` would refuse one. So the *diagnosis* is
-   measured (the frozen REST reads and the A/B keepalive probe are real numbers from the
-   real hubs) but the *cure* is not. Specifically unproven: whether the bandwidth-1 state
-   flood actually arrives over the socket for these hubs; whether per-breaker
-   subscriptions are genuinely required on firmware 2.1.2, or whether CT and breaker data
-   really do ride the hub subscription as one reference claims; what close code the
-   60-minute hard kill delivers (nobody in the ecosystem has recorded it); whether
-   explicit nulls ever arrive in a delta; the real message volume at ~40 channels; and —
-   the question that decides whether any of this worked — **whether the frozen channels
-   finally move, and at what cadence**. `hybrid` is the default precisely because its
-   worst case is exactly today's behaviour. Read `leviton_ws.objects` (per-field last-update ages),
-   `leviton_ws.sync_mode`, `leviton_ws.hub_silence_s` (**both** hubs must be moving) and
-   `leviton_ingest.last_reconcile_drift` in `status.json` before publishing any freshness
-   claim, and see [`DEVIATIONS.md`](DEVIATIONS.md) #144 and its status section.
+7. **The Leviton WebSocket connects and helps, but only partly.** Connected on the first
+   attempt on 2026-08-17 (natively and from inside the container): handshake accepted, 7
+   objects subscribed, ~0.35 messages/sec, both hubs chattering, and the fallback ladder
+   behaved as designed (first cycle `rest_fallback` / `awaiting_initial_sync`, then
+   `value_source: ws`). One channel went from frozen to genuinely live — Panel A's grid
+   CT produced **11 distinct values across 11 polls** where REST had returned one value
+   for 46 consecutive reads, at finer precision than REST reports.
+   **But 10 of 12 channels were still frozen**, with `sync_mode: timeout` and
+   `awaiting_sync` never reaching 0 — i.e. the bandwidth-1 flood does not establish every
+   subscribed object. Two consequences worth knowing before trusting the data: rows for
+   those channels are labelled `value_source: ws` while actually carrying REST-seeded
+   values, because the seed legitimately establishes state (`fields_evicted: 0`), so the
+   row label is coarser than reality — only `leviton_ws.objects` per-field ages can tell
+   them apart; and the next thing to try is the reference client's third keepalive,
+   `GET /apiversion` every 10s (DEVIATIONS.md #155), which is documented but not shipped.
+   Still unproven: the 55-minute proactive reconnect (runs so far have been minutes, not
+   hours), what close code the 60-minute hard kill delivers, whether explicit nulls ever
+   arrive in a delta, and the real message volume at ~40 channels. `hybrid` remains the
+   default precisely because its worst case is exactly the old behaviour. Read
+   `leviton_ws.objects`, `leviton_ws.sync_mode`, `leviton_ws.hub_silence_s` (**both** hubs
+   must be moving) and `leviton_ingest.last_reconcile_drift` before publishing any
+   freshness claim, and see [`DEVIATIONS.md`](DEVIATIONS.md) #144 and its status section.
 8. Other open questions the rest of the first live run should settle — Okta token
    lifetimes and whether the refresh token rotates, whether the spoofed
    `Origin`/`Referer` headers are load-bearing, and the contents of the legacy DynamoDB

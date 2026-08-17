@@ -117,22 +117,22 @@ require_data_dir() {
   mkdir -p "${DATA_DIR}/logs" 2>/dev/null || true
 }
 
-# THE UID TRAP.
+# THE UID TRAP — MEASURED 2026-08-17 on container 1.2.2, and it does NOT bite.
 #
-# The image runs as uid 10001. Under Docker Desktop the host bind mount is
-# permissive about ownership and this never comes up. Apple's container maps the
-# host directory in over virtiofs, and whether uid 10001 inside the VM can write
-# files owned by your host uid is NOT something we have verified — nothing here
-# has ever been run.
+# The image runs as uid 10001, and the host data dir is owned by the host user
+# (uid 501, mode 755), so on a real filesystem uid 10001 could not write it.
+# Apple's container maps the directory in over virtiofs, which does NOT enforce
+# guest ownership: inside the container the mount presents as `drwxr-xr-x 8 0 0`
+# — owned by root, not by the host uid — and a `touch /data/...` as uid 10001
+# succeeds anyway. A full run then wrote spool.db, status.json and tokens/
+# through the mount with no chown of any kind.
 #
-# The symptom, if it bites: the container starts, then dies (or logs errors)
-# with "permission denied" or "unable to open database file" on
-# /data/spool.db, /data/status.json or /data/tokens/*.json.
-#
-# We check what we can check from the host and say so plainly rather than
-# letting it surface as a confusing SQLite error at 3am. This is a warning, not
-# a hard failure: the mapping may well be permissive, and refusing to start on
-# an unverified assumption would be worse than a loud heads-up.
+# So this is an informational NOTE, not a warning. It is kept because the
+# host-side facts it prints are the first thing you would want if the mapping
+# ever changes (a container release, a macOS release, an NFS or FileVault-backed
+# path, or a `--user`/`--uid` override), and because the symptom is otherwise a
+# confusing SQLite error at 3am: "permission denied" or "unable to open database
+# file" on /data/spool.db, /data/status.json or /data/tokens/*.json.
 
 # `stat` on a path that vanished mid-check must not take the whole script down
 # under `set -e` (and an empty mode would make $((8#)) a fatal arithmetic error).
@@ -167,12 +167,14 @@ check_data_writable() {
 
   [ -n "${complaint}" ] || return 0
 
-  warn "${DATA_DIR} may not be writable by the container's non-root user (uid ${CONTAINER_UID}):
-    ${complaint}
-  If the container dies with 'permission denied' or 'unable to open database file'
-  on /data/spool.db, /data/status.json or /data/tokens/*.json, hand it over:
+  info "note: ${DATA_DIR} is not owned by the container's uid ${CONTAINER_UID} (${complaint}).
+  That is expected and fine: virtiofs presents the mount as root-owned inside the
+  container and does not enforce guest ownership, so uid ${CONTAINER_UID} writes it anyway
+  (measured on container 1.2.2). Nothing to do.
+  Only if the container ever DOES die with 'permission denied' or 'unable to open
+  database file' on /data/spool.db, /data/status.json or /data/tokens/*.json:
       sudo chown -R ${CONTAINER_UID}:${CONTAINER_GID} ${DATA_DIR}
-  (you will then need sudo to read the spool from the host), or, more bluntly:
+  (you would then need sudo to read the spool from the host), or, more bluntly:
       chmod -R a+rwX ${DATA_DIR}
   See deploy/README.md, 'The uid trap'."
 }
@@ -189,15 +191,36 @@ health_port() {
 }
 
 # SPOOL_DIR must be /data inside the container (it is the mount point), which is
-# what docker-compose.yml pins with its `environment:` block. We pass -e as well,
-# but the precedence of -e over --env-file is not something we have verified, so
-# say something if the env file disagrees. Prints no value, only the fact.
+# what docker-compose.yml pins with its `environment:` block.
+#
+# MEASURED 2026-08-17 on container 1.2.2: `-e SPOOL_DIR=/data` DOES take
+# precedence over the same key in --env-file. A .env carrying the host-side
+# `SPOOL_DIR=./data` (which is what you want for `uv run energycap run`) was
+# overridden, and the container logged "spool": "/data/spool.db". So a
+# host-shaped SPOOL_DIR in .env is normal and correct, and warning about it on
+# every start was noise about a non-problem.
+#
+# The check is kept for the one case that IS a problem: a value that is neither
+# /data nor an obviously host-side path would mean somebody intended something
+# we are silently ignoring. Prints the key and the fact, never the value.
 warn_on_spool_dir() {
-  if grep -q '^[[:space:]]*SPOOL_DIR[[:space:]]*=' "${ENV_FILE}" 2>/dev/null \
-     && ! grep -q '^[[:space:]]*SPOOL_DIR[[:space:]]*=[[:space:]]*/data[[:space:]]*$' "${ENV_FILE}" 2>/dev/null; then
-    warn "${ENV_FILE} sets SPOOL_DIR to something other than /data. Inside the
-  container /data is the mount point and nothing else is persisted; set it to /data."
-  fi
+  local raw
+  raw=$(sed -n 's/^[[:space:]]*SPOOL_DIR[[:space:]]*=[[:space:]]*\(.*\)$/\1/p' \
+          "${ENV_FILE}" 2>/dev/null | tail -n 1)
+  [ -n "${raw}" ] || return 0
+
+  # Trim trailing whitespace/CR only — never print or export the value.
+  raw=${raw%%[[:space:]]}
+  case "${raw}" in
+    /data|/data/) return 0 ;;               # already container-shaped
+    .|./*|~/*|"${HOME}"/*) return 0 ;;      # host-shaped: expected, -e overrides it
+    *)
+      warn "${ENV_FILE} sets SPOOL_DIR to an absolute path that is neither /data nor a
+  host path. The wrapper passes -e SPOOL_DIR=/data, which wins, so that setting is
+  being ignored inside the container. Remove it, or set it to /data, so the file
+  says what actually happens."
+      ;;
+  esac
 }
 
 # WHAT APPLE'S --env-file PROMISES, AND WHAT IT DOES NOT.

@@ -1,7 +1,7 @@
 # Deploying energycap on the Mac Mini with Apple `container`
 
 This is the **preferred** way to run the collector on the Apple-silicon Mac Mini:
-Apple's [`container`](https://github.com/apple/container) (v1.0.0, June 2026) for the
+Apple's [`container`](https://github.com/apple/container) (built and run here on v1.2.2) for the
 runtime, **launchd** for the supervision that `docker-compose` used to provide.
 
 Docker is not removed and not deprecated. `docker-compose.yml` still works, is still
@@ -10,30 +10,44 @@ correct, and is still the only option on anything that is not an Apple-silicon M
 
 ---
 
-## Read this first: none of it has been executed
+## Status: built and run on `container` 1.2.2 (2026-08-17)
 
-**Nothing in this directory, and nothing in `scripts/energycap-container.sh`, has ever
-been run.** The `container` CLI is not installed on the development machine, and there is
-no Docker daemon on it either, so **the image has never been built by either runtime** —
-not by `container build`, not by `docker build`. The wrapper's argument shapes come from
-Apple's published command reference, not from a successful run.
+The image **has been built and the container has been run** on Apple `container`
+**1.2.2** (macOS 27.0, arm64), using this wrapper. What was exercised, end to end:
 
-That is on top of what `README.md` already admits under
-[Known-unproven](../README.md#known-unproven): no stage past the SQLite spool has ever
-touched AWS.
+- `container system start --enable-kernel-install` → apiserver running, kernel installed.
+- `./scripts/energycap-container.sh build` → image built. The Dockerfile's own in-image
+  assertions passed: `tz ok, energy_capture 0.1.0` (America/Kentucky/Louisville resolves
+  inside the container) and `duckdb httpfs ok 1.5.5`.
+- `.dockerignore` **is** honoured: `/app/.env` does not exist in the image.
+- `./scripts/energycap-container.sh run` → 12 poll cycles across both sources, **zero
+  errors or warnings**, the WebSocket ingester connected from inside the container, and
+  204 rows landed in the **host's** `data/spool.db` through the bind mount.
+- `-p 8080` reachable from the host: `curl localhost:8080/healthz` → 200.
+- `./scripts/energycap-container.sh stop` → graceful SIGTERM drain
+  (`spool_final`, `runtime_stopped`), container record removed.
 
-Concretely, expect to debug these on first contact:
+What that settles, and what it does not:
 
-| Unverified | Why it might bite |
+| Was unverified | Outcome |
 |---|---|
-| The image builds at all | `Dockerfile` has never been built. The `uv sync --frozen` layers, the timezone assertion and the baked-in DuckDB `httpfs` extension are all first-run risks. |
-| `.dockerignore` is honoured | If `container build` ignores it, `COPY . /app` in the runtime stage would bake **`.env` into the image**. [Check it](#verify-the-build) before you trust the image anywhere. |
-| Bind-mount writability | The container is non-root (uid 10001). See [The uid trap](#the-uid-trap) — this is the single most likely failure. |
-| `-p` reachability | The health server binds `0.0.0.0` inside the container, so publishing *should* work; each container also gets its own IP as a fallback. |
-| Flag precedence | The wrapper passes `--env-file` and then `-e SPOOL_DIR=/data`, assuming later wins, as compose's `environment:` did over `env_file:`. Keep `SPOOL_DIR=/data` in `.env` and it does not matter. |
-| `container`'s env-file parser | Documented as "key=value, ignores `#` comments and blank lines" and nothing more. Keep values **unquoted** in `.env`; do not assume quote stripping, trailing-space trimming or `${VAR}` interpolation. See [What `--env-file` does not promise](#what---env-file-does-not-promise). |
-| `container inspect` accepting a `--name` | Documented as taking an `<id>`. The wrapper uses the name for its exists-check and for the IP in `status`. If names are not accepted, both silently do nothing — `container list --all` is the cross-check, and nothing else breaks. |
-| `--rm` actually removing the record | If it does not (or an unclean shutdown beats it), the name survives and blocks the next start. See [The name-collision wedge](#the-name-collision-wedge) for what the wrapper does about it. |
+| The image builds at all | **Confirmed.** `uv sync --frozen`, the timezone assertion and the baked-in DuckDB `httpfs` extension all succeeded. |
+| `.dockerignore` is honoured | **Confirmed.** No `.env` in the image. Still worth [re-checking](#verify-the-build) after any Dockerfile change. |
+| Bind-mount writability (the uid trap) | **Confirmed not a problem on 1.2.2.** virtiofs presents the mount as root-owned and does not enforce guest ownership; uid 10001 writes it with no chown. See [The uid trap](#the-uid-trap). |
+| `-p` reachability | **Confirmed.** 200 from the host on the published port. |
+| Flag precedence | **Confirmed.** `-e SPOOL_DIR=/data` beats the same key in `--env-file`; a host-shaped `SPOOL_DIR=./data` in `.env` is overridden and the container logs `"spool": "/data/spool.db"`. |
+| `container inspect` accepting a name | **Confirmed.** `--name energycap` is usable as the id for `inspect`, `stop` and `logs`. |
+| `--rm` actually removing the record | **Confirmed on a clean stop.** An unclean kill is still the risk the wrapper guards against — see [The name-collision wedge](#the-name-collision-wedge). |
+| `container`'s env-file parser | **Still unverified.** Documented as "key=value, ignores `#` comments and blank lines" and nothing more; our `.env` happens to be lint-clean, so nothing exercised quoting. Keep values **unquoted**. See [What `--env-file` does not promise](#what---env-file-does-not-promise). |
+
+Still **not** executed, and still the real risks:
+
+- **The LaunchAgent has never been loaded.** KeepAlive, `ThrottleInterval`, restart-on-crash
+  and survival across a reboot are all unproven. That is the whole supervision story.
+- **No stage past the SQLite spool has touched AWS**, in a container or out of one — see
+  [Known-unproven](../README.md#known-unproven).
+- **`docker build` has still never run** (no Docker daemon here). The Docker fallback is
+  the untested path now, not this one.
 
 ---
 
@@ -226,40 +240,55 @@ The real `container` command a moment later gets to be the authority.
 
 ## The uid trap
 
-**This is the most likely thing to actually break.** Read it before you conclude the
-image is broken.
+**Measured on `container` 1.2.2, 2026-08-17: this does not bite.** It is documented
+anyway, because the reasoning is non-obvious and the day it changes you will want it.
 
 The image runs as a non-root user, uid **10001** (`Dockerfile`: `useradd --uid 10001
 energycap`). It is `/data` — the bind mount — that everything is written to: `spool.db`
 (+ `-wal`/`-shm`), `tokens/*.json` (mode 600, deliberately), `status.json`.
 
-Docker Desktop's file sharing is permissive about ownership on bind mounts, so this never
-came up there — and note that `docker-compose.yml` sidesteps it entirely by using a
-**named volume**, which Docker seeds with the image's ownership. Apple's `container` maps
-the host directory in over virtiofs and **we have not verified how it maps uids**. It may
-be permissive. It may not be.
+On a real filesystem that would fail: the host directory is owned by *you* (uid 501,
+mode 755), so uid 10001 has no write bit. What actually happens is that virtiofs does
+**not** enforce guest ownership. Inside the container the mount presents as:
 
-**Symptom.** The container starts and then dies, or logs errors, with `permission denied`
-or SQLite's `unable to open database file`, naming `/data/spool.db`, `/data/status.json`
-or `/data/tokens/*.json`.
+```
+drwxr-xr-x 8 0 0 256 Aug 17 17:17 /data
+```
+
+— owned by `0 0`, not by the host uid — and a write as uid 10001 succeeds regardless. A
+full run then created `spool.db`, `status.json` and `tokens/` through the mount with no
+`chown` of any kind, and the rows were readable from the host afterwards.
+
+Docker Desktop is likewise permissive here, and `docker-compose.yml` sidesteps the
+question entirely by using a **named volume**, which Docker seeds with the image's
+ownership.
+
+So the wrapper prints an informational **note**, not a warning:
+
+```
+energycap: note: /Users/.../data is not owned by the container's uid 10001 (...).
+  That is expected and fine: virtiofs presents the mount as root-owned inside the
+  container and does not enforce guest ownership... Nothing to do.
+```
+
+**When to stop believing this.** The measurement is specific to `container` 1.2.2 with a
+plain bind mount of a local APFS path. Re-check if any of these change: a `container` or
+macOS upgrade; a `--user`/`--uid`/`--gid` override on `run` (1.2.2 has all three); a data
+directory on NFS, SMB or an external volume; or a switch to `--mount type=volume`.
+
+**Symptom, if it ever does bite.** The container starts and then dies, or logs errors,
+with `permission denied` or SQLite's `unable to open database file`, naming
+`/data/spool.db`, `/data/status.json` or `/data/tokens/*.json`.
 
 A nastier variant: everything *looks* fine because the spool opens read-only or the token
 cache silently fails to persist, and you get a re-login to Leviton every restart. Check
 `./scripts/energycap-container.sh logs` for `permission` at the first sign of weirdness.
 
-**This bites hardest on a directory you have already used from the host.** If you ran
-`uv run energycap discover` or `poll --once` locally, `data/status.json` and
-`data/tokens/` are mode 600 owned by *you* — uid 10001 cannot touch them no matter how
-permissive the directory is. The wrapper checks exactly this on every `run` and warns:
-
-```
-energycap: WARNING: /Users/.../data may not be writable by the container's non-root user (uid 10001):
-    the directory itself is uid 501, mode 755; status.json is uid 501, mode 600; ...
-```
-
-It is a warning, not a hard stop, because the mapping may well be fine and refusing to
-start on an unverified guess would be worse. But if the container then fails to write,
-this was why.
+The case that would bite hardest is a directory you have already used from the host: after
+`uv run energycap discover`, `data/status.json` and `data/tokens/` are mode 600 owned by
+*you*, and on a filesystem that *did* enforce ownership, uid 10001 could not touch them no
+matter how permissive the directory itself was. That is the exact situation measured above
+— and it worked.
 
 **Remedies, in order of preference:**
 
