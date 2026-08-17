@@ -1,0 +1,220 @@
+{
+  "mappings": [
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "hpheat",
+      "label": "HVAC — heat pump heating (daily energy)",
+      "short_label": "Heat pump heat",
+      "category": "hvac",
+      "notes": "Bryant/Carrier daily energy component hPHeat -> channel_id 'hpheat' (PLAN.md §7.2), metrics kwh_day and cost_day_usd at LOCAL midnight of the measured day. Physically this is the Bryant 284ANV060000 5-ton outdoor unit on Panel B slots 10/12 (blackstart B-10-12). Deliberately NOT joined with blackstart_device_id: this row is a cloud-reported energy component, not the breaker channel, and giving it the breaker's identity would invite double counting against a future leviton breaker_p10 row."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "eheat",
+      "label": "HVAC — electric strip heat (daily energy)",
+      "short_label": "Strip heat",
+      "category": "hvac",
+      "notes": "Component eHeat. The Bryant KFCEH3301C20 20 kW heat kit in the HVAC subpanel at the air handler (blackstart subpanel 'hvac-strips', fed through Panel B 6/8). Nothing in Panel B meters it, so this daily number and a CT pair on the 2/0 feeder are the only visibility into it."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "cooling",
+      "label": "HVAC — cooling (daily energy)",
+      "short_label": "Cooling",
+      "category": "hvac",
+      "notes": "Component cooling. Same outdoor unit as hpheat, running in cooling."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "fan",
+      "label": "HVAC — indoor blower fan (daily energy)",
+      "short_label": "Blower fan",
+      "category": "hvac",
+      "notes": "Component fan. The FE4ANB006L00 fan coil blower."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "fangas",
+      "label": "HVAC — blower fan during gas heat (daily energy)",
+      "short_label": "Fan (gas heat)",
+      "category": "hvac",
+      "notes": "Component fanGas. Expected structurally absent on this house: energyConfig.fangas is disabled, so PLAN.md §7.2 emits no rows at all (not zeros). Mapped anyway so that a row which ever does appear arrives with a label instead of as an unmapped channel."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "gas",
+      "label": "HVAC — gas heat (daily energy)",
+      "short_label": "Gas heat",
+      "category": "hvac",
+      "notes": "Component gas. Expected disabled (heat pump + electric strips, no gas). PLAN.md §7.2: if gasKwh is ever enabled AND nonzero it is recorded verbatim under metric kwh_day and WARNed — the field name says kWh but gas almost certainly is not kWh. Do not read this channel's kwh_day as electricity without checking that warning."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "looppump",
+      "label": "HVAC — geothermal loop pump (daily energy)",
+      "short_label": "Loop pump",
+      "category": "hvac",
+      "notes": "Component loopPump. Expected structurally absent: this is an air-source heat pump, so energyConfig.looppump is disabled and no rows are written."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "reheat",
+      "label": "HVAC — dehumidification reheat (daily energy)",
+      "short_label": "Reheat",
+      "category": "hvac",
+      "notes": "Component reheat. Expected structurally absent on this system."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "system",
+      "label": "Bryant Evolution system — outdoor temp, mode, stage",
+      "short_label": "HVAC system status",
+      "category": "hvac_status",
+      "notes": "30s status channel (PLAN.md §7.3). Metrics: outdoor_temp_f (system oat), mode and stage (unit='enum', integer codes from the append-only tables in sources/bryant.py — decode is in the Glue column comment for `value`). 'stage' comes from the OUTDOOR unit's opstat only (DEVIATIONS.md #58) and may be permanently empty if this unit reports a capacity percentage instead of a word (#59)."
+    },
+    {
+      "source": "bryant",
+      "device_id": "4022W200213",
+      "channel_id": "zone_1",
+      "label": "Bryant Evolution zone 1 — thermostat",
+      "short_label": "Zone 1 thermostat",
+      "category": "hvac_status",
+      "notes": "30s status channel (PLAN.md §7.3). Metrics: indoor_temp_f (rt), humidity_pct (rh), setpoint_heat_f (htsp), setpoint_cool_f (clsp), fan (enum). channel_id comes from the API's own zone id, and only zones reporting enabled=='on' emit rows (DEVIATIONS.md #66). How many zones this system actually has is UNCONFIRMED until a live status poll runs (DEVIATIONS.md #75.6) — run `energycap discover`, then add zone_2… here if it reports more."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p19",
+      "blackstart_device_id": "A-19-21",
+      "notes": "REAL — confirmed by `energycap discover` 2026-08-17. Hub 1000_0046_1D52 is the panel Leviton names 'Panel A'; the identification is not a guess about the letter, it is two independent label matches: this breaker reports name 'Water Heater' at position 19 and blackstart A-19-21 is 'Water heater' on slots 19/21, and breaker_p23 matches A-23-25 the same way. Carries no label/category of its own on purpose — with blackstart_device_id set and no explicit override, montfort.json supplies label/panel/slots/category/priority/estimated_watts, which is PLAN.md §9's rule that blackstart stays the source of truth for labels. 2-pole LB230-0ST, so ONE channel named for the lower slot; slots render as \"19,21\". Observed drawing 2462 W (element on) and 0 W (idle) within one hour — a resistive element holds a constant wattage while heating, so a long run of identical values here is real, not a stuck reading."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p23",
+      "blackstart_device_id": "A-23-25",
+      "notes": "REAL — confirmed by discover 2026-08-17. Leviton name 'Mud Room Air Conditioner' at position 23; blackstart A-23-25 is 'Mini-split — mud room addition' on slots 23/25. Label comes from blackstart (the more accurate of the two — it is a mini-split, not a window AC). 2-pole LB220-0ST, observed 103-201 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "ct_1_a",
+      "label": "Panel A service feed (leg A)",
+      "short_label": "Panel A feed A",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — discover 2026-08-17 reports usageType GRID_POWER on hub 1000_0046_1D52 channel 1. This is the whole-panel feed, so it is the denominator every per-circuit number should be compared against; it is NOT a blackstart device (no breaker occupies it) and therefore carries explicit fields only. Do not sum this with the breaker channels below it — that double counts."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "ct_1_b",
+      "label": "Panel A service feed (leg B)",
+      "short_label": "Panel A feed B",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — leg B of the same clamp pair. One IotCt object is one clamp PAIR and each leg is its own channel_id (PLAN.md §6.5); an absent ct_1_b row means a single-leg CT or a gap, never zero watts."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "ct_1_a",
+      "label": "Panel B service feed (leg A)",
+      "short_label": "Panel B feed A",
+      "panel": "B",
+      "category": "panel",
+      "notes": "REAL — discover 2026-08-17, usageType GRID_POWER on hub 1000_0046_1D48 ('Panel B'). Whole-panel feed; see the Panel A note about not summing it with per-circuit channels."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "ct_1_b",
+      "label": "Panel B service feed (leg B)",
+      "short_label": "Panel B feed B",
+      "panel": "B",
+      "category": "panel",
+      "notes": "REAL — leg B of the Panel B service clamp pair."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "ct_2_a",
+      "blackstart_device_id": "B-6-8",
+      "label": "HVAC subpanel feeder (leg A) — electric strip heat",
+      "short_label": "Strip heat feed A",
+      "panel": "B",
+      "category": "hvac",
+      "notes": "REAL — discover 2026-08-17. Leviton reports usageType HEAT_PUMP on this clamp pair, and THAT LABEL IS NOT AUTHORITATIVE — it is a dropdown someone picked in the app, which is why the label is overridden here (PLAN.md §9's explicit-override rule). What the clamps are physically on is the feeder to the HVAC subpanel, which blackstart B-6-8 describes as 'Feed-through lug tap — feeds the HVAC subpanel'; that subpanel holds the KFCEH3301C20 20 kW heat kit, i.e. the ELECTRIC STRIPS, not the compressor. The 5-ton Bryant 284ANV060000 outdoor unit is a separate circuit (blackstart B-10-12) and is not metered by this pair. Evidence: observed a flat 0 W across 17 minutes of continuous cooling with the blower running and the compressor at 35% capacity — the compressor's power was demonstrably not passing through these clamps. UNVERIFIED: the subpanel has not been opened, so this is a strong inference from the inventory plus the observed behaviour, not confirmed wiring. Expect this channel to read ~0 all summer and to carry real load only during defrost, aux heat and deep winter. A future breaker_p10 row (compressor) is the channel to correlate with cooling, NOT this one."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "ct_2_b",
+      "blackstart_device_id": "B-6-8",
+      "label": "HVAC subpanel feeder (leg B) — electric strip heat",
+      "short_label": "Strip heat feed B",
+      "panel": "B",
+      "category": "hvac",
+      "notes": "REAL — leg B of the strip-heat clamp pair. See ct_2_a for why Leviton's HEAT_PUMP usageType is overridden."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "panel_leg_a",
+      "label": "Panel A service — leg A voltage",
+      "short_label": "Panel A leg A",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — hub-level channel (PLAN.md §6.5): metrics volts and hz only. No blackstart_device_id exists for a panel leg, so this entry carries explicit fields only, which is the other legal shape in PLAN.md §9. There is no panel-level power field and none is synthesised."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "panel_leg_b",
+      "label": "Panel A service — leg B voltage",
+      "short_label": "Panel A leg B",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — see panel_leg_a on this hub."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "panel_leg_a",
+      "label": "Panel B service — leg A voltage",
+      "short_label": "Panel B leg A",
+      "panel": "B",
+      "category": "panel",
+      "notes": "REAL — Panel B's leg A. channel_id repeats across hubs by design, which is exactly why device_id belongs in every GROUP BY (see the README's query notes)."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "panel_leg_b",
+      "label": "Panel B service — leg B voltage",
+      "short_label": "Panel B leg B",
+      "panel": "B",
+      "category": "panel",
+      "notes": "REAL — Panel B's leg B."
+    },
+    {
+      "source": "lge",
+      "device_id": "PLACEHOLDER-LGE-METER-ID",
+      "channel_id": "electric_main",
+      "label": "LG&E electric meter — whole-home interval energy",
+      "short_label": "LG&E electric meter",
+      "category": "meter",
+      "placeholder": true,
+      "notes": "PLACEHOLDER for the future Green Button import (PLAN.md §13), kept here to prove dim_channel holds an 'lge' channel with no code change — the source vocabulary is model.SOURCES, not a two-source enum. device_id is the ESPI UsagePoint (meter id); it becomes real when `energycap import-greenbutton` is built and the first export is read. A 'gas_main' entry joins it if the gas meter is exported too."
+    }
+  ]
+}

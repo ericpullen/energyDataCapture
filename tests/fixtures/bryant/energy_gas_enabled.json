@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "The case PLAN.md §7.2 flags for human review: energyConfig.gas is ENABLED",
+    "and gasKwh is nonzero on a system whose field is named kWh but almost",
+    "certainly is not kWh. The row is still written verbatim as metric=kwh_day",
+    "-- guessing a therm->kWh conversion would be inventing data -- and a WARN",
+    "is logged. A gas system also enables fangas, so both appear here.",
+    "reheat is enabled but reports zeros: an enabled component's zero IS a",
+    "measurement and must be recorded (cardinal rule 2), unlike a disabled",
+    "component's, which must not exist at all."
+  ],
+  "data": {
+    "infinityEnergy": {
+      "energyConfig": {
+        "cooling": {"display": "Cooling", "enabled": true},
+        "eheat": {"display": "Electric Heat", "enabled": false},
+        "fan": {"display": "Fan", "enabled": true},
+        "fangas": {"display": "Fan (Gas)", "enabled": true},
+        "gas": {"display": "Gas", "enabled": true},
+        "hpheat": {"display": "Heat Pump", "enabled": false},
+        "looppump": {"display": "Loop Pump", "enabled": false},
+        "reheat": {"display": "Reheat", "enabled": true},
+        "hspf": "None",
+        "seer": "14"
+      },
+      "energyPeriods": [
+        {
+          "energyPeriodType": "day1",
+          "eHeatDollars": 0,
+          "eHeatKwh": 0,
+          "coolingDollars": 1.1,
+          "coolingKwh": 10,
+          "fanDollars": 0.22,
+          "fanGasDollars": 0.15,
+          "fanGasKwh": 2,
+          "fanKwh": 2,
+          "hPHeatDollars": 0,
+          "hPHeatKwh": 0,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 3.5,
+          "gasKwh": 37,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        }
+      ]
+    }
+  }
+}

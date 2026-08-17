@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "isDisconnected = true. The cloud is serving its last cached view of a thermostat",
+    "that is not talking to it, so every number below is stale by an unknown amount.",
+    "Archiving them at this cycle's ts_utc would be fabrication with extra steps:",
+    "the correct output is zero rows."
+  ],
+  "data": {
+    "infinityStatus": {
+      "utcTime": "2026-08-16T18:00:30.128Z",
+      "localTime": "2026-08-16T13:12:04.100",
+      "localTimeOffset": "-04:00",
+      "isDisconnected": true,
+      "cfgem": "F",
+      "mode": "cool",
+      "oat": "91",
+      "filtrlvl": "22",
+      "humid": "off",
+      "humlvl": "19",
+      "uvlvl": "100",
+      "vent": "None",
+      "ventlvl": 100,
+      "vacatrunning": "off",
+      "oprstsmsg": "None",
+      "odu": {"type": "multistghp", "opstat": "low", "opmode": "cool", "iducfm": "1180", "blwrpm": "None", "comprpm": "None", "oducoiltmp": "None"},
+      "idu": {"type": "fancoil", "opstat": "low", "cfm": "1180", "iducfm": "None", "blwrpm": "875", "statpress": "None", "coiltemp": "None"},
+      "zones": [
+        {"id": "1", "name": "ZONE 1", "enabled": "on", "rt": "71", "rh": "38", "fan": "med", "htsp": "70", "clsp": "76", "hold": "off", "currentActivity": "home", "zoneconditioning": "active_cool", "damperposition": "None", "occupancy": "None"}
+      ]
+    }
+  }
+}

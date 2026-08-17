@@ -1,0 +1,10 @@
+[
+  {
+    "id": 77701,
+    "name": "Montfort",
+    "status": "active",
+    "residentialAccountId": 55501,
+    "energyCost": 0.114,
+    "timezone": {"id": "America/Kentucky/Louisville"}
+  }
+]

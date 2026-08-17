@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "The gap fixture. Everything a poll can fail to know, spelled every way Carrier",
+    "spells it: the literal string 'None' (oat, rt, clsp, odu.opstat), JSON null (rh, cfm),",
+    "an absent key (idu has no blwrpm), an unmapped enum word (mode 'defrost'), and",
+    "'auto' as a fan value - which is NOT an API value at all, only a Home Assistant",
+    "display label. Exactly one row should survive: zone_1 setpoint_heat_f = 68.0."
+  ],
+  "data": {
+    "infinityStatus": {
+      "utcTime": "2026-01-09T12:30:31.001Z",
+      "localTime": "2026-01-09T07:30:29.400",
+      "localTimeOffset": "-05:00",
+      "isDisconnected": false,
+      "cfgem": "F",
+      "mode": "defrost",
+      "oat": "None",
+      "filtrlvl": "0",
+      "humid": "None",
+      "humlvl": "None",
+      "uvlvl": "None",
+      "vent": "None",
+      "ventlvl": 100,
+      "vacatrunning": "off",
+      "oprstsmsg": "None",
+      "odu": {
+        "type": "multistghp",
+        "opstat": "None",
+        "opmode": "None",
+        "iducfm": "None",
+        "blwrpm": "None",
+        "comprpm": "None",
+        "oducoiltmp": "None"
+      },
+      "idu": {
+        "type": "fancoil",
+        "opstat": "None",
+        "cfm": null,
+        "iducfm": "None",
+        "statpress": "None",
+        "coiltemp": "None"
+      },
+      "zones": [
+        {
+          "id": "1",
+          "name": "ZONE 1",
+          "enabled": "on",
+          "rt": "None",
+          "rh": null,
+          "fan": "auto",
+          "htsp": "68",
+          "clsp": "None",
+          "hold": "off",
+          "currentActivity": "sleep",
+          "zoneconditioning": "idle",
+          "damperposition": "None",
+          "occupancy": "None"
+        }
+      ]
+    }
+  }
+}

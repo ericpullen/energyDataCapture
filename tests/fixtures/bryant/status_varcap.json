@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "THE REAL SYSTEM. Captured by `energycap discover` against the live Carrier cloud on",
+    "2026-08-17 (data/discover-raw.json, gitignored) and trimmed to the fields our query",
+    "requests; the serial appeared only in the request variables and is not reproduced here,",
+    "so nothing in this file identifies the house beyond one afternoon of weather.",
+    "",
+    "It settles PLAN.md 7.3's open question and DEVIATIONS.md #75.1: this outdoor unit is",
+    "`gs3ngiphp` - Greenspeed, i.e. VARIABLE CAPACITY - and `odu.opstat` is the string \"35\",",
+    "a 0-100 compressor capacity percentage, not one of the words STAGE_CODES encodes.",
+    "So this payload must emit `stage_pct` = 35.0 (unit pct, channel `system`) and NO `stage`",
+    "row, while `idu.opstat` is the word \"off\" - proof that the two units disagree in shape",
+    "and that STAGE_SOURCE = odu is what decides which one is read.",
+    "",
+    "Eight zones are reported and only zone 1 is installed; the seven phantoms carry a",
+    "plausible rh/htsp/clsp and are trimmed to two here (one enabled, one phantom) - the",
+    "full-phantom case is pinned by status_single_zone.json. `name` and `vent` arrive as",
+    "JSON null rather than the string \"None\" on this system: both spellings are real."
+  ],
+  "data": {
+    "infinityStatus": {
+      "utcTime": "2026-08-17T13:13:04.777Z",
+      "localTime": "2026-08-17T08:02:09.586",
+      "localTimeOffset": "-04:00",
+      "isDisconnected": false,
+      "cfgem": "F",
+      "mode": "cool",
+      "oat": "74",
+      "filtrlvl": "10",
+      "humid": "off",
+      "humlvl": "0",
+      "uvlvl": "0",
+      "vent": null,
+      "ventlvl": 0,
+      "vacatrunning": "off",
+      "oprstsmsg": "idle",
+      "odu": {
+        "type": "gs3ngiphp",
+        "opstat": "35",
+        "opmode": "cooling",
+        "iducfm": "1166",
+        "blwrpm": "535",
+        "comprpm": "1190",
+        "oducoiltmp": "74"
+      },
+      "idu": {
+        "type": "fancoilelectric",
+        "opstat": "off",
+        "cfm": "500",
+        "iducfm": "513",
+        "blwrpm": "433",
+        "statpress": "0.13999998569488525",
+        "coiltemp": "0"
+      },
+      "zones": [
+        {"id": "1", "name": null, "enabled": "on", "rt": "68", "rh": "53", "fan": "high", "htsp": "64", "clsp": "68", "hold": "on", "currentActivity": "manual", "zoneconditioning": "active_cool", "damperposition": "15", "occupancy": "unoccupied"},
+        {"id": "2", "name": null, "enabled": "off", "rt": null, "rh": "42", "fan": "off", "htsp": "68.0", "clsp": "76.0", "hold": "off", "currentActivity": "sleep", "zoneconditioning": "idle", "damperposition": "15", "occupancy": null}
+      ]
+    }
+  }
+}

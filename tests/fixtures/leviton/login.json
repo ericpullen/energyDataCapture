@@ -1,0 +1,12 @@
+{
+  "id": "fake-leviton-session-token-0123456789abcdef",
+  "ttl": 5184000,
+  "created": "2026-08-16T12:00:00.000Z",
+  "userId": "person-1234",
+  "user": {
+    "id": "person-1234",
+    "email": "test-leviton@example.invalid",
+    "name": "Test User",
+    "emailVerified": true
+  }
+}

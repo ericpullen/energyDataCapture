@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Every way a value can fail to be a number, on components that ARE enabled.",
+    "Carrier types most GraphQL scalars as String and spells 'missing' as the",
+    "literal string \"None\" (never JSON null), so all four shapes appear:",
+    "  eheat   -> numeric STRINGS: readable, two rows.",
+    "  cooling -> \"None\" kWh, null dollars: no rows at all.",
+    "  fan     -> kWh present, dollars field ABSENT from the object: one row.",
+    "  hpheat  -> non-numeric junk kWh, valid dollars: one row.",
+    "A gap stays a gap -- none of these may become a zero (CLAUDE.md rule 1)."
+  ],
+  "data": {
+    "infinityEnergy": {
+      "energyConfig": {
+        "cooling": {"display": "Cooling", "enabled": true},
+        "eheat": {"display": "Electric Heat", "enabled": true},
+        "fan": {"display": "Fan", "enabled": true},
+        "fangas": {"display": "Fan (Gas)", "enabled": false},
+        "gas": {"display": "Gas", "enabled": false},
+        "hpheat": {"display": "Heat Pump", "enabled": true},
+        "looppump": {"display": "Loop Pump", "enabled": false},
+        "reheat": {"display": "Reheat", "enabled": false},
+        "hspf": "9.5",
+        "seer": "16"
+      },
+      "energyPeriods": [
+        {
+          "energyPeriodType": "day1",
+          "eHeatDollars": "0.44",
+          "eHeatKwh": "4",
+          "coolingDollars": null,
+          "coolingKwh": "None",
+          "fanKwh": 3,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "hPHeatDollars": 2.31,
+          "hPHeatKwh": "--",
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        }
+      ]
+    }
+  }
+}

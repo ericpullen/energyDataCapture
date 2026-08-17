@@ -1,0 +1,66 @@
+# Build context filter. Patterns are anchored at the context root unless they
+# start with **/. Keep this tight: the runtime stage copies the whole context.
+#
+# MUST stay in the context (do not add these): pyproject.toml, uv.lock,
+# README.md, LICENSE, src/, config/.
+
+# --- VCS -----------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Secrets & local config ---------------------------------------------
+# Credentials reach the container through env_file at run time, never baked
+# into an image layer (CLAUDE.md cardinal rule 8).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Local runtime state -------------------------------------------------
+# The real /data is a Docker volume; a host ./data must never be layered in.
+data
+spool.db
+spool.db-wal
+spool.db-shm
+status.json
+tokens
+**/tokens
+
+# --- Data files ----------------------------------------------------------
+# Parquet is warehouse output, never build input.
+*.parquet
+*.duckdb
+*.db
+
+# --- Python build/test artifacts ----------------------------------------
+tests
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+**/*.egg-info
+build
+dist
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.hypothesis
+.tox
+
+# --- Editor / OS noise ---------------------------------------------------
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# --- Docker itself -------------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml

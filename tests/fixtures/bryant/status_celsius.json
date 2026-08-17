@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "cfgem = 'C'. The temperature unit is DATA, not a constant: rt/htsp/clsp are in",
+    "whatever cfgem says, so they are converted to degF here. 'oat' is claimed by an",
+    "ha_carrier code comment to be Fahrenheit regardless of cfgem - an undocumented",
+    "empirical claim - so with cfgem='C' its unit is genuinely unknown and it must",
+    "produce NO row rather than a number labelled with a unit nobody can justify."
+  ],
+  "data": {
+    "infinityStatus": {
+      "utcTime": "2026-03-14T11:00:30.000Z",
+      "localTime": "2026-03-14T07:00:29.000",
+      "localTimeOffset": "-04:00",
+      "isDisconnected": false,
+      "cfgem": "C",
+      "mode": "heat",
+      "oat": "-2",
+      "filtrlvl": "0",
+      "humid": "off",
+      "humlvl": "None",
+      "uvlvl": "None",
+      "vent": "None",
+      "ventlvl": 100,
+      "vacatrunning": "off",
+      "oprstsmsg": "None",
+      "odu": {
+        "type": "multistghp",
+        "opstat": "low",
+        "opmode": "heat",
+        "iducfm": "None",
+        "blwrpm": "None",
+        "comprpm": "None",
+        "oducoiltmp": "None"
+      },
+      "idu": {
+        "type": "fancoil",
+        "opstat": "low",
+        "cfm": "900",
+        "iducfm": "None",
+        "blwrpm": "700",
+        "statpress": "None",
+        "coiltemp": "None"
+      },
+      "zones": [
+        {
+          "id": "1",
+          "name": "ZONE 1",
+          "enabled": "on",
+          "rt": "21.0",
+          "rh": "45",
+          "fan": "low",
+          "htsp": "20.0",
+          "clsp": "25.0",
+          "hold": "off",
+          "currentActivity": "home",
+          "zoneconditioning": "active_heat",
+          "damperposition": "None",
+          "occupancy": "None"
+        }
+      ]
+    }
+  }
+}
