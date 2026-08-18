@@ -73,7 +73,12 @@ DEFAULT_TZ_LOCAL: str = "America/Kentucky/Louisville"
 
 #: Field names whose values are secrets. :mod:`energy_capture.logging` reads this
 #: to build its literal-scrub list, so keep it in sync when adding a credential.
-SECRET_SETTING_FIELDS: tuple[str, ...] = ("leviton_password", "carrier_password")
+SECRET_SETTING_FIELDS: tuple[str, ...] = (
+    "leviton_password",
+    "carrier_password",
+    "lge_client_secret",
+    "lge_registration_access_token",
+)
 
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 
@@ -123,6 +128,38 @@ class Settings(BaseSettings):
     carrier_password: SecretStr = SecretStr("")
     #: System serial number; doubles as the Bryant ``device_id`` (PLAN.md §7.4).
     carrier_serial: str = "4022W200213"
+
+    # ------------------------------------------- LG&E Green Button Connect
+    # Issued by LG&E on approval of the third-party registration (2026-08-18) —
+    # docs/lge-greenbutton.md. Endpoints are config rather than constants because
+    # a custodian that moves one should be a .env edit, not a release; they carry
+    # the real values as defaults since they are published to us, not secret.
+    #
+    # Two credentials here, and they are NOT interchangeable:
+    #  * ``lge_client_secret`` authenticates the app when exchanging codes and
+    #    refreshing tokens (``client_secret_basic``).
+    #  * ``lge_registration_access_token`` authenticates changes to *the
+    #    registration itself* at ``lge_registration_client_uri`` — it can read
+    #    back and rotate the client credentials, so treat it as the more
+    #    dangerous of the two and never use it for data calls.
+    lge_client_id: str = ""
+    lge_client_secret: SecretStr = SecretStr("")
+    lge_authorize_url: str = "https://mymeter.lge-ku.com/OAuthServer/authorize"
+    lge_token_url: str = "https://mymeter.lge-ku.com/OAuthServer/token"
+    #: ESPI resource base. UsagePoints, MeterReadings and IntervalBlocks hang
+    #: off this; the trailing slash is stripped so joins are predictable.
+    lge_resource_uri: str = "https://services.mymeter.co/resourceapi/238/GBC/espi/1_1/resource"
+    #: Bulk endpoint for the whole subscription. The ``*`` is LG&E's own
+    #: wildcard for "every authorised UsagePoint".
+    lge_bulk_uri: str = (
+        "https://services.mymeter.co/resourceapi/238/GBC/espi/1_1/resource/Batch/Bulk/*"
+    )
+    #: Where the customer is sent back to. Registered with LG&E as an exact
+    #: string; a mismatch here is a rejected authorization (docs §2).
+    lge_redirect_uri: str = "https://energycap.ericpullen.com/greenbutton/callback/"
+    #: Dynamic-registration management endpoint for this client.
+    lge_registration_client_uri: str = ""
+    lge_registration_access_token: SecretStr = SecretStr("")
 
     # ------------------------------------------------------------ Backfill only
     dynamodb_table: str = "bryant-energy-data"

@@ -266,6 +266,50 @@ having registered.
 
 ---
 
+## 3c. Approved — 2026-08-18
+
+LG&E approved the registration the same day it was submitted. What they issued, and where it
+lives:
+
+| What they sent | Setting | Secret? |
+|---|---|---|
+| Authorization Endpoint | `LGE_AUTHORIZE_URL` | no |
+| Token Endpoint | `LGE_TOKEN_URL` | no |
+| Resource Endpoint | `LGE_RESOURCE_URI` | no |
+| Bulk Request URI | `LGE_BULK_URI` | no |
+| Client Id | `LGE_CLIENT_ID` | no, but identifying |
+| Client Secret | `LGE_CLIENT_SECRET` | **yes** |
+| Registration Client URI | `LGE_REGISTRATION_CLIENT_URI` | no |
+| Registration Access Token | `LGE_REGISTRATION_ACCESS_TOKEN` | **yes, most of all** |
+
+All nine live in **`.env`**, which is gitignored, and reach the container through
+`--env-file`. The endpoints ship as *defaults in code* because they are published to us and a
+custodian that moves one should be a `.env` edit rather than a release; the two credentials
+have no defaults at all, and a test asserts they never acquire one.
+
+**The two credentials are not interchangeable, and the less obvious one is the more
+dangerous.** `LGE_CLIENT_SECRET` authenticates the app at the token endpoint
+(`client_secret_basic`). `LGE_REGISTRATION_ACCESS_TOKEN` authenticates changes to *the
+registration itself* at `LGE_REGISTRATION_CLIENT_URI` — under RFC 7592 dynamic client
+management that endpoint can read back and rotate the client credentials, so it is closer to a
+root credential than to an API key. It must never be used for a data call.
+
+Both are in `SECRET_SETTING_FIELDS`, so the log scrubber redacts them from every future log
+line; `tests/test_config.py` asserts that list covers every `SecretStr` field, that
+`.env.example` documents every setting, and that nothing credential-shaped in the committed
+example is a real value.
+
+Two details worth noting from the approval:
+
+- **`Client Secret Expires At` came back blank** — no stated rotation. Do not build anything
+  that assumes an expiry, but do not assume immortality either: the refresh flow should treat
+  a `401` from the token endpoint as "re-authorize", not as a fatal error.
+- **The Bulk Request URI ends in `*`** — LG&E's wildcard for every authorised UsagePoint on
+  the subscription. Given the export carries three UsagePoints with an identical series
+  (§3b), a bulk fetch will need the same `resolve_meter` collapse the comparison already does.
+
+---
+
 ## 4. What happens after approval
 
 Nothing in `src/` should change before the approval email lands, because it carries the

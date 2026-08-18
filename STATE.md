@@ -139,9 +139,10 @@ Connect availability when building" and drafts the registration form field by fi
   `import-greenbutton` becomes the permanent gas and bulk-history path rather than a stopgap
   (DEVIATIONS #166).
 
-**The registration is submitted** (2026-08-18) and the local-account request is emailed; both
-are now waiting on LG&E. The approval email carries the OAuth endpoints, so **no Connect client
-code should be written before it arrives.**
+**The registration was APPROVED on 2026-08-18**, the same day it was submitted. The issued
+endpoints, client id and two credentials are wired into `Settings` and `.env.example`
+(`docs/lge-greenbutton.md` §3c); the secrets themselves live only in `.env`. **The OAuth client
+is not built yet** — that is the next piece of code, and everything it needs is now on hand.
 
 **Meter data did not wait for it.** Download My Data needs no OAuth, so
 `energycap import-greenbutton` is built and has been run against a real 10-day export, and
