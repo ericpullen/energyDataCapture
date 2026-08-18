@@ -139,19 +139,23 @@ Connect availability when building" and drafts the registration form field by fi
   `import-greenbutton` becomes the permanent gas and bulk-history path rather than a stopgap
   (DEVIATIONS #166).
 
-**The registration is ready to submit.** `docs/lge-greenbutton.md` §3 is the completed
-application; the public site every URI points at is live and verified. The only field left is
-the phone number, which is deliberately not committed to a public repo.
+**The registration is submitted** (2026-08-18) and the local-account request is emailed; both
+are now waiting on LG&E. The approval email carries the OAuth endpoints, so **no Connect client
+code should be written before it arrives.**
 
-Two things outside the code still gate real data:
+**Meter data did not wait for it.** Download My Data needs no OAuth, so
+`energycap import-greenbutton` is built and has been run against a real 10-day export, and
+`energycap compare-meter` puts it beside the panels. Both are local-only — no S3 needed.
 
-1. **Submitting the form**, on the MyMeter site, and waiting for a human at LG&E to approve it.
-   The approval email is what carries the OAuth endpoints, so **no client code should be written
-   before it arrives.**
-2. **The MyMeter *local* account** — needs a registration code requested by email from
-   `MyMeter@lge-ku.com`, and its address **cannot match the My Account primary email**. It is
-   the long-latency item and it is independent of vendor approval, so it is worth starting
-   first.
+> **First measured result:** over the 13 hours with full sample coverage,
+> meter **46.295 kWh** against summed feed CTs **47.878 kWh** — the panels read
+> **3.4% high**. Within the combined tolerance of the clamps and the meter, and the first
+> evidence that the sub-metering is trustworthy.
+
+Three things the real export taught us, all in `DEVIATIONS.md` #167–#168: it is **15-minute**
+data; LG&E links **ReadingType → MeterReading** rather than the reverse, so the obvious parser
+finds nothing; and it carries **three UsagePoint ids with an identical series**, which would
+treble the meter reading if summed.
 
 Still unknown, and to be asked in the approval correspondence: the endpoints and any sandbox,
 the maximum accepted `HistoryLength` (the draft guesses 730 days), token lifetimes and

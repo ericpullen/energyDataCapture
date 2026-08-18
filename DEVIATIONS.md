@@ -2796,6 +2796,95 @@ arrives.
 
 ---
 
+## 167. PLAN.md §13 says "**Do not build any of this yet**" — `import-greenbutton` is now built
+
+§13 designs the Green Button source and ends with an explicit instruction not to build it,
+only to avoid painting the schema into a corner. That instruction was written when Green
+Button meant *Connect*, the OAuth'd API, whose registration is still with the utility awaiting
+a human's approval (`docs/lge-greenbutton.md`).
+
+**Download My Data needs no OAuth and no approval.** It is the same ESPI data, exported by
+hand from MyMeter today. So the reason for deferring — "there is nothing to import until the
+API exists" — turned out not to hold, and the owner asked for the backfill while the
+registration is pending. Waiting would have meant sitting on the one measurement that says
+whether the sub-metering is trustworthy.
+
+Nothing about §13's *design* was changed to do it: `source='lge'`, `METER_SCHEMA` with
+`interval_s`, `MeterObservation`, `meter_key`'s `{source}-{YYYYMM}.parquet` naming and the
+`dim_channel` placeholder are all used exactly as specified. The build is an import, as §13
+promised it would be.
+
+Three decisions the spec did not cover:
+
+1. **Local Parquet is the default output; S3 is opt-in** via `--bucket`. §13 assumed
+   `energy/meter/` in S3, but this deployment has never had a bucket, and an import is a
+   manual act on a file a human just downloaded — fanning it out to S3 because an env var
+   happened to be set is a surprise. The month files are named exactly as `meter_key` names
+   them, so mirroring later is a copy.
+2. **The importer refuses to guess at units.** ESPI carries `uom` and `powerOfTenMultiplier`
+   in a `ReadingType`; if the export omits it, the import *fails* rather than assuming
+   watt-hours. A silent factor of 1000 is precisely the error a meter comparison exists to
+   detect, so the comparison must not be capable of introducing one. `--assume-uom Wh` is the
+   deliberate override, and it records itself in the run's notes.
+3. **Only forward flow is imported.** ESPI `flowDirection` 19 (generation sent back) has no
+   metric in `model.METRIC_UNITS` and this house has no solar; those readings are counted and
+   reported rather than silently folded into consumption.
+
+## 168. `compare-meter` is new — PLAN.md has no stage that reads two datasets
+
+Every other stage moves data one hop along the pipeline. This one answers a question:
+do the two service-feed CT pairs, summed, equal what the utility meter recorded? That is the
+whole justification for the sub-metering, and until it is checked, every number this project
+produces is unverified.
+
+It is a stage rather than a documented SQL query for one reason: **the panel side must not
+re-implement the kWh math.** It hands spool rows to `rollup.rollup_day`, the same function and
+the same `rollup.sql` that produce `energy/hourly`, so the comparison cannot drift from what
+the warehouse would say — including that `kwh` is observed-time-only.
+
+Two things it deliberately does that a naive comparison would not:
+
+- **It sums `ct_1_a`/`ct_1_b` only.** `panel_leg_*` is *voltage* — summing it in would add
+  hundreds of "kWh" that are really volts — and branch breakers are *inside* the feed, so
+  adding them would double-count the house. Both are pinned by tests, both verified by
+  reverting the filter.
+- **It reports `coverage` and excludes low-coverage hours from the totals while still
+  printing them.** An hour the collector half observed shows half the panel energy. That
+  number is correct — it is what was observed — and reading it as a CT error would be the
+  easiest way to draw exactly the wrong conclusion from this exercise. Silently dropping
+  those hours would be worse still, so the count of excluded hours is printed.
+
+It reads the SQLite spool directly, so it must run inside the container
+(`container exec energycap …`): opening the spool from the host while the collector writes it
+corrupts the database.
+
+### What the real export turned out to contain
+
+A live Download My Data export (2026-08-18, 10 days, 2,649 forward readings) settled several
+things the design had to guess at:
+
+- **15-minute intervals** (`intervalLength` 900), `uom` 72 (Wh), `powerOfTenMultiplier` 0,
+  and every UsagePoint paired with a `flowDirection` 19 (reverse) MeterReading — 2,373
+  readings skipped, since there is no generation here.
+- **The ReadingType link runs the other way.** LG&E's ReadingType carries `related` pointing
+  *down* at its MeterReading; the MeterReading's own `related` points *up* at the UsagePoint.
+  The obvious implementation — follow the MeterReading's links to find a ReadingType — finds
+  nothing at all. Both directions are now indexed, and both are fixtured.
+- **Three UsagePoints carry an identical series.** `1308468`, `944401` and `944006`, equal to
+  the watt-hour for every interval of ten days: the same service through meter changes.
+  Summing them would treble the meter reading and make the panels look like they measure a
+  third of the house. `resolve_meter` collapses an identical series to one and says so in the
+  report; genuinely different meters raise rather than being guessed between.
+- **`device_id` is the UsagePoint's `name`** (`1308468`) rather than its id (`00121847`) —
+  the number on the bill, and the same identity the CSV export prints, so the two formats
+  agree on the dedupe key.
+
+First result, over the 13 hours with full sample coverage: meter 46.295 kWh against panels
+47.878 kWh — **the feed CTs read 3.4% high**. That is within the combined tolerance of the
+clamps and the meter, and it is the first evidence that the sub-metering is trustworthy.
+
+---
+
 # Status — what is done, and what has never been executed
 
 **This is the honest final state. PLAN.md §16's definition of done is roughly half met.**

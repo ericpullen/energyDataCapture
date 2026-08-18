@@ -1,0 +1,414 @@
+"""Meter vs. panels: does the sub-metering add up to the bill?
+
+The question this answers
+-------------------------
+The Leviton CTs on the two service feeds should, summed, equal what the utility
+meter records for the whole house. They will not equal it exactly — CTs have a
+tolerance, the meter has its own, and the two devices integrate over different
+windows — but the *size and sign* of the disagreement is the single most useful
+number in this project. A consistent few percent is instrument error. A large or
+drifting gap means a feed is unmetered, a CT is on backwards, or a clamp is on
+the wrong conductor.
+
+Why it does not just query S3
+-----------------------------
+Because there is no S3 yet. This reads the SQLite spool directly and the meter
+Parquet that ``energycap import-greenbutton`` writes locally, so the comparison
+works on a laptop with nothing but the collector running.
+
+**It must therefore run inside the container** while the collector holds the
+spool::
+
+    container exec energycap energycap compare-meter --start … --end …
+
+Opening the spool from the macOS host while the container writes it corrupts the
+database — measured, and the reason the dashboard exists.
+
+The panel side reuses the rollup
+--------------------------------
+It does not re-implement the kWh math. Spool rows for each local day are handed
+to :func:`energy_capture.stages.rollup.rollup_day`, which is the same code and
+the same ``rollup.sql`` that produces ``energy/hourly`` — so the comparison
+cannot disagree with the warehouse about what an hour of watts is worth. That
+also means it inherits the honest bits: ``kwh`` is observed-time-only, and a
+partly observed hour reports a smaller ``sample_count`` rather than a guess.
+
+Reading the output honestly
+---------------------------
+``coverage`` is ``sample_count`` over what a fully observed hour would hold. An
+hour at 60% coverage will show ~40% less panel energy than the meter *because
+the collector was down*, not because the CTs are wrong. Hours below
+``--min-coverage`` are reported but excluded from the totals, and how many were
+excluded is printed — a comparison that quietly dropped its inconvenient hours
+would be worse than no comparison.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from energy_capture import model, timeutil
+from energy_capture.config import get_settings
+from energy_capture.logging import get_logger
+from energy_capture.spool.sqlite import open_spool
+from energy_capture.stages.rollup import rollup_day
+
+STAGE = "compare"
+log = get_logger(STAGE)
+
+#: The whole-house feed CTs. ``ct_1_a``/``ct_1_b`` are the two service legs on
+#: each Leviton hub, so all four summed is the whole house — ``panel_leg_*`` is
+#: *voltage*, not power, and must never be added in here.
+DEFAULT_PANEL_CHANNELS: tuple[str, ...] = ("ct_1_a", "ct_1_b")
+
+#: An hour below this fraction of its expected samples is shown but not totalled.
+DEFAULT_MIN_COVERAGE = 0.9
+
+__all__ = ["HourComparison", "compare_range", "format_report", "run"]
+
+
+@dataclass(frozen=True)
+class HourComparison:
+    """One local hour, from both sides."""
+
+    hour_start_utc: datetime
+    local_hour_start: datetime
+    meter_kwh: float | None
+    panel_kwh: float | None
+    sample_count: int
+    expected_samples: int
+
+    @property
+    def coverage(self) -> float:
+        if not self.expected_samples:
+            return 0.0
+        return min(1.0, self.sample_count / self.expected_samples)
+
+    @property
+    def difference_kwh(self) -> float | None:
+        if self.meter_kwh is None or self.panel_kwh is None:
+            return None
+        return self.panel_kwh - self.meter_kwh
+
+    @property
+    def difference_pct(self) -> float | None:
+        if self.difference_kwh is None or not self.meter_kwh:
+            return None
+        return 100.0 * self.difference_kwh / self.meter_kwh
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hour_start_utc": timeutil.format_utc(self.hour_start_utc),
+            "local_hour_start": self.local_hour_start.isoformat(sep=" "),
+            "meter_kwh": self.meter_kwh,
+            "panel_kwh": self.panel_kwh,
+            "difference_kwh": self.difference_kwh,
+            "difference_pct": self.difference_pct,
+            "sample_count": self.sample_count,
+            "expected_samples": self.expected_samples,
+        }
+
+
+# ------------------------------------------------------------- the two sides
+
+
+def panel_hours(
+    spool: Any,
+    local_day: date,
+    *,
+    channels: Sequence[str],
+    poll_interval_s: int,
+) -> dict[datetime, tuple[float, int]]:
+    """``hour_start_utc -> (kWh summed over ``channels``, min sample_count)``.
+
+    The sample count reported is the **minimum** across the contributing
+    channels, not the sum: if one of the four feed CTs was missing for half the
+    hour, the summed energy is understated by that channel's share, and the
+    weakest channel is what says so.
+    """
+    observations = [
+        obs
+        for hour in range(24)
+        for obs in spool.rows_for_local_hour(local_day, hour)
+    ]
+    if not observations:
+        return {}
+
+    table = model.observations_to_table(observations, dataset=model.Dataset.RAW_30S)
+    with tempfile.TemporaryDirectory(prefix="energycap-compare-") as scratch:
+        path = Path(scratch) / f"raw-{local_day:%Y%m%d}.parquet"
+        pq.write_table(table, path)
+        hourly = rollup_day(local_day, [str(path)], poll_interval_s=poll_interval_s)
+
+    wanted = set(channels)
+    totals: dict[datetime, tuple[float, int]] = {}
+    for row in hourly.to_pylist():
+        if row["metric"] != "watts" or row["channel_id"] not in wanted:
+            continue
+        if row["kwh"] is None:
+            continue
+        bucket = row["hour_start_utc"]
+        kwh, samples = totals.get(bucket, (0.0, 0))
+        merged_samples = row["sample_count"] if not samples else min(samples, row["sample_count"])
+        totals[bucket] = (kwh + row["kwh"], merged_samples)
+    return totals
+
+
+class AmbiguousMeterError(RuntimeError):
+    """Several distinct meters are present and none was chosen."""
+
+
+def resolve_meter(
+    tables: Sequence[pa.Table], *, requested: str | None = None
+) -> tuple[str | None, str | None]:
+    """Decide which ``device_id`` the comparison is about.
+
+    A real LG&E export turns out to carry the **same interval series under
+    three UsagePoints** — 1308468, 944401 and 944006, identical to the watt-hour
+    for every interval of ten days (measured 2026-08-18). Almost certainly the
+    same service through successive meter swaps. Summing them would report three
+    times the household's actual consumption and make the panels look like they
+    were measuring a third of the house.
+
+    So: one meter, always. If several are present and they are identical, one is
+    chosen deterministically and *said so*. If they genuinely differ, this
+    refuses and lists them — guessing which meter is the house is not something
+    software should do quietly.
+    """
+    totals: dict[str, float] = {}
+    series: dict[str, list[tuple[Any, float]]] = {}
+    for table in tables:
+        for row in table.to_pylist():
+            if row["metric"] != "kwh_interval":
+                continue
+            device = row["device_id"]
+            totals[device] = totals.get(device, 0.0) + float(row["value"])
+            series.setdefault(device, []).append((row["ts_utc"], float(row["value"])))
+
+    if not totals:
+        return None, None
+    if requested is not None:
+        if requested not in totals:
+            raise AmbiguousMeterError(
+                f"no readings for meter {requested!r}; this export has "
+                f"{sorted(totals)}"
+            )
+        return requested, None
+    if len(totals) == 1:
+        return next(iter(totals)), None
+
+    ordered = {device: sorted(rows) for device, rows in series.items()}
+    distinct = {repr(rows) for rows in ordered.values()}
+    chosen = sorted(totals)[0]
+    if len(distinct) == 1:
+        return chosen, (
+            f"This export carries {len(totals)} meter ids with an IDENTICAL "
+            f"series ({', '.join(sorted(totals))}) — the same service through "
+            f"meter changes. Using {chosen}; summing them would treble the "
+            "meter reading."
+        )
+    raise AmbiguousMeterError(
+        "this export carries several meters with DIFFERENT readings — pass "
+        "--meter to choose one:\n"
+        + "\n".join(f"  {device}: {total:.2f} kWh" for device, total in sorted(totals.items()))
+    )
+
+
+def meter_hours(
+    tables: Sequence[pa.Table],
+    start: date,
+    end: date,
+    *,
+    device_id: str | None = None,
+) -> dict[datetime, float]:
+    """``hour_start_utc -> kWh``, from interval readings.
+
+    Readings are assigned to the UTC hour containing their **start**. A 15-minute
+    interval never straddles an hour boundary and an hourly one aligns with it,
+    so no reading is ever split — and if a custodian ever sends something that
+    does straddle, it lands whole in the hour it began, which is the same
+    convention ``ts_utc``-as-interval-start already implies.
+    """
+    totals: dict[datetime, float] = {}
+    for table in tables:
+        for row in table.to_pylist():
+            if row["metric"] != "kwh_interval":
+                continue
+            if device_id is not None and row["device_id"] != device_id:
+                continue
+            stamp = timeutil.ensure_utc(row["ts_utc"])
+            if not (start <= timeutil.local_date_of(stamp) <= end):
+                continue
+            bucket = timeutil.utc_hour_start(stamp)
+            totals[bucket] = totals.get(bucket, 0.0) + float(row["value"])
+    return totals
+
+
+def load_meter_tables(
+    meter_dir: Path, *, source: str = model.SOURCE_LGE
+) -> list[pa.Table]:
+    files = sorted(meter_dir.glob(f"{source}-*.parquet")) if meter_dir.is_dir() else []
+    return [pq.read_table(path) for path in files]
+
+
+# --------------------------------------------------------------- the compare
+
+
+def compare_range(
+    *,
+    start: date,
+    end: date,
+    spool: Any,
+    meter_tables: Sequence[pa.Table],
+    channels: Sequence[str] = DEFAULT_PANEL_CHANNELS,
+    poll_interval_s: int = 30,
+    device_id: str | None = None,
+) -> list[HourComparison]:
+    """Both sides, hour by hour, over ``start``..``end`` inclusive (local dates)."""
+    meter = meter_hours(meter_tables, start, end, device_id=device_id)
+    panels: dict[datetime, tuple[float, int]] = {}
+    expected: dict[datetime, int] = {}
+
+    for local_day in timeutil.iter_local_dates(start, end):
+        panels.update(
+            panel_hours(
+                spool, local_day, channels=channels, poll_interval_s=poll_interval_s
+            )
+        )
+        for hour in timeutil.iter_local_hours(local_day):
+            span = (hour.end_utc - hour.start_utc).total_seconds()
+            expected[hour.start_utc] = int(span // poll_interval_s)
+
+    rows: list[HourComparison] = []
+    for bucket in sorted(set(meter) | set(panels)):
+        kwh, samples = panels.get(bucket, (None, 0))
+        rows.append(
+            HourComparison(
+                hour_start_utc=bucket,
+                local_hour_start=timeutil.local_hour_start(bucket),
+                meter_kwh=meter.get(bucket),
+                panel_kwh=kwh,
+                sample_count=samples,
+                expected_samples=expected.get(bucket, 0),
+            )
+        )
+    return rows
+
+
+def format_report(
+    rows: Sequence[HourComparison], *, min_coverage: float = DEFAULT_MIN_COVERAGE
+) -> str:
+    """A plain-text table plus totals, with the excluded hours accounted for."""
+    lines = [
+        f"{'local hour':<19} {'meter kWh':>10} {'panels kWh':>11} "
+        f"{'diff kWh':>9} {'diff %':>8} {'coverage':>9}",
+        "-" * 71,
+    ]
+    meter_total = panel_total = 0.0
+    compared = excluded = 0
+
+    for row in rows:
+        usable = (
+            row.meter_kwh is not None
+            and row.panel_kwh is not None
+            and row.coverage >= min_coverage
+        )
+        if usable:
+            meter_total += row.meter_kwh or 0.0
+            panel_total += row.panel_kwh or 0.0
+            compared += 1
+        elif row.meter_kwh is not None and row.panel_kwh is not None:
+            excluded += 1
+        lines.append(
+            f"{row.local_hour_start:%Y-%m-%d %H:%M}    "
+            f"{_num(row.meter_kwh):>10} {_num(row.panel_kwh):>11} "
+            f"{_num(row.difference_kwh):>9} {_num(row.difference_pct, 1):>8} "
+            f"{row.coverage * 100:>8.0f}%{'' if usable else '  *'}"
+        )
+
+    lines.append("-" * 71)
+    if compared:
+        diff = panel_total - meter_total
+        pct = 100.0 * diff / meter_total if meter_total else float("nan")
+        lines += [
+            f"{'TOTAL (' + str(compared) + ' hours)':<19} "
+            f"{meter_total:>10.3f} {panel_total:>11.3f} {diff:>9.3f} {pct:>8.1f}%",
+            "",
+            f"The panels read {abs(pct):.1f}% "
+            f"{'above' if diff > 0 else 'below'} the meter over these hours.",
+        ]
+    else:
+        lines.append("No hour had both a meter reading and adequate panel coverage.")
+
+    if excluded:
+        lines.append(
+            f"* {excluded} hour(s) had both sides but under "
+            f"{min_coverage:.0%} sample coverage and are NOT in the total — the "
+            "collector missed part of them, so the panel figure is understated."
+        )
+    lines.append(
+        "Rows with a blank on either side are hours only one source covers; "
+        "they are never filled in."
+    )
+    return "\n".join(lines)
+
+
+def _num(value: float | None, places: int = 3) -> str:
+    return "" if value is None else f"{value:.{places}f}"
+
+
+def run(
+    *,
+    start: date,
+    end: date,
+    meter_dir: Path | None = None,
+    channels: tuple[str, ...] | None = None,
+    source: str = model.SOURCE_LGE,
+    meter: str | None = None,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
+    spool_path: Path | None = None,
+) -> dict[str, Any]:
+    """``energycap compare-meter --start … --end …``."""
+    settings = get_settings()
+    directory = Path(meter_dir) if meter_dir else settings.spool_dir / "meter"
+    tables = load_meter_tables(directory, source=source)
+    if not tables:
+        log.warning("compare_no_meter_data", directory=str(directory), source=source)
+
+    device_id, note = resolve_meter(tables, requested=meter)
+    if note:
+        log.warning("compare_meter_ambiguous", note=note, chosen=device_id)
+
+    with open_spool(spool_path) as spool:
+        rows = compare_range(
+            start=start,
+            end=end,
+            spool=spool,
+            meter_tables=tables,
+            channels=channels or DEFAULT_PANEL_CHANNELS,
+            poll_interval_s=settings.poll_interval_s,
+            device_id=device_id,
+        )
+
+    report = format_report(rows, min_coverage=min_coverage)
+    if note:
+        report = f"NOTE: {note}\n\n{report}"
+    print(report)  # noqa: T201 - this command's output *is* the report
+
+    both = [r for r in rows if r.meter_kwh is not None and r.panel_kwh is not None]
+    return {
+        "hours": len(rows),
+        "hours_compared": len(both),
+        "meter": device_id,
+        "meter_files": len(tables),
+        "meter_dir": str(directory),
+        "channels": list(channels or DEFAULT_PANEL_CHANNELS),
+    }

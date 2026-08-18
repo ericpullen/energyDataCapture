@@ -242,6 +242,30 @@ the registration changes, which is the point of registering a hostname we contro
 
 ---
 
+## 3b. Download My Data already works — `import-greenbutton` is built
+
+Waiting for Connect approval turned out to be unnecessary for *data*: **Download My Data
+needs no OAuth**, and it is the same ESPI. `energycap import-greenbutton` is built and has
+been run against a real export (2026-08-18, 10 days), so the meter comparison is available
+now — see `DEVIATIONS.md` #167–#168 and the README's "Meter vs. panels".
+
+What the real file taught us, which no amount of reading the spec would have:
+
+| | |
+|---|---|
+| Granularity | **15-minute** (`intervalLength` 900), `uom` 72 (Wh), `powerOfTenMultiplier` 0 |
+| Flow | every UsagePoint pairs a forward and a **reverse** MeterReading; reverse is skipped |
+| Link direction | the **ReadingType** points down at its MeterReading, not the reverse — the obvious implementation finds nothing |
+| Meters | **three UsagePoints carrying an identical series** (`1308468`, `944401`, `944006`) — the same service through meter changes. Summing them trebles the reading |
+| `device_id` | the UsagePoint's `name` (the number on the bill), so XML and CSV agree |
+| Freshness | the export ended ~8 hours behind real time |
+
+This does not make Connect redundant. Download is a manual click; Connect is the daily
+subscription that keeps the meter series current without one, which is the whole point of
+having registered.
+
+---
+
 ## 4. What happens after approval
 
 Nothing in `src/` should change before the approval email lands, because it carries the

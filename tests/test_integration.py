@@ -449,6 +449,8 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
         "discover",
         "build-dim",
         "create-glue-tables",
+        "import-greenbutton",
+        "compare-meter",
     }
 
     # What the CLI command bodies actually pass, keyword for keyword. Binding
@@ -479,6 +481,25 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
             "dry_run": True,
         },
         "create-glue-tables": {"database": "energy", "dry_run": True},
+        "import-greenbutton": {
+            "path": Path("GreenButton.xml"),
+            "source": "lge",
+            "channel_id": "electric_main",
+            "out_dir": None,
+            "assume_uom": None,
+            "interval_s": None,
+            "bucket": None,
+            "dry_run": True,
+        },
+        "compare-meter": {
+            "start": date(2026, 8, 15),
+            "end": date(2026, 8, 16),
+            "meter_dir": None,
+            "channels": None,
+            "source": "lge",
+            "meter": None,
+            "min_coverage": 0.9,
+        },
     }
     assert set(passed) == set(cli.STAGE_ENTRYPOINTS)
 
@@ -498,12 +519,12 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
                 continue
             assert param.default is not param.empty, f"{command}: {name} has no default"
 
-    # `import-greenbutton` is the one command with no entry point: PLAN.md §13
-    # designs it and defers it. It is handled inline by the CLI (exit 3 with a
-    # message), and must not acquire a half-built module behind the CLI's back.
-    assert "import-greenbutton" not in cli.STAGE_ENTRYPOINTS
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("energy_capture.stages.greenbutton")
+    # `import-greenbutton` was PLAN.md §13's deferred command and is now built:
+    # Download My Data needs no OAuth, so meter intervals can land while the
+    # Connect registration is still with the utility. Its module must resolve
+    # like every other stage's.
+    assert "import-greenbutton" in cli.STAGE_ENTRYPOINTS
+    assert importlib.import_module("energy_capture.stages.greenbutton") is not None
 
 
 # ============================================================================

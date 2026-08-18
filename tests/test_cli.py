@@ -45,6 +45,7 @@ DOCUMENTED_COMMANDS = (
     "build-dim",
     "create-glue-tables",
     "import-greenbutton",
+    "compare-meter",
 )
 
 #: The commands that take a local date range (PLAN.md §10).
@@ -110,11 +111,16 @@ def test_help_lists_every_documented_command() -> None:
     assert app_ is cli.app
 
 
-def test_every_documented_command_has_an_entrypoint_or_is_future_work() -> None:
-    # import-greenbutton is deliberately unbuilt (PLAN.md §13) and therefore has
-    # no stage entry point; everything else must be wired to one.
+def test_every_documented_command_has_an_entrypoint() -> None:
+    """Every command now resolves to a real stage — including the last two.
+
+    ``import-greenbutton`` was PLAN.md §13's deliberately-unbuilt command and is
+    now built (Download My Data lands meter intervals without waiting on the
+    Connect registration), and ``compare-meter`` is what reads them back against
+    the panels. Nothing is left exiting 3.
+    """
     wired = set(cli.STAGE_ENTRYPOINTS)
-    assert wired == set(DOCUMENTED_COMMANDS) - {"import-greenbutton"}
+    assert wired == set(DOCUMENTED_COMMANDS)
     assert set(cli.STAGE_SIGNATURES) == wired
 
 
@@ -219,6 +225,11 @@ def test_default_windows_follow_the_schedule(monkeypatch: pytest.MonkeyPatch) ->
 # ------------------------------------------------------- missing stage modules
 
 
+#: Commands with a required argument, so the parametrised checks below reach the
+#: stage dispatch rather than stopping at a usage error.
+REQUIRED_ARGS: dict[str, list[str]] = {"import-greenbutton": ["usage.xml"]}
+
+
 @pytest.mark.parametrize("command", sorted(cli.STAGE_ENTRYPOINTS))
 def test_missing_stage_module_exits_nonzero_with_a_readable_message(
     command: str, monkeypatch: pytest.MonkeyPatch
@@ -228,7 +239,7 @@ def test_missing_stage_module_exits_nonzero_with_a_readable_message(
         command,
         ("energy_capture.stages._not_landed_yet", "run"),
     )
-    result = runner.invoke(cli.app, [command])
+    result = runner.invoke(cli.app, [command, *REQUIRED_ARGS.get(command, [])])
     assert result.exit_code == cli.EXIT_NOT_IMPLEMENTED
     flat = _flat(result.output)
     assert "not implemented yet" in flat
@@ -265,12 +276,10 @@ def test_a_broken_import_inside_a_stage_is_not_disguised(
     assert "not implemented yet" not in _flat(result.output)
 
 
-def test_import_greenbutton_is_declared_future_work() -> None:
-    result = runner.invoke(cli.app, ["import-greenbutton", "usage.xml"])
-    assert result.exit_code == cli.EXIT_NOT_IMPLEMENTED
-    flat = _flat(result.output)
-    assert "not built yet" in flat
-    assert "13" in flat  # points at PLAN.md §13
+def test_import_greenbutton_reports_a_missing_file_without_a_traceback() -> None:
+    """It is built now; a bad path is still an operator error, not a crash."""
+    result = runner.invoke(cli.app, ["import-greenbutton", "no-such-export.xml"])
+    assert result.exit_code != 0
     assert "Traceback" not in result.output
 
 

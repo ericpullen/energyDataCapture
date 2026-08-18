@@ -80,6 +80,8 @@ STAGE_ENTRYPOINTS: dict[str, tuple[str, str]] = {
     "discover": ("energy_capture.stages.discover", "run"),
     "build-dim": ("energy_capture.stages.dim", "build"),
     "create-glue-tables": ("energy_capture.aws.glue", "create_or_update_tables"),
+    "import-greenbutton": ("energy_capture.stages.greenbutton", "run"),
+    "compare-meter": ("energy_capture.stages.compare", "run"),
 }
 
 #: The exact signature each entry point must accept, for whoever implements the
@@ -106,6 +108,16 @@ STAGE_SIGNATURES: dict[str, str] = {
         "live_channels_path: Path | None, dry_run: bool)"
     ),
     "create-glue-tables": "create_or_update_tables(*, database: str, dry_run: bool)",
+    "import-greenbutton": (
+        "run(*, path: Path, source: str, channel_id: str, out_dir: Path | None, "
+        "assume_uom: str | None, interval_s: int | None, bucket: str | None, "
+        "dry_run: bool)"
+    ),
+    "compare-meter": (
+        "run(*, start: date, end: date, meter_dir: Path | None, "
+        "channels: tuple[str, ...] | None, source: str, meter: str | None, "
+        "min_coverage: float)"
+    ),
 }
 
 #: Hand-maintained semantic layer, committed to the repo (PLAN.md §9).
@@ -691,24 +703,133 @@ def import_greenbutton_cmd(
         str,
         typer.Option("--source", help="Source name to record on the rows."),
     ] = "lge",
+    channel: Annotated[
+        str,
+        typer.Option("--channel", help="channel_id for the meter's readings."),
+    ] = "electric_main",
+    out_dir: Annotated[
+        Path | None,
+        typer.Option("--out-dir", help="Where to write. Default: SPOOL_DIR/meter."),
+    ] = None,
+    assume_uom: Annotated[
+        str | None,
+        typer.Option(
+            "--assume-uom",
+            help="Force units ('Wh' or 'kWh') when the export has no ReadingType.",
+        ),
+    ] = None,
+    interval_s: Annotated[
+        int | None,
+        typer.Option("--interval-s", help="Interval length for CSV exports."),
+    ] = None,
+    bucket: Annotated[
+        str | None,
+        typer.Option("--bucket", help="Also mirror the month files to this S3 bucket."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Parse and report; write nothing."),
+    ] = False,
 ) -> None:
-    """Import an LG&E Green Button meter export into energy/meter. NOT BUILT YET.
+    """Import an LG&E Green Button meter export into energy/meter.
 
-    Designed in PLAN.md §13 and deliberately unbuilt: meter data is interval
-    data, so the meter dataset adds an interval_s column (ts_utc is the interval
-    START) and the model module already expresses that variant. When it is
-    built, this will be idempotent on the standard dedupe key like every other
-    stage. Until then this command exits non-zero so nothing can quietly depend
-    on it.
+    Reads a Download My Data export — Green Button ESPI XML (preferred, because
+    it states its own units and interval length) or MyMeter's Usage.csv — and
+    lands it as interval rows: ts_utc is the interval START and interval_s is
+    how long it covers.
+
+    It will not guess. If the XML has no ReadingType, the import fails rather
+    than assuming watt-hours, because a silent factor of 1000 is exactly the
+    error a meter comparison exists to catch; --assume-uom is the deliberate
+    override. A CSV's interval length comes from an end-time column, or
+    --interval-s, or is inferred from the spacing and logged as inferred.
+
+    Writes one Parquet file per calendar month touched, named as s3io.meter_key
+    names it. Local only unless you pass --bucket: an import is a manual act on
+    a file you just downloaded, so it does not fan out to S3 by surprise.
+    Re-importing an overlapping range merges on the canonical dedupe key with
+    the freshly read row winning, so MyMeter's revisions converge.
+
+    Then compare it against the panels with `energycap compare-meter`.
     """
-    _echo_error(
-        f"energycap import-greenbutton: not built yet (PLAN.md §13 — designed, "
-        f"deliberately deferred until the rest of the pipeline has landed).\n"
-        f"  requested: {path} as source={source!r}\n"
-        "  the meter dataset (energy/meter, interval_s column) already exists in "
-        "energy_capture.model, so this is an import, not a redesign."
+    _run_stage(
+        "import-greenbutton",
+        path=path,
+        source=source,
+        channel_id=channel,
+        out_dir=out_dir,
+        assume_uom=assume_uom,
+        interval_s=interval_s,
+        bucket=bucket,
+        dry_run=dry_run,
     )
-    raise typer.Exit(EXIT_NOT_IMPLEMENTED)
+
+
+@app.command("compare-meter")
+def compare_meter_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    meter_dir: Annotated[
+        Path | None,
+        typer.Option("--meter-dir", help="Where the imported meter Parquet lives."),
+    ] = None,
+    channel: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--channel",
+            help="Panel-side channel_id to sum. Repeatable. Default: the feed CTs.",
+        ),
+    ] = None,
+    min_coverage: Annotated[
+        float,
+        typer.Option(
+            "--min-coverage",
+            help="Exclude hours below this fraction of expected samples from totals.",
+        ),
+    ] = 0.9,
+    source: Annotated[
+        str, typer.Option("--source", help="Meter source to read.")
+    ] = "lge",
+    meter: Annotated[
+        str | None,
+        typer.Option("--meter", help="Which meter's device_id to compare against."),
+    ] = None,
+) -> None:
+    """Compare the utility meter against the summed panel feeds, hour by hour.
+
+    The whole point of the sub-metering: the two service-feed CT pairs summed
+    (ct_1_a + ct_1_b on each hub) should equal what the meter recorded. This
+    prints both, their difference in kWh and percent, and the sample coverage
+    of each hour.
+
+    The panel side goes through the same rollup_day() and rollup.sql the
+    warehouse uses, so this cannot disagree with energy/hourly about what an
+    hour of watts is worth — including that kWh is observed-time-only.
+
+    Hours below --min-coverage are shown but kept out of the totals, and the
+    count of excluded hours is printed: a partly observed hour understates the
+    panels because the collector was down, not because the CTs are wrong.
+
+    Reads the SQLite spool, so it must run where the spool is — inside the
+    container while the collector holds it:
+
+        container exec energycap energycap compare-meter --start ... --end ...
+
+    Default window: yesterday and today (local).
+    """
+    start_date, end_date = _resolve_range(
+        start, end, default_start=_days_ago(1), default_end=_today()
+    )
+    _run_stage(
+        "compare-meter",
+        start=start_date,
+        end=end_date,
+        meter_dir=meter_dir,
+        channels=tuple(channel) if channel else None,
+        source=source,
+        meter=meter,
+        min_coverage=min_coverage,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

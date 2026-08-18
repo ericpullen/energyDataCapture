@@ -146,7 +146,7 @@ def test_the_glue_comment_and_the_readme_quote_the_same_decode(readme: str) -> N
 def test_every_cli_command_is_documented(readme: str) -> None:
     """A command nobody documented is a command nobody runs."""
     commands = set(get_command(cli.app).commands)  # type: ignore[attr-defined]
-    assert "import-greenbutton" in commands  # the deliberately-unbuilt one
+    assert {"import-greenbutton", "compare-meter"} <= commands
     for command in commands:
         assert f"`energycap {command}" in readme, f"{command} is undocumented"
 

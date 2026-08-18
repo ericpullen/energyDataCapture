@@ -557,7 +557,48 @@ options: `--log-level`, `--traceback`, `--version`.
 | `energycap discover [--dump FILE]` | Enumerate the live Leviton/Bryant hierarchy; print a `channel_map.json` skeleton for unmapped channels and write `live_channels.json` beside the map. `--dump` records every raw upstream response. | — |
 | `energycap build-dim [--dry-run]` | `channel_map.json` + blackstart inventory → `dim_channel.parquet` (single object, atomically overwritten). Reads `live_channels.json` to WARN about unmapped channels. | — |
 | `energycap create-glue-tables [--dry-run]` | Idempotent create-or-update of the four Glue tables and their comments. No crawler. | — |
-| `energycap import-greenbutton FILE` | **Not built** (PLAN.md §13). Exits non-zero so nothing can quietly depend on it. | — |
+| `energycap import-greenbutton FILE` | An LG&E **Download My Data** export (Green Button ESPI XML, or MyMeter's `Usage.csv`) → `energy/meter` interval rows. Local Parquet by default; `--bucket` to also mirror to S3. Refuses to guess at units — see below. | — |
+| `energycap compare-meter` | The utility meter vs. the summed service-feed CTs, hour by hour, with sample coverage. | yesterday → today |
+
+### Meter vs. panels
+
+The point of the sub-metering is that it should add up to the bill. These two
+commands check that it does, and they need no AWS:
+
+```bash
+# 1. MyMeter → Download My Data → Green Button XML. Drop it in ./data.
+container exec energycap energycap import-greenbutton /data/GreenButton.xml
+
+# 2. Compare it against ct_1_a + ct_1_b on both hubs — the two service feeds.
+container exec energycap energycap compare-meter --start 2026-08-14 --end 2026-08-17
+```
+
+Both run **inside the container**, because the collector owns the spool and
+opening it from the macOS host while the container writes it corrupts the
+database.
+
+Two things the importer will not do, both for the same reason — a meter
+comparison exists to catch errors, so it must not introduce any:
+
+- **Guess at units.** ESPI states them in a `ReadingType` (`uom` +
+  `powerOfTenMultiplier`). If the export omits it the import *fails* rather than
+  assuming watt-hours; `--assume-uom Wh` is the deliberate override.
+- **Invent an interval length.** The XML states it. A CSV does not, so it comes
+  from an end-time column, or `--interval-s`, or is inferred from the reading
+  spacing and logged as inferred.
+
+**LG&E's export carries the same series under three meter ids.** A real download
+(2026-08-18) held `1308468`, `944401` and `944006`, identical to the watt-hour for
+every interval of ten days — the same service through meter changes. `compare-meter`
+collapses identical series to one and says so; if several meters genuinely differ it
+refuses and makes you pick with `--meter`. Summing them would have trebled the meter
+reading and made the panels look like they measure a third of the house.
+
+`compare-meter` reads `coverage` — `sample_count` over a full hour's samples —
+and keeps hours below `--min-coverage` (default 0.9) out of the totals while
+still printing them. An hour the collector only half observed shows ~half the
+panel energy; that is the collector being down, not the CTs being wrong, and
+conflating the two would be the easiest way to misread this whole exercise.
 
 ---
 
