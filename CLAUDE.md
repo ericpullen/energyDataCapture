@@ -8,6 +8,13 @@ Guidance for Claude Code when working in this repository.
 
 Volume is tens of MB/year. **Nothing here is performance-sensitive.** Optimize for query ergonomics, data trustworthiness, and readable code — never for throughput.
 
+## Start here
+
+**`STATE.md` says where the project actually is** — what is built, what has been proven
+against the real hardware and clouds, what has never been executed, and what is next
+(LG&E Green Button Connect). Read it before planning any work; it is shorter than PLAN.md
+and it is the part that changes.
+
 ## The spec
 
 **`PLAN.md` is the spec of record.** Read the relevant section before implementing a module; it contains all the API research (Leviton endpoints, Carrier GraphQL, DynamoDB layout) so re-researching is usually unnecessary.
