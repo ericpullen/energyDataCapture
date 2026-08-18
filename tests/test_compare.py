@@ -474,3 +474,48 @@ def test_the_meter_rows_it_reads_are_the_meter_dataset(tmp_path: Path) -> None:
     assert tables[0].schema.names == model.METER_SCHEMA.names
     loaded = compare.load_meter_tables(tmp_path / "meter")
     assert loaded and loaded[0].num_rows == tables[0].num_rows
+
+
+# ------------------------------------------- two resolutions of one meter
+
+
+def test_two_interval_series_are_not_summed_together() -> None:
+    """LG&E publishes the same energy at 900s and 3600s. Adding both doubles it.
+
+    Both are stored — discarding one at ingest would be filtering the
+    custodian's data — so the *comparison* is where the choice has to happen.
+    Measured on the live feed 2026-08-18: meter 1326254 reported 76.0 kWh over
+    the 900s series and 76.1 kWh over the 3600s one for the same four days.
+    """
+    stamps = [HOUR_UTC + timedelta(minutes=15 * n) for n in range(4)]
+    rows = [("1308468", ts, 0.5, 900) for ts in stamps]
+    rows.append(("1308468", HOUR_UTC, 2.0, 3600))
+    tables = [
+        model.observations_to_table(
+            [
+                model.make_observation(
+                    ts_utc=ts,
+                    source=model.SOURCE_LGE,
+                    device_id=device,
+                    channel_id="electric_main",
+                    metric="kwh_interval",
+                    value=value,
+                    interval_s=interval,
+                )
+                for device, ts, value, interval in rows
+            ],
+            dataset=model.Dataset.METER,
+        )
+    ]
+
+    interval, note = compare.resolve_interval(tables)
+    assert interval == 900, "the finest series is the informative one"
+    assert note and "double" in note
+
+    hours = compare.meter_hours(tables, LOCAL_DAY, LOCAL_DAY, interval_s=interval)
+    assert hours[HOUR_UTC] == pytest.approx(2.0), "the two series were summed"
+
+
+def test_a_single_interval_series_needs_no_note() -> None:
+    tables = _meter_rows([("1308468", HOUR_UTC, 2.0)])
+    assert compare.resolve_interval(tables) == (900, None)

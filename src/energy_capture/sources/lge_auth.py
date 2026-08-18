@@ -45,7 +45,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from energy_capture.config import get_settings
+from energy_capture.config import describe_env_source, get_settings
 from energy_capture.logging import get_logger, register_secret
 from energy_capture.sources.base import SourceAuthError, SourceTransientError
 
@@ -444,7 +444,24 @@ class LgeAuth:
         s = self.settings
         secret = s.lge_client_secret.get_secret_value()
         if not s.lge_client_id or not secret:
-            raise LgeAuthError("LGE_CLIENT_ID / LGE_CLIENT_SECRET are not configured")
+            # Naming *which* one is missing and where the settings came from:
+            # the first version of this said only "not configured", and the
+            # actual cause was a working directory with no `.env` above it,
+            # which that message gave an operator no way to guess.
+            missing = [
+                name
+                for name, value in (
+                    ("LGE_CLIENT_ID", s.lge_client_id),
+                    ("LGE_CLIENT_SECRET", secret),
+                )
+                if not value
+            ]
+            raise LgeAuthError(
+                f"{' and '.join(missing)} not set. Settings were read from "
+                f"{describe_env_source()}. Run this from inside the repository "
+                "(or the container), where the .env holding the LG&E "
+                "credentials can be found."
+            )
 
         client = self.client or httpx.Client(timeout=DEFAULT_TIMEOUT)
         owned = self.client is None

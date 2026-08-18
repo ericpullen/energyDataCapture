@@ -115,8 +115,8 @@ def test_the_window_is_local_midnight_to_local_midnight(
 
     params = dict(seen[0].url.params)
     start_utc, end_utc = timeutil.local_day_bounds_utc(day)
-    assert int(params["published-min"]) == int(start_utc.timestamp())
-    assert int(params["published-max"]) == int(end_utc.timestamp())
+    assert params["published-min"] == start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert params["published-max"] == end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_a_twenty_five_hour_day_is_fetched_whole(
@@ -128,7 +128,11 @@ def test_a_twenty_five_hour_day_is_fetched_whole(
     greenbutton_fetch.fetch_espi(start=day, end=day, auth=authorized, client=client)
 
     params = dict(seen[0].url.params)
-    span = int(params["published-max"]) - int(params["published-min"])
+    parsed = [
+        datetime.strptime(params[k], "%Y-%m-%dT%H:%M:%SZ")
+        for k in ("published-min", "published-max")
+    ]
+    span = (parsed[1] - parsed[0]).total_seconds()
     assert span == 25 * 3600, span
 
 
@@ -262,3 +266,31 @@ def test_dry_run_fetches_but_writes_nothing(
     assert summary["rows"] == 1
     assert summary["files"] == []
     assert not (tmp_path / "meter").exists()
+
+
+def test_the_window_uses_the_only_filter_format_lge_accepts(
+    settings: Settings, authorized: LgeAuth
+) -> None:
+    """Measured against the live endpoint 2026-08-18.
+
+    The ESPI spec says ``published-min``/``published-max`` are epoch seconds.
+    LG&E's implementation returns **400** for epoch, 400 for a bare date, 400
+    for an ISO instant with no ``Z`` — and answers **200 while ignoring the
+    filter entirely** for the camelCase ``publishedMin``. That last one is why
+    this is pinned: the wrong spelling is not a failed request, it is a daily
+    job silently downloading the entire authorised history (49 MB against 415 KB
+    for four days) with a fetch window that means nothing.
+    """
+    client, seen = transport(lambda r: httpx.Response(200, text=espi([])))
+    greenbutton_fetch.fetch_espi(
+        start=date(2026, 8, 16), end=date(2026, 8, 16), auth=authorized, client=client
+    )
+    params = dict(seen[0].url.params)
+
+    assert set(params) == {"published-min", "published-max"}, (
+        "camelCase publishedMin is accepted by LG&E and then ignored"
+    )
+    for value in params.values():
+        assert value.endswith("Z"), f"{value!r} without a Z is a 400"
+        assert "." not in value, f"{value!r} carries microseconds"
+        assert not value.isdigit(), "epoch seconds are rejected by LG&E"

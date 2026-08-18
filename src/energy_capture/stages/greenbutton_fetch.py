@@ -51,6 +51,30 @@ log = get_logger(STAGE)
 __all__ = ["fetch_espi", "run"]
 
 
+def _espi_instant(moment: datetime) -> str:
+    """``2026-08-16T04:00:00Z`` — what LG&E's filter actually accepts.
+
+    The ESPI spec says ``published-min``/``published-max`` are **epoch seconds**.
+    LG&E's implementation is not: measured 2026-08-18 against the live endpoint,
+
+    ==========================================  ==========================
+    ``published-min=1755230400`` (spec)         **400** Bad Request
+    ``published-min=2026-08-15`` (date only)    **400**
+    ``published-min=2026-08-15T00:00:00`` (no Z) **400**
+    ``publishedMin=…`` (camelCase)              200, **filter ignored**
+    ``published-min=2026-08-15T00:00:00Z``      200, **filtered**
+    ==========================================  ==========================
+
+    The camelCase row is the dangerous one: it answers 200 with the *entire*
+    authorised history (49 MB against 415 KB for four days) and looks like it
+    worked. Getting this wrong is not a failed request, it is a daily job quietly
+    downloading fifty megabytes and a fetch window that means nothing.
+
+    No microseconds, and an explicit ``Z``.
+    """
+    return timeutil.ensure_utc(moment).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def fetch_espi(
     *,
     start: date,
@@ -72,8 +96,8 @@ def fetch_espi(
     window_start, _ = timeutil.local_day_bounds_utc(start)
     _, window_end = timeutil.local_day_bounds_utc(end)
     params = {
-        "published-min": int(window_start.timestamp()),
-        "published-max": int(window_end.timestamp()),
+        "published-min": _espi_instant(window_start),
+        "published-max": _espi_instant(window_end),
     }
 
     owned = client is None

@@ -472,3 +472,53 @@ def test_the_file_type_is_decided_by_content_not_extension(tmp_path: Path) -> No
     misnamed.write_text(espi(readings=[(start, 900, 250)]))
     parsed = greenbutton.parse_export(misnamed)
     assert parsed.rows == 1
+
+
+# ------------------------------------------- two resolutions of one meter
+
+
+def test_hourly_and_quarter_hourly_series_do_not_overwrite_each_other(
+    tmp_path: Path,
+) -> None:
+    """LG&E publishes the same energy at two resolutions. Both must survive.
+
+    Measured 2026-08-18 on the live Connect feed: every UsagePoint carries a
+    900-second series *and* a 3600-second one, colliding at 167 timestamps in
+    four days. Under the canonical dedupe key — which has no ``interval_s`` —
+    one silently replaced the other, so an hour boundary held either 15 minutes
+    of energy or a whole hour of it, unpredictably, and any SUM was wrong.
+
+    ``model.METER_DEDUPE_KEY`` adds ``interval_s`` for exactly this. Choosing
+    between the series is a query-time decision (``compare-meter`` takes the
+    finest), not a reason to discard the custodian's data at ingest.
+    """
+    start = epoch("2026-08-16T04:00:00")
+    document = espi(readings=[(start, 900, 400)]).replace(
+        "</espi:IntervalBlock>",
+        f"""<espi:IntervalReading><espi:timePeriod>
+          <espi:duration>3600</espi:duration><espi:start>{start}</espi:start>
+        </espi:timePeriod><espi:value>1600</espi:value></espi:IntervalReading>
+        </espi:IntervalBlock>""",
+    )
+    export = tmp_path / "gb.xml"
+    export.write_text(document)
+    summary = greenbutton.run(path=export, out_dir=tmp_path / "meter")
+
+    table = pq.read_table(Path(summary["files"][0]))
+    assert table.num_rows == 2, "the two resolutions collapsed into one"
+    by_interval = dict(
+        zip(
+            table.column("interval_s").to_pylist(),
+            table.column("value").to_pylist(),
+            strict=True,
+        )
+    )
+    assert by_interval == {900: pytest.approx(0.4), 3600: pytest.approx(1.6)}
+
+
+def test_the_meter_dedupe_key_is_the_canonical_one_plus_interval() -> None:
+    """Pinned: dropping interval_s here is a silent data-loss bug."""
+    assert model.METER_DEDUPE_KEY == (*model.DEDUPE_KEY, "interval_s")
+    assert model.dedupe_key_for(model.Dataset.METER) == model.METER_DEDUPE_KEY
+    # Only the meter dataset differs — raw_30s has no interval_s column at all.
+    assert model.dedupe_key_for(model.Dataset.RAW_30S) == model.DEDUPE_KEY

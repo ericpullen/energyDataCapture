@@ -2883,6 +2883,69 @@ First result, over the 13 hours with full sample coverage: meter 46.295 kWh agai
 47.878 kWh — **the feed CTs read 3.4% high**. That is within the combined tolerance of the
 clamps and the meter, and it is the first evidence that the sub-metering is trustworthy.
 
+## 169. The live Connect API disagrees with the ESPI spec, and with the download
+
+Three things the first real fetch (2026-08-18) settled, none of which could have been read
+off a document.
+
+**1. `published-min`/`published-max` are NOT epoch seconds.** The ESPI spec says they are.
+Measured against `Batch/Subscription/00000074`:
+
+| sent | result |
+|---|---|
+| `published-min=1755230400` (spec) | **400** Bad Request |
+| `published-min=2026-08-15` | **400** |
+| `published-min=2026-08-15T00:00:00` (no `Z`) | **400** |
+| `publishedMin=…` (camelCase) | **200, filter silently ignored** |
+| `published-min=2026-08-15T00:00:00Z` | **200, filtered** |
+
+The camelCase row is the trap: it succeeds, and returns the *entire* authorised history — **49
+MB against 415 KB** for four days — so a daily job would quietly download fifty megabytes with
+a fetch window that means nothing. `_espi_instant()` formats `%Y-%m-%dT%H:%M:%SZ`, no
+microseconds, and a test pins every part of that.
+
+**2. Every UsagePoint publishes the same energy twice**, as a 900-second series *and* a
+3600-second one — 167 colliding timestamps in four days. The canonical dedupe key
+`(ts_utc, source, device_id, channel_id, metric)` has no `interval_s`, so one series silently
+replaced the other and an hour boundary held either fifteen minutes of energy or a whole hour
+of it, unpredictably. Any `SUM` over the result was wrong, and nothing said so.
+
+`model.METER_DEDUPE_KEY` is therefore `DEDUPE_KEY + ("interval_s",)` for the meter dataset
+only. Two readings covering different durations are not duplicates — the duration is part of
+what identifies them — and discarding one at ingest would be filtering the custodian's data
+(CLAUDE.md rule 2). Choosing between them is a *query-time* decision, so `compare-meter`
+`resolve_interval()` takes the finest series and says which, because adding both would report
+roughly twice the household's consumption. Confirmed redundant by the data itself: meter
+1326254 totals 76.0 kWh over the 900s series and 76.1 kWh over the 3600s one for the same four
+days.
+
+**3. Connect exposes a meter the download does not.** The manual export carried three
+UsagePoints with an identical series (#168); the API returns `1308468` **and `1326254`**, a
+genuinely different meter running 3.6–40 kWh/day against the house's 74–99. `resolve_meter`
+already refuses to guess between meters that differ, so this surfaces as a prompt for
+`--meter` rather than a silently trebled total — which is what that guard was written for.
+
+Also measured: the Connect feed runs ~6 hours fresher than the download, and the resource the
+token points at is a `Batch/Subscription/{id}` URI rather than the configured resource base,
+which is why `LgeToken.resource_uri` is preferred over `LGE_RESOURCE_URI`.
+
+## 170. `.env` discovery walked into a working-directory bug
+
+`Settings.model_config` had `env_file=".env"`, which pydantic-settings resolves against the
+**process working directory**. Running any command from `data/` — where the Green Button
+exports live, so exactly where an operator stands — produced a `Settings` with every
+credential blank, and the error said only "LGE_CLIENT_ID / LGE_CLIENT_SECRET are not
+configured". It cost a real authorization attempt, with a code that expires in minutes.
+
+`_discover_env_file()` now walks up from the working directory to the nearest `.env`, the way
+`git` and `direnv` do, so anywhere inside the repository works and nothing outside it changes.
+The container is unaffected: it takes real environment variables from `--env-file` and
+deliberately has no `.env` in the image at all.
+
+The message was the other half of the defect and is fixed too — it now names *which* variable
+is missing and where settings were read from (`config.describe_env_source()`). "Not
+configured" with no location gave an operator nothing to act on.
+
 ---
 
 # Status — what is done, and what has never been executed

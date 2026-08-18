@@ -43,6 +43,7 @@ __all__ = [
     "DAILY_SCHEMA",
     "DAY_GRAIN_METRICS",
     "DEDUPE_KEY",
+    "METER_DEDUPE_KEY",
     "DIM_KEY",
     "ENUM_METRICS",
     "HOURLY_DEDUPE_KEY",
@@ -61,6 +62,7 @@ __all__ = [
     "Dataset",
     "MeterObservation",
     "Observation",
+    "dedupe_key_for",
     "dedupe_observations",
     "dedupe_table",
     "empty_table",
@@ -83,6 +85,22 @@ SORT_KEY: tuple[str, ...] = ("ts_utc", "source", "device_id", "channel_id")
 
 #: Row identity everywhere — spool, parts, day files, backfill (CLAUDE.md rule 7).
 DEDUPE_KEY: tuple[str, ...] = ("ts_utc", "source", "device_id", "channel_id", "metric")
+
+#: The ``meter`` dataset's identity: :data:`DEDUPE_KEY` **plus ``interval_s``**.
+#:
+#: Meter data is *interval* data, and a custodian may publish the same energy at
+#: more than one resolution. LG&E does: measured 2026-08-18, every UsagePoint
+#: carries both a 15-minute and an hourly series, colliding at 167 timestamps in
+#: four days. Under the canonical key those are "duplicates" and one silently
+#: replaces the other — so an hour boundary randomly holds either 15 minutes of
+#: energy or a whole hour of it, and any SUM over the result is wrong.
+#:
+#: They are not duplicates. A reading covering 900 seconds and one covering 3600
+#: seconds are different observations that happen to start together, so the
+#: duration is part of what identifies them. Choosing *between* the series is a
+#: query-time decision (``compare-meter`` takes the finest), not a reason to
+#: throw one away at ingest — CLAUDE.md rule 2.
+METER_DEDUPE_KEY: tuple[str, ...] = DEDUPE_KEY + ("interval_s",)
 
 #: Identity of a channel in ``channel_map.json`` / ``dim_channel`` (PLAN.md §9).
 DIM_KEY: tuple[str, ...] = ("source", "device_id", "channel_id")
@@ -445,6 +463,11 @@ def dedupe_observations(
     return out
 
 
+def dedupe_key_for(dataset: Dataset | str) -> tuple[str, ...]:
+    """The identity columns for a dataset — ``meter`` adds ``interval_s``."""
+    return METER_DEDUPE_KEY if Dataset(dataset) is Dataset.METER else DEDUPE_KEY
+
+
 def dedupe_table(table: pa.Table, keys: Sequence[str] = DEDUPE_KEY) -> pa.Table:
     """Drop later rows sharing ``keys`` — first occurrence in table order wins."""
     if table.num_rows == 0:
@@ -501,7 +524,7 @@ def observations_to_table(
     if validate:
         _validate_dataset_metrics(rows, resolved)
     if dedupe:
-        rows = dedupe_observations(rows)
+        rows = dedupe_observations(rows, dedupe_key_for(resolved))
     if sort:
         rows = sort_observations(rows)
     if not rows:

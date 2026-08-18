@@ -603,7 +603,12 @@ def merge_into_month(
         combined = pa.concat_tables(
             [incoming.cast(model.METER_SCHEMA), existing.cast(model.METER_SCHEMA)]
         )
-    return model.sort_table(model.dedupe_table(combined))
+    # The meter dataset's identity includes interval_s: LG&E publishes the same
+    # energy as both a 15-minute and an hourly series, and under the canonical
+    # key they would silently overwrite each other at every hour boundary.
+    return model.sort_table(
+        model.dedupe_table(combined, model.dedupe_key_for(Dataset.METER))
+    )
 
 
 def write_months(

@@ -38,6 +38,7 @@ __all__ = [
     "MIN_POLL_INTERVAL_S",
     "SECRET_SETTING_FIELDS",
     "Settings",
+    "describe_env_source",
     "get_settings",
     "reset_settings_cache",
 ]
@@ -83,11 +84,38 @@ SECRET_SETTING_FIELDS: tuple[str, ...] = (
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 
 
+def _discover_env_file() -> Path | str:
+    """The nearest ``.env`` at or above the working directory.
+
+    ``env_file=".env"`` is resolved by pydantic-settings against the **process
+    working directory**, which made the whole configuration silently depend on
+    where you happened to be standing. Running a command from ``data/`` — which
+    is exactly what an operator does, since that is where the exports live —
+    produced a ``Settings`` with every credential blank and an error message that
+    said "not configured" without saying why. Measured 2026-08-18.
+
+    Walking up matches how ``git`` and ``direnv`` behave, so "anywhere inside the
+    repository" now works and nothing outside it changes. The container is
+    unaffected either way: it gets real environment variables from
+    ``--env-file`` and has no ``.env`` on disk at all (deliberately — the image
+    must never contain one).
+    """
+    try:
+        here = Path.cwd().resolve()
+    except OSError:  # pragma: no cover - deleted cwd
+        return ".env"
+    for directory in (here, *here.parents):
+        candidate = directory / ".env"
+        if candidate.is_file():
+            return candidate
+    return ".env"
+
+
 class Settings(BaseSettings):
     """Runtime configuration, populated from the environment and ``.env``."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_discover_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -358,6 +386,24 @@ class Settings(BaseSettings):
                 if value:
                     out.append(value)
         return tuple(out)
+
+
+def describe_env_source() -> str:
+    """Where configuration came from, for an error message to point at.
+
+    Diagnostics only, and never a value — only the path, or the fact that there
+    was none.
+    """
+    configured = Settings.model_config.get("env_file")
+    if not configured:
+        return "the process environment only (no .env file)"
+    path = Path(configured)
+    if path.is_file():
+        return f"{path} plus the process environment"
+    return (
+        f"the process environment only — no .env was found at or above "
+        f"{Path.cwd()}"
+    )
 
 
 @lru_cache(maxsize=1)

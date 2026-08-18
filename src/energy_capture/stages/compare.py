@@ -222,12 +222,49 @@ def resolve_meter(
     )
 
 
+def resolve_interval(
+    tables: Sequence[pa.Table], *, device_id: str | None = None
+) -> tuple[int | None, str | None]:
+    """Pick ONE interval series. Summing two resolutions doubles the energy.
+
+    LG&E publishes the same energy twice — a 15-minute series and an hourly one,
+    for the same UsagePoint (measured 2026-08-18: they collide at every hour
+    boundary). Both are stored, because they are genuinely different observations
+    and discarding one at ingest would be filtering the custodian's data. But a
+    comparison must choose, and adding them together would report roughly twice
+    the household's consumption.
+
+    The finest interval wins: it is the more informative series, and the coarser
+    one is a rollup of the same energy.
+    """
+    lengths: set[int] = set()
+    for table in tables:
+        for row in table.to_pylist():
+            if row["metric"] != "kwh_interval":
+                continue
+            if device_id is not None and row["device_id"] != device_id:
+                continue
+            lengths.add(int(row["interval_s"]))
+    if not lengths:
+        return None, None
+    finest = min(lengths)
+    if len(lengths) == 1:
+        return finest, None
+    return finest, (
+        f"This meter publishes {len(lengths)} interval series "
+        f"({', '.join(f'{v}s' for v in sorted(lengths))}) covering the same "
+        f"energy. Using the finest ({finest}s); adding them would roughly "
+        f"{'double' if len(lengths) == 2 else 'multiply'} the meter reading."
+    )
+
+
 def meter_hours(
     tables: Sequence[pa.Table],
     start: date,
     end: date,
     *,
     device_id: str | None = None,
+    interval_s: int | None = None,
 ) -> dict[datetime, float]:
     """``hour_start_utc -> kWh``, from interval readings.
 
@@ -243,6 +280,8 @@ def meter_hours(
             if row["metric"] != "kwh_interval":
                 continue
             if device_id is not None and row["device_id"] != device_id:
+                continue
+            if interval_s is not None and int(row["interval_s"]) != interval_s:
                 continue
             stamp = timeutil.ensure_utc(row["ts_utc"])
             if not (start <= timeutil.local_date_of(stamp) <= end):
@@ -271,9 +310,12 @@ def compare_range(
     channels: Sequence[str] = DEFAULT_PANEL_CHANNELS,
     poll_interval_s: int = 30,
     device_id: str | None = None,
+    interval_s: int | None = None,
 ) -> list[HourComparison]:
     """Both sides, hour by hour, over ``start``..``end`` inclusive (local dates)."""
-    meter = meter_hours(meter_tables, start, end, device_id=device_id)
+    meter = meter_hours(
+        meter_tables, start, end, device_id=device_id, interval_s=interval_s
+    )
     panels: dict[datetime, tuple[float, int]] = {}
     expected: dict[datetime, int] = {}
 
@@ -386,6 +428,11 @@ def run(
     device_id, note = resolve_meter(tables, requested=meter)
     if note:
         log.warning("compare_meter_ambiguous", note=note, chosen=device_id)
+    interval_s, interval_note = resolve_interval(tables, device_id=device_id)
+    if interval_note:
+        log.warning(
+            "compare_meter_multiple_intervals", note=interval_note, chosen=interval_s
+        )
 
     with open_spool(spool_path) as spool:
         rows = compare_range(
@@ -396,11 +443,13 @@ def run(
             channels=channels or DEFAULT_PANEL_CHANNELS,
             poll_interval_s=settings.poll_interval_s,
             device_id=device_id,
+            interval_s=interval_s,
         )
 
     report = format_report(rows, min_coverage=min_coverage)
-    if note:
-        report = f"NOTE: {note}\n\n{report}"
+    for message in (note, interval_note):
+        if message:
+            report = f"NOTE: {message}\n\n{report}"
     print(report)  # noqa: T201 - this command's output *is* the report
 
     both = [r for r in rows if r.meter_kwh is not None and r.panel_kwh is not None]
@@ -408,6 +457,7 @@ def run(
         "hours": len(rows),
         "hours_compared": len(both),
         "meter": device_id,
+        "interval_s": interval_s,
         "meter_files": len(tables),
         "meter_dir": str(directory),
         "channels": list(channels or DEFAULT_PANEL_CHANNELS),
