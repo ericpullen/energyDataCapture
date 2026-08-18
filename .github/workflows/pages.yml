@@ -56,12 +56,14 @@ jobs:
             test -f "$page" || { echo "missing: $page"; exit 1; }
           done
 
-      # `enablement` turns Pages on for the repository if it is off, so the site
-      # does not depend on someone having clicked Settings → Pages first. Without
-      # it the first run after a merge fails with "Get Pages site failed".
+      # Pages must already be enabled on the repository, with build type
+      # "workflow". `enablement: true` does NOT substitute for that: the default
+      # GITHUB_TOKEN cannot create a Pages site and fails with "Create Pages site
+      # failed. Error: Resource not accessible by integration" (measured
+      # 2026-08-18). Enabling it is a one-time admin action —
+      # Settings → Pages → Source: GitHub Actions, or:
+      #   gh api repos/OWNER/REPO/pages -X POST -f build_type=workflow
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
