@@ -9,10 +9,12 @@ is the "check it" half: it reads a **Download My Data** export and lands it as
 ``MeterObservation`` rows so ``energycap compare-meter`` can put the two side by
 side.
 
-It is deliberately independent of Green Button *Connect*. Connect is the
-automated OAuth'd API (registration submitted 2026-08-18, awaiting approval —
-``docs/lge-greenbutton.md``); Download is the manual export, available today,
-and it is the same ESPI data. When Connect lands it will feed the same parser.
+It is deliberately independent of Green Button *Connect*, the automated OAuth'd
+API (approved 2026-08-18 — ``docs/lge-greenbutton.md``). Connect fetches the same
+ESPI over HTTP in :mod:`energy_capture.stages.greenbutton_fetch`, and lands it
+through *this* module's parser and :func:`write_months`, so the manual and
+automated paths cannot drift in how a reading becomes a row. Download My Data
+remains the route for bulk history and the fallback if an authorisation lapses.
 
 Meter data is *interval* data
 -----------------------------
@@ -97,6 +99,7 @@ __all__ = [
     "parse_espi_xml",
     "parse_export",
     "run",
+    "write_months",
 ]
 
 
@@ -603,6 +606,43 @@ def merge_into_month(
     return model.sort_table(model.dedupe_table(combined))
 
 
+def write_months(
+    parsed: ParsedExport,
+    destination: Path,
+    *,
+    source: str = model.SOURCE_LGE,
+    dry_run: bool = False,
+) -> list[str]:
+    """Land a parsed export as one Parquet file per calendar month it touches.
+
+    Shared by the file import and the Connect fetch on purpose: the two paths
+    differ in where the ESPI came from and in nothing else, so they must not be
+    able to drift in how a reading becomes a row on disk.
+
+    Months are keyed on the **local** date of the interval start, because that
+    is what ``meter_key`` partitions on (CLAUDE.md rule 4).
+    """
+    months: dict[str, list[MeterObservation]] = {}
+    for obs in parsed.observations:
+        months.setdefault(month_filename(obs.ts_local.date(), source=source), []).append(obs)
+
+    written: list[str] = []
+    if not dry_run and months:
+        destination.mkdir(parents=True, exist_ok=True)
+    for name, rows in sorted(months.items()):
+        target = destination / name
+        incoming = model.observations_to_table(rows, dataset=Dataset.METER)
+        existing = pq.read_table(target) if target.exists() else None
+        merged = merge_into_month(existing, incoming)
+        if dry_run:
+            log.info("greenbutton_would_write", file=str(target), rows=merged.num_rows)
+            continue
+        pq.write_table(merged, target)
+        written.append(str(target))
+        log.info("greenbutton_wrote", file=str(target), rows=merged.num_rows)
+    return written
+
+
 def run(
     *,
     path: str | Path,
@@ -634,24 +674,7 @@ def run(
         log.warning("greenbutton_note", note=note)
 
     destination = Path(out_dir) if out_dir else get_settings().spool_dir / "meter"
-    months: dict[str, list[MeterObservation]] = {}
-    for obs in parsed.observations:
-        months.setdefault(month_filename(obs.ts_local.date(), source=source), []).append(obs)
-
-    written: list[str] = []
-    if not dry_run:
-        destination.mkdir(parents=True, exist_ok=True)
-    for name, rows in sorted(months.items()):
-        target = destination / name
-        incoming = model.observations_to_table(rows, dataset=Dataset.METER)
-        existing = pq.read_table(target) if target.exists() else None
-        merged = merge_into_month(existing, incoming)
-        if dry_run:
-            log.info("greenbutton_would_write", file=str(target), rows=merged.num_rows)
-            continue
-        pq.write_table(merged, target)
-        written.append(str(target))
-        log.info("greenbutton_wrote", file=str(target), rows=merged.num_rows)
+    written = write_months(parsed, destination, source=source, dry_run=dry_run)
 
     summary: dict[str, Any] = {
         "source_file": str(path),

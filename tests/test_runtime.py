@@ -363,11 +363,14 @@ def test_default_jobs_are_exactly_the_schedule_in_plan_section_5() -> None:
         "rollup_hourly",
         "daily_maintenance",
         "bryant_daily_energy",
+        "greenbutton_daily",
     }
     assert jobs["upload_hourly"].schedule == HourlyAt(runtime.UPLOAD_MINUTE) == HourlyAt(5)
     assert jobs["rollup_hourly"].schedule == HourlyAt(runtime.ROLLUP_MINUTE) == HourlyAt(20)
     assert jobs["daily_maintenance"].schedule == DailyAt(1, 30)
     assert jobs["bryant_daily_energy"].schedule == DailyAt(8, 30)
+    # LG&E publishes overnight and lags; 09:15 is after that and clear of 08:30.
+    assert jobs["greenbutton_daily"].schedule == DailyAt(9, 15)
     # dim_channel is rebuilt on demand only (PLAN.md §5) — never scheduled.
     assert not any("dim" in name for name in jobs)
 
@@ -1688,3 +1691,84 @@ async def test_job_ok_never_raises_even_for_an_unloggable_result(
     assert outcome.ok is True
     assert scheduler.failures == 0
     assert log_events(log_stream, "job_ok")
+
+
+# ======================================================================
+# The Green Button daily job
+# ======================================================================
+
+
+def test_greenbutton_daily_skips_quietly_when_connect_is_not_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An unauthorised deployment must not fail a job every morning.
+
+    A scheduled job that errors daily on a perfectly normal configuration is
+    noise, and noise is what teaches an operator to stop reading the log. Not
+    configured and not authorised are both ordinary states — they report
+    ``skipped``, not a failure.
+    """
+    from energy_capture.config import Settings
+
+    monkeypatch.setattr(
+        runtime, "get_settings", lambda: Settings(_env_file=None, spool_dir=tmp_path)
+    )
+    result = asyncio.run(runtime._job_greenbutton_daily(timeutil.now_utc()))
+    assert result == {"skipped": "not_configured"}
+
+
+def test_greenbutton_daily_skips_when_configured_but_never_authorised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from energy_capture.config import Settings
+
+    monkeypatch.setattr(
+        runtime,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            spool_dir=tmp_path,
+            lge_client_id="gbc_test",
+            lge_client_secret="s3cret-value",
+        ),
+    )
+    result = asyncio.run(runtime._job_greenbutton_daily(timeutil.now_utc()))
+    assert result == {"skipped": "not_authorized"}
+
+
+def test_greenbutton_daily_reads_back_far_enough_to_catch_a_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """MyMeter revises recent intervals, so one day's window would miss them."""
+    from energy_capture.config import Settings
+
+    tokens = tmp_path / "tokens"
+    tokens.mkdir(parents=True)
+    (tokens / "lge.json").write_text("{}")
+    monkeypatch.setattr(
+        runtime,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            spool_dir=tmp_path,
+            lge_client_id="gbc_test",
+            lge_client_secret="s3cret-value",
+        ),
+    )
+
+    captured: dict = {}
+
+    class FakeStage:
+        @staticmethod
+        def run(**kwargs):
+            captured.update(kwargs)
+            return {"rows": 0}
+
+    monkeypatch.setattr(runtime.importlib, "import_module", lambda name: FakeStage)
+
+    now = timeutil.now_utc()
+    asyncio.run(runtime._job_greenbutton_daily(now))
+    today = timeutil.local_date_of(now)
+    assert captured["end"] == today
+    assert captured["start"] == today - timedelta(days=runtime.GREENBUTTON_LOOKBACK_DAYS)
+    assert runtime.GREENBUTTON_LOOKBACK_DAYS >= 2, "one day cannot catch a revision"

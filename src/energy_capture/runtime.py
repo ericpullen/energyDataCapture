@@ -39,6 +39,8 @@ job                           when (LOCAL time)
                               then purge uploaded spool rows past the retention
                               floor (PLAN.md §10 — nothing else calls ``purge``)
 ``bryant_daily_energy``       08:30 — Carrier daily energy for day2..day1 (§7.2)
+``greenbutton_daily``         09:15 — LG&E meter intervals for D-3..today (§13);
+                              skipped without complaint until Connect is authorised
 ``dim_channel`` rebuild       never — on demand only (``energycap build-dim``)
 ============================  ==================================================
 
@@ -113,6 +115,7 @@ from energy_capture.stages.poller import (
 __all__ = [
     "BRYANT_DAILY_AT",
     "DAILY_MAINTENANCE_AT",
+    "GREENBUTTON_DAILY_AT",
     "UPLOAD_MINUTE",
     "ROLLUP_MINUTE",
     "DailyAt",
@@ -134,6 +137,12 @@ ROLLUP_MINUTE = 20
 #: Local wall-clock times for the daily jobs (PLAN.md §5, §7.2).
 DAILY_MAINTENANCE_AT = (1, 30)
 BRYANT_DAILY_AT = (8, 30)
+
+#: LG&E publishes overnight and lags several hours; 09:15 local is comfortably
+#: after that and does not collide with the 08:30 Carrier fetch.
+GREENBUTTON_DAILY_AT = (9, 15)
+#: Days of overlap re-read on every run, so a revised interval lands.
+GREENBUTTON_LOOKBACK_DAYS = 3
 
 #: How many days back the 01:30 job compacts and re-rolls. PLAN.md §10 specifies
 #: D-1; the extra days are idempotent no-ops that heal a night the container
@@ -507,6 +516,44 @@ async def _job_bryant_daily(
     return await _call(entry, start=start, end=end, now=fetch_at)
 
 
+async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
+    """Fetch the LG&E meter series for the last few local days (PLAN.md §13).
+
+    Skipped, quietly and without an error, when Green Button Connect has not been
+    authorised — which is the normal state for anyone who has not clicked through
+    the consent flow. An unauthorised deployment must not accumulate a failing job
+    every morning; that is noise which teaches an operator to ignore the log.
+
+    The window is deliberately wider than one day. MyMeter publishes recent
+    intervals and then revises them, and the month file is rebuilt on the dedupe
+    key with the freshest row winning, so re-reading is how a revision lands —
+    the same reasoning as the Bryant day1/day2 pair.
+    """
+    module_name = "energy_capture.stages.greenbutton_fetch"
+    try:
+        fetch = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise
+        _log.warning(
+            "scheduled_job_not_implemented",
+            job="greenbutton_daily",
+            module=module_name,
+        )
+        return {"skipped": "not_implemented", "module": module_name}
+
+    settings = get_settings()
+    if not settings.lge_client_id or not settings.lge_client_secret.get_secret_value():
+        return {"skipped": "not_configured"}
+    token_cache = settings.spool_dir / "tokens" / "lge.json"
+    if not token_cache.exists():
+        return {"skipped": "not_authorized"}
+
+    today = timeutil.local_date_of(now)
+    start = today - timedelta(days=GREENBUTTON_LOOKBACK_DAYS)
+    return await _call(fetch.run, start=start, end=today)
+
+
 def default_jobs(
     *,
     lookback_days: int = DAILY_LOOKBACK_DAYS,
@@ -558,6 +605,12 @@ def default_jobs(
             schedule=DailyAt(*BRYANT_DAILY_AT),
             run=bryant_daily,
             description="Carrier daily energy for day2..day1 -> energy/daily",
+        ),
+        ScheduledJob(
+            name="greenbutton_daily",
+            schedule=DailyAt(*GREENBUTTON_DAILY_AT),
+            run=_job_greenbutton_daily,
+            description="LG&E Green Button meter intervals -> energy/meter",
         ),
     )
 

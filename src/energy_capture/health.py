@@ -698,6 +698,14 @@ class HealthServer:
         if len(path) > 1 and path.endswith("/"):
             path = path.rstrip("/") or "/"
 
+        # Checked before the dashboard, and with its own import, so that a
+        # dashboard that fails to import cannot take down the one route with a
+        # hard deadline attached: an authorization code expires in minutes and
+        # the customer is standing in front of the browser.
+        greenbutton = await self._respond_greenbutton(path, target)
+        if greenbutton is not None:
+            return greenbutton
+
         try:
             from energy_capture import dashboard
         except Exception as exc:  # pragma: no cover - import-time failure only
@@ -721,6 +729,35 @@ class HealthServer:
             ).encode("utf-8")
             return (status, payload, "application/json")
         return None
+
+    async def _respond_greenbutton(
+        self, path: str, target: str
+    ) -> tuple[int, bytes, str] | None:
+        """``GET /greenbutton/callback`` — finish a Green Button authorization.
+
+        The published redirect page is static (GitHub Pages, no server), so its
+        hand-off button points at this port instead. The authorization code
+        therefore travels utility → the operator's browser → localhost, and never
+        reaches a host we run.
+
+        The exchange is a blocking HTTPS round trip to the utility, so it goes to
+        a worker thread: this loop is also running the poll loops, the keepalive
+        and the WebSocket reader, and collection must not pause because someone
+        clicked a button.
+        """
+        if path != "/greenbutton/callback":
+            return None
+        try:
+            from energy_capture.stages import greenbutton_auth
+        except Exception as exc:  # pragma: no cover - import-time failure only
+            self._log.warning(
+                "greenbutton_callback_unavailable", error=f"{type(exc).__name__}: {exc}"
+            )
+            return None
+        try:
+            return await asyncio.to_thread(greenbutton_auth.handle_callback, target)
+        except Exception as exc:  # pragma: no cover - defensive
+            return self._ui_error("green button callback failed", exc)
 
     def _ui_error(self, message: str, exc: BaseException) -> tuple[int, bytes, str]:
         """A dashboard failure, logged and returned as JSON the page can display."""

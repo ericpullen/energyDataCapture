@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     #: Where the customer is sent back to. Registered with LG&E as an exact
     #: string; a mismatch here is a rejected authorization (docs §2).
     lge_redirect_uri: str = "https://energycap.ericpullen.com/greenbutton/callback/"
+    #: The ESPI scope, read back verbatim from LG&E's own stored
+    #: ``ApplicationInformation`` (docs §3c) — so this is what they registered,
+    #: not what we think we asked for. No commas or spaces: some OAuth libraries
+    #: split a scope on both.
+    lge_scope: str = (
+        "FB=1_3_4_5;IntervalDuration=900_3600;BlockDuration=Daily;"
+        "HistoryLength=63072000;SubscriptionFrequency=Daily"
+    )
     #: Dynamic-registration management endpoint for this client.
     lge_registration_client_uri: str = ""
     lge_registration_access_token: SecretStr = SecretStr("")

@@ -450,6 +450,8 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
         "build-dim",
         "create-glue-tables",
         "import-greenbutton",
+        "fetch-greenbutton",
+        "greenbutton-authorize",
         "compare-meter",
     }
 
@@ -491,6 +493,16 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
             "bucket": None,
             "dry_run": True,
         },
+        "fetch-greenbutton": {
+            "start": date(2026, 8, 15),
+            "end": date(2026, 8, 16),
+            "source": "lge",
+            "channel_id": "electric_main",
+            "out_dir": None,
+            "bucket": None,
+            "dry_run": True,
+        },
+        "greenbutton-authorize": {"code": None, "state": None},
         "compare-meter": {
             "start": date(2026, 8, 15),
             "end": date(2026, 8, 16),

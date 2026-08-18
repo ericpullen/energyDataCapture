@@ -339,29 +339,42 @@ Two details worth noting from the approval:
 
 ---
 
-## 4. What happens after approval
+## 4. Built — the Connect client
 
-Nothing in `src/` should change before the approval email lands, because it carries the
-endpoints. When it does, the build is genuinely an import rather than a redesign — §13's
-groundwork is already in place (`source='lge'`, `model.METER_SCHEMA` with `interval_s`,
-`s3io.meter_key`, the `dim_channel` placeholder, the `import-greenbutton` stub). Expected
-shape:
+All of it landed on 2026-08-18, the same day approval arrived. §13's groundwork held: nothing
+in the schema or the S3 layout changed, and the build was an import rather than a redesign.
 
-1. `sources/lge_greenbutton.py` — OAuth2 client (authorization code → refresh token, token
-   cache on `/data` at mode 600 like the others), plus ESPI XML parsing.
-2. A scheduled daily stage fetching the subscription, with day1/day2 re-fetch for revisions.
-3. `import-greenbutton` retargeted at bulk historical XML (and at Download My Data if the
-   registration is not approved).
-4. **`energycap greenbutton-authorize --code … [--state …]`** — the CLI that exchanges an
-   authorization code for tokens. The published callback page already tells the operator to run
-   exactly this, and prints the command with the real code filled in, so **the name is now a
-   contract**: if it changes, `site/greenbutton/callback/index.html` changes with it.
-5. Optionally `GET /greenbutton/callback` on the health server, so the callback page's hand-off
-   button works without a copy-and-paste. Same contract: the path is published.
+| Piece | What it is |
+|---|---|
+| `sources/lge_auth.py` | OAuth2: authorization code → tokens, refresh renewal, token cache at `{SPOOL_DIR}/tokens/lge.json` mode 600 |
+| `stages/greenbutton_auth.py` | `energycap greenbutton-authorize` — prints the URL, or exchanges a code |
+| `stages/greenbutton_fetch.py` | `energycap fetch-greenbutton` — the subscription over HTTP, into the same parser and writer as the file import |
+| `GET /greenbutton/callback` | on the health port, so the published page's hand-off button works |
+| `greenbutton_daily` | scheduled 09:15 local, D-3..today, skipped silently until authorised |
 
-Two things to carry over from the existing sources: the **token cache must never be logged**
-(the scrubber is tested, §15.8), and **a missing interval stays missing** — ESPI omits
-intervals it has no reading for, and those must not become zeros.
+Two published contracts constrain this code, and both are pinned by tests. The callback page
+prints `energycap greenbutton-authorize --code … --state …` verbatim, and its hand-off button
+targets `/greenbutton/callback` on the health port — that page is registered with the utility
+as this application's redirect URI, so neither the command name nor the path is an internal
+detail any more.
+
+Three decisions worth knowing:
+
+1. **The authorization code never reaches a host we run.** The registered redirect page is
+   static, so it cannot exchange anything; it hands the code to `localhost:8080` in the
+   operator's own browser. Utility → browser → collector, and nowhere else.
+2. **The refresh token is the only asset, so it is written before it is used**, a rotation is
+   never dropped, and a refresh the custodian *rejects* clears the cache — continuing to
+   present a revoked credential is how a registration gets disabled. There is no way for this
+   code to re-authenticate on its own, which also means no bug here can hammer the utility
+   with logins.
+3. **The fetch window is local midnight to local midnight**, through `timeutil`, so a 25-hour
+   fall-back day is fetched whole. Assuming 86400 seconds would clip an hour once a year.
+
+Carried over from the other sources: the token cache is never logged (the scrubber is tested,
+§15.8, and both tokens are registered with it the moment they are obtained), and **a missing
+interval stays missing** — ESPI omits readings it has none for, and those must not become
+zeros.
 
 ---
 

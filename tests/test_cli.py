@@ -45,6 +45,8 @@ DOCUMENTED_COMMANDS = (
     "build-dim",
     "create-glue-tables",
     "import-greenbutton",
+    "fetch-greenbutton",
+    "greenbutton-authorize",
     "compare-meter",
 )
 

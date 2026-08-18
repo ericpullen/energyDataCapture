@@ -81,6 +81,8 @@ STAGE_ENTRYPOINTS: dict[str, tuple[str, str]] = {
     "build-dim": ("energy_capture.stages.dim", "build"),
     "create-glue-tables": ("energy_capture.aws.glue", "create_or_update_tables"),
     "import-greenbutton": ("energy_capture.stages.greenbutton", "run"),
+    "fetch-greenbutton": ("energy_capture.stages.greenbutton_fetch", "run"),
+    "greenbutton-authorize": ("energy_capture.stages.greenbutton_auth", "run"),
     "compare-meter": ("energy_capture.stages.compare", "run"),
 }
 
@@ -113,6 +115,11 @@ STAGE_SIGNATURES: dict[str, str] = {
         "assume_uom: str | None, interval_s: int | None, bucket: str | None, "
         "dry_run: bool)"
     ),
+    "fetch-greenbutton": (
+        "run(*, start: date, end: date, source: str, channel_id: str, "
+        "out_dir: Path | None, bucket: str | None, dry_run: bool)"
+    ),
+    "greenbutton-authorize": "run(*, code: str | None, state: str | None)",
     "compare-meter": (
         "run(*, start: date, end: date, meter_dir: Path | None, "
         "channels: tuple[str, ...] | None, source: str, meter: str | None, "
@@ -760,6 +767,87 @@ def import_greenbutton_cmd(
         out_dir=out_dir,
         assume_uom=assume_uom,
         interval_s=interval_s,
+        bucket=bucket,
+        dry_run=dry_run,
+    )
+
+
+@app.command("greenbutton-authorize")
+def greenbutton_authorize_cmd(
+    code: Annotated[
+        str | None,
+        typer.Option("--code", help="Authorization code from the callback page."),
+    ] = None,
+    state: Annotated[
+        str | None,
+        typer.Option("--state", help="The state that came back with the code."),
+    ] = None,
+) -> None:
+    """Authorize this application against LG&E Green Button Connect.
+
+    With no --code, prints the URL to open in a browser. Sign in to MyMeter with
+    your LOCAL account — the one whose email differs from your My Account login,
+    created with the registration code LG&E emails on request.
+
+    With --code, exchanges the code for tokens and caches them at
+    SPOOL_DIR/tokens/lge.json, mode 600. The refresh token is the asset: losing
+    it costs another trip through the browser, so it is written before the access
+    token is used, and a rotation is never dropped.
+
+    The callback page prints this exact command with the code filled in. That
+    page is registered with the utility as this application's redirect URI, so
+    the command name and options are a published contract, not an internal
+    detail. Codes expire in minutes — finish in one sitting.
+    """
+    _run_stage("greenbutton-authorize", code=code, state=state)
+
+
+@app.command("fetch-greenbutton")
+def fetch_greenbutton_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    source: Annotated[
+        str, typer.Option("--source", help="Source name to record on the rows.")
+    ] = "lge",
+    channel: Annotated[
+        str, typer.Option("--channel", help="channel_id for the meter's readings.")
+    ] = "electric_main",
+    out_dir: Annotated[
+        Path | None,
+        typer.Option("--out-dir", help="Where to write. Default: SPOOL_DIR/meter."),
+    ] = None,
+    bucket: Annotated[
+        str | None,
+        typer.Option("--bucket", help="Also mirror the month files to this S3 bucket."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Fetch and report; write nothing.")
+    ] = False,
+) -> None:
+    """Fetch meter intervals from Green Button Connect into energy/meter.
+
+    The automated twin of import-greenbutton: same ESPI, same parser, same
+    writer — only the transport differs. Requires greenbutton-authorize to have
+    run once; the access token is refreshed automatically after that.
+
+    Idempotent, and deliberately overlapping: the month file is rebuilt from
+    existing + fetched on the canonical dedupe key with the freshly fetched row
+    winning, because MyMeter publishes recent intervals and then revises them.
+    Re-running over a range you already have corrects it rather than duplicating.
+
+    Default window: the last four local days, wide enough to re-read and correct
+    revised intervals the way fetch-daily re-reads day2.
+    """
+    start_date, end_date = _resolve_range(
+        start, end, default_start=_days_ago(3), default_end=_today()
+    )
+    _run_stage(
+        "fetch-greenbutton",
+        start=start_date,
+        end=end_date,
+        source=source,
+        channel_id=channel,
+        out_dir=out_dir,
         bucket=bucket,
         dry_run=dry_run,
     )

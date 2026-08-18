@@ -558,6 +558,8 @@ options: `--log-level`, `--traceback`, `--version`.
 | `energycap build-dim [--dry-run]` | `channel_map.json` + blackstart inventory → `dim_channel.parquet` (single object, atomically overwritten). Reads `live_channels.json` to WARN about unmapped channels. | — |
 | `energycap create-glue-tables [--dry-run]` | Idempotent create-or-update of the four Glue tables and their comments. No crawler. | — |
 | `energycap import-greenbutton FILE` | An LG&E **Download My Data** export (Green Button ESPI XML, or MyMeter's `Usage.csv`) → `energy/meter` interval rows. Local Parquet by default; `--bucket` to also mirror to S3. Refuses to guess at units — see below. | — |
+| `energycap greenbutton-authorize [--code …]` | Authorize against Green Button Connect. No `--code` prints the URL to open; `--code` exchanges it and caches tokens at `SPOOL_DIR/tokens/lge.json`, mode 600. | — |
+| `energycap fetch-greenbutton` | The same meter intervals over the authorized Connect API instead of a downloaded file — same parser, same writer. Scheduled daily at 09:15 local. | D-3 → today |
 | `energycap compare-meter` | The utility meter vs. the summed service-feed CTs, hour by hour, with sample coverage. | yesterday → today |
 
 ### Meter vs. panels
@@ -566,12 +568,21 @@ The point of the sub-metering is that it should add up to the bill. These two
 commands check that it does, and they need no AWS:
 
 ```bash
-# 1. MyMeter → Download My Data → Green Button XML. Drop it in ./data.
+# 1a. Automated — authorize once, then it fetches itself daily at 09:15 local.
+container exec energycap energycap greenbutton-authorize     # prints a URL; open it
+container exec energycap energycap fetch-greenbutton --start 2026-08-14
+
+# 1b. Or manual — MyMeter → Download My Data → Green Button XML, dropped in ./data.
 container exec energycap energycap import-greenbutton /data/GreenButton.xml
 
-# 2. Compare it against ct_1_a + ct_1_b on both hubs — the two service feeds.
+# 2. Compare against ct_1_a + ct_1_b on both hubs — the two service feeds.
 container exec energycap energycap compare-meter --start 2026-08-14 --end 2026-08-17
 ```
+
+Authorizing needs a MyMeter **local** account — one whose email differs from your
+My Account login, created with a registration code LG&E emails on request. The
+browser sends you back to the published callback page, which hands the code to
+the collector on `localhost:8080`; the code never reaches a host we run.
 
 Both run **inside the container**, because the collector owns the spool and
 opening it from the macOS host while the container writes it corrupts the
