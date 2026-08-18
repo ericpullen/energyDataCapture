@@ -110,11 +110,19 @@ a public origin, and describing it as anything else would be inaccurate.
 ### Trailing slashes are load-bearing
 
 `redirect_uri` is compared by **exact string match** in OAuth, and GitHub Pages serves these
-pages as directories — `/privacy` 301-redirects to `/privacy/`. Registering the un-slashed form
-invites a redirect in the middle of an authorization and a `redirect_uri` mismatch that, with a
-manually-approved one-shot registration, would be expensive to discover. **Every URI in the form
-below is the canonical trailing-slash form**, which is what the site actually serves with no
-redirect.
+pages as directories. Measured against the live site on 2026-08-18:
+
+```
+/privacy               301 -> https://energycap.ericpullen.com/privacy/
+/greenbutton/callback  301 -> https://energycap.ericpullen.com/greenbutton/callback/
+/greenbutton/callback?code=TEST123&state=abc
+                       301 -> .../greenbutton/callback/?code=TEST123&state=abc
+```
+
+The query string *does* survive the redirect, so the failure mode is not a lost authorization
+code — it is the exact-match comparison the custodian makes at token exchange, against a
+registration that is approved by hand, once, forever. **Every URI in the form below is therefore
+the canonical trailing-slash form**, which is what the site serves with no redirect at all.
 
 ### The one field GitHub Pages cannot honestly satisfy
 
@@ -191,35 +199,46 @@ as a commercial service to a human reviewer would be both dishonest and easy to 
 
 ---
 
-## 3a. Standing the site up
+## 3a. The site is live
 
-The pages exist in `site/` and `.github/workflows/pages.yml` publishes them. Three one-time
-steps, in this order, because the form must not be submitted before the URIs resolve:
+**Done and verified 2026-08-18** — all six registered URIs return a bare `200` over HTTPS on
+`https://energycap.ericpullen.com/`, with the certificate approved and HTTPS enforced. Re-run
+this before submitting the form, and any time `site/` changes:
 
-1. **GitHub** → repository *Settings* → *Pages* → *Build and deployment* → *Source*:
-   **GitHub Actions**. The workflow runs on any push to `main` that touches `site/`, and can be
-   run by hand with *Actions* → *Publish site* → *Run workflow*.
-2. **Route 53** → the `ericpullen.com` hosted zone → add a **CNAME** record:
-   `energycap` → `ericpullen.github.io`. (`site/CNAME` already claims the name on the GitHub
-   side; the DNS record is what makes it resolve, and GitHub then issues the certificate
-   automatically — allow a few minutes, and tick *Enforce HTTPS* in the Pages settings once it
-   appears.)
-3. **Verify all six registered URIs return 200 over HTTPS** before submitting the form:
+```bash
+for p in / /privacy/ /greenbutton/ /greenbutton/callback/ /greenbutton/notify/ /logo.png; do
+  printf '%-28s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "https://energycap.ericpullen.com$p")"
+done
+```
 
-   ```bash
-   for p in / /privacy/ /greenbutton/ /greenbutton/callback/ /greenbutton/notify/ /logo.png; do
-     printf '%-28s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "https://energycap.ericpullen.com$p")"
-   done
-   ```
+All six must be `200`, not `301` — see the trailing-slash note in §2.
 
-   All six must be a bare `200`, not a `301` — see the trailing-slash note in §2.
+How it is wired, for whoever has to move it:
 
-Only `site/` is published, deliberately: this research file and the rest of the repo are read on
-GitHub and have no business being served from the application's own origin.
+- `.github/workflows/pages.yml` publishes **only `site/`** on any push to `main` that touches
+  it. Deliberately only `site/`: this research file and the rest of the repo are read on GitHub
+  and have no business being served from the application's own origin.
+- **Pages had to be enabled out of band.** `actions/configure-pages`'s `enablement: true` does
+  not work — the default `GITHUB_TOKEN` cannot create a Pages site and fails with *"Resource not
+  accessible by integration"*. It is a one-time admin action:
+  `gh api repos/OWNER/REPO/pages -X POST -f build_type=workflow`, or Settings → Pages → Source:
+  GitHub Actions.
+- **The custom domain is a repository setting, not `site/CNAME`.** With the Actions build type
+  the `CNAME` file in the artifact is ignored; the domain was set with
+  `gh api … /pages -X PUT -f cname=energycap.ericpullen.com`, then `-F https_enforced=true` once
+  the certificate was approved. `site/CNAME` is kept anyway so a branch-based deploy or a
+  fork does the right thing, and so the hostname is visible in the tree.
+- DNS is a **CNAME** `energycap` → `ericpullen.github.io` in the `ericpullen.com` Route 53
+  hosted zone. The apex is untouched.
+
+One consequence worth knowing: the pages reference `/style.css` and `/logo.png` **absolutely**,
+which is correct for the custom domain at a root — but means they do not resolve on the
+fallback `https://ericpullen.github.io/energyDataCapture/` project URL. The custom domain is the
+registered one, so that is the right trade; just don't judge the site by the github.io URL.
 
 Moving to AWS later (CloudFront + S3) is a DNS change and a different publish step; nothing in
-the registration has to change, which is the point of registering a hostname we control rather
-than a `github.io` URL.
+the registration changes, which is the point of registering a hostname we control rather than a
+`github.io` URL.
 
 ---
 

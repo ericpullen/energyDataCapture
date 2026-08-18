@@ -4,9 +4,11 @@ A snapshot for picking the work back up. `PLAN.md` is still the spec of record a
 `DEVIATIONS.md` (163+ entries) is still the record of every departure from it; this file
 just says what is done, what is proven, and what is next.
 
-**Branch:** `energycap-implementation`, fully pushed to `origin`.
-**Tests:** 1446 passing, 0 skipped, entirely offline (an autouse guard in
+**Branch:** merged to `main` via [PR #1](https://github.com/ericpullen/energyDataCapture/pull/1)
+on 2026-08-18. `energycap-implementation` is merged and kept, not deleted.
+**Tests:** 1478 passing, 0 skipped, entirely offline (an autouse guard in
 `tests/conftest.py` refuses any non-loopback socket).
+**Public site:** <https://energycap.ericpullen.com/> is live — see `docs/lge-greenbutton.md` §3a.
 
 ---
 
@@ -137,12 +139,15 @@ Connect availability when building" and drafts the registration form field by fi
   `import-greenbutton` becomes the permanent gas and bulk-history path rather than a stopgap
   (DEVIATIONS #166).
 
-Two things blocking progress, both outside the code:
+**The registration is ready to submit.** `docs/lge-greenbutton.md` §3 is the completed
+application; the public site every URI points at is live and verified. The only field left is
+the phone number, which is deliberately not committed to a public repo.
 
-1. **The posture decision** — Desktop app with a `localhost` redirect versus a hosted web
-   app. `docs/lge-greenbutton.md` §2 lays out the trade and recommends Desktop plus a real
-   static one-pager for the URI fields; four bracketed values in the §3 draft need filling in
-   before it can be submitted.
+Two things outside the code still gate real data:
+
+1. **Submitting the form**, on the MyMeter site, and waiting for a human at LG&E to approve it.
+   The approval email is what carries the OAuth endpoints, so **no client code should be written
+   before it arrives.**
 2. **The MyMeter *local* account** — needs a registration code requested by email from
    `MyMeter@lge-ku.com`, and its address **cannot match the My Account primary email**. It is
    the long-latency item and it is independent of vendor approval, so it is worth starting
