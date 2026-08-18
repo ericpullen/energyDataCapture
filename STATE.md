@@ -6,7 +6,7 @@ just says what is done, what is proven, and what is next.
 
 **Branch:** merged to `main` via [PR #1](https://github.com/ericpullen/energyDataCapture/pull/1)
 on 2026-08-18. `energycap-implementation` is merged and kept, not deleted.
-**Tests:** 1478 passing, 0 skipped, entirely offline (an autouse guard in
+**Tests:** 1583 passing, 0 skipped, entirely offline (an autouse guard in
 `tests/conftest.py` refuses any non-loopback socket).
 **Public site:** <https://energycap.ericpullen.com/> is live — see `docs/lge-greenbutton.md` §3a.
 
@@ -19,11 +19,13 @@ All seven build-order steps of `PLAN.md` §16, plus two things the spec did not 
 | | |
 |---|---|
 | Collector | 30s pollers (Leviton + Bryant) → SQLite spool → hourly Parquet parts → daily compaction → DuckDB hourly rollup |
-| Sources | Leviton LWHEM-2 (REST + **WebSocket**), Bryant/Carrier (status + daily energy), legacy DynamoDB/JSON backfill |
+| Sources | Leviton LWHEM-2 (REST + **WebSocket**), Bryant/Carrier (status + daily energy), **LG&E Green Button Connect** (OAuth2/ESPI meter intervals), legacy DynamoDB/JSON backfill |
 | Semantic layer | `config/channel_map.json` joined to the blackstart inventory → `dim_channel` |
 | Query surfaces | Glue tables with partition projection and real comments; README with executable DuckDB examples |
 | **Dashboard** (not in PLAN) | `GET /ui` — live values, sparklines, HVAC, hourly kWh math, 24h scrollback |
 | **Apple `container`** (not in PLAN) | `scripts/energycap-container.sh` + launchd, alongside Docker |
+| **`compare-meter`** (not in PLAN) | the utility meter against the summed feed CTs, hour by hour, with sample coverage |
+| **Public site** (not in PLAN) | `site/` → <https://energycap.ericpullen.com/>, the six URIs Green Button registration requires |
 
 ## What has actually been proven against reality
 
@@ -112,11 +114,11 @@ groundwork is already in place and should not be redesigned:
 - `aws/s3io.py` already has `meter_key` → `energy/meter/year=YYYY/{source}-{YYYYMM}.parquet`
   (filename convention invented in DEVIATIONS #3 — change it there if the real data wants
   something else).
-- `config/channel_map.json` carries a **placeholder** `lge` / `electric_main` entry proving
-  `dim_channel` holds an lge channel with no code change. A `gas_main` joins it if the gas
-  meter is exported too.
-- `energycap import-greenbutton` exists as a CLI command that exits 3 with "deliberately
-  deferred per PLAN.md §13".
+- `config/channel_map.json` now maps **both real meters** — `1308468` (house) and `1326254`
+  (barn) — plus the two retired house ids the download republishes. **No placeholders remain**;
+  `build-dim` reports 26 channels across all three sources.
+- `energycap import-greenbutton` (a downloaded file) and `energycap fetch-greenbutton` (the
+  Connect API) both land through the same parser and writer.
 
 What §13 specifies for the mapping, once real data is in hand: ESPI `UsagePoint` →
 `device_id` (meter id); `MeterReading/ReadingType` → `metric` + `unit` (`kwh_interval`/`kWh`,
@@ -165,7 +167,8 @@ and **the map has no placeholders left** — 26 real channels across all three s
 `energycap import-greenbutton` is built and has been run against a real 10-day export, and
 `energycap compare-meter` puts it beside the panels. Both are local-only — no S3 needed.
 
-> **First measured result:** over the 13 hours with full sample coverage,
+> **First measured result** (unchanged after every fix since): over the 13 hours with full
+> sample coverage,
 > meter **46.295 kWh** against summed feed CTs **47.878 kWh** — the panels read
 > **3.4% high**. Within the combined tolerance of the clamps and the meter, and the first
 > evidence that the sub-metering is trustworthy.
