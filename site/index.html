@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>energycap — household energy monitoring</title>
+<meta name="description" content="energycap is a personal, single-household energy monitoring application run by its own operator.">
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <img src="/logo.png" alt="energycap logo">
+  <div>
+    <h1>energycap</h1>
+    <p>Household energy and HVAC monitoring</p>
+  </div>
+</header>
+
+<p><strong>energycap is a personal, single-household energy monitoring application.</strong>
+It is run by one person, for one home — their own. It is not a commercial service, it has no
+customers other than its operator, and it is not accepting sign-ups.</p>
+
+<h2>What it does</h2>
+
+<p>Every 30 seconds it records circuit-level electrical measurements from the home's own
+metering equipment (Leviton smart load centers) and telemetry from the home's own HVAC system
+(Bryant Evolution). Those readings are stored as a private time-series archive so the operator
+can answer questions about their own house: what a given circuit actually costs to run, how
+much of a bill the heat pump is responsible for, whether a change to the thermostat schedule
+paid for itself.</p>
+
+<h2>Why it asks for Green Button data</h2>
+
+<p>On-premises measurements only tell half the story. The utility's own metered interval usage
+is the authoritative record of what the household is billed for, and comparing the two is the
+whole point: it validates the on-premises readings, and it accounts for whatever the
+sub-metering does not cover.</p>
+
+<p>Green Button Connect access is requested for the operator's <strong>own utility
+account only</strong>. See the <a href="/privacy">privacy policy</a> for exactly what is
+retrieved and how it is handled, and <a href="/greenbutton/">Green Button Connect</a> for how
+to authorize or revoke access.</p>
+
+<h2>How it is built</h2>
+
+<p>One long-running process on a machine in the house, writing to local storage and to the
+operator's own private cloud storage account. The source code is public:
+<a href="https://github.com/ericpullen/energyDataCapture">github.com/ericpullen/energyDataCapture</a>.</p>
+
+<h2>Support</h2>
+
+<div class="card">
+  <p style="margin-top:0">Operated by <strong>Eric Pullen</strong>.<br>
+  Support and data questions: <a href="mailto:eric@ericpullen.com">eric@ericpullen.com</a></p>
+</div>
+
+<footer>
+  <a href="/privacy">Privacy policy</a> ·
+  <a href="/greenbutton/">Green Button Connect</a> ·
+  <a href="https://github.com/ericpullen/energyDataCapture">Source</a>
+</footer>
+
+</main>
+</body>
+</html>

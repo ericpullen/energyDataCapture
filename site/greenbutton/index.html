@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Green Button Connect — energycap</title>
+<meta name="description" content="How energycap uses Green Button Connect My Data, and how to authorize or revoke access.">
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <img src="/logo.png" alt="energycap logo">
+  <div>
+    <h1>Green Button Connect</h1>
+    <p>energycap · Connect My Data</p>
+  </div>
+</header>
+
+<p>energycap is a personal, single-household energy monitoring application. It uses
+<strong>Green Button Connect My Data</strong> to retrieve the operator's own utility-metered
+electricity usage so it can be compared against measurements taken from equipment in the same
+home.</p>
+
+<h2>What is requested</h2>
+
+<ul>
+  <li><strong>Interval electricity usage</strong> for the operator's own account — the usage
+    point, its reading metadata, and the interval readings themselves.</li>
+  <li>A <strong>daily</strong> subscription, so newly published readings arrive without anyone
+    re-authorizing.</li>
+  <li>Historical usage for the account, to establish a baseline.</li>
+</ul>
+
+<p>Nothing else is requested. No billing payment details, no account credentials, and no data
+belonging to any other account.</p>
+
+<h2>Authorizing access</h2>
+
+<ol>
+  <li>You will need a <strong>My&nbsp;Meter local account</strong> with the utility. Requesting
+    one requires emailing the utility for a registration code, and the local account's email
+    address must be different from the primary email on your utility My&nbsp;Account login.</li>
+  <li>Begin the authorization from your utility's My&nbsp;Meter site, choosing energycap as the
+    third party and selecting what to share.</li>
+  <li>The utility returns you to <code>/greenbutton/callback</code> on this site, which hands
+    the authorization to the collector running on your own machine. That page transmits nothing
+    to this site or to anyone else — it is a static page.</li>
+</ol>
+
+<h2>Revoking access</h2>
+
+<p>Access can be withdrawn at any time from the My&nbsp;Meter site, in the section listing the
+third parties you are sharing data with. Revoking stops all further sharing immediately. It does
+not delete readings already retrieved into the operator's own archive.</p>
+
+<h2>What happens to the data</h2>
+
+<p>It is stored privately, used only for the operator's own analysis of their own home, and
+never sold, published, shared, or aggregated with anyone else's data. The
+<a href="/privacy">privacy policy</a> is the full statement, and the code that handles it is
+public.</p>
+
+<h2>Learn more about Green Button</h2>
+
+<p><a href="https://www.greenbuttondata.org/">greenbuttondata.org</a> ·
+<a href="https://www.greenbuttonalliance.org/">Green Button Alliance</a></p>
+
+<h2>Support</h2>
+
+<div class="card">
+  <p style="margin-top:0">Eric Pullen ·
+  <a href="mailto:eric@ericpullen.com">eric@ericpullen.com</a></p>
+</div>
+
+<footer>
+  <a href="/">energycap</a> ·
+  <a href="/privacy">Privacy policy</a> ·
+  <a href="https://github.com/ericpullen/energyDataCapture">Source</a>
+</footer>
+
+</main>
+</body>
+</html>

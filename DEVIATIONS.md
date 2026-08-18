@@ -2772,13 +2772,18 @@ and does show it as a break.
 [gbpdf]: https://lge-ku.com/sites/default/files/media/files/downloads/LGE-KU-Green-Button-Connect-Third-Party%20Vendor-Registration-Process.pdf
 
 **Nothing in the schema changes** — `METER_SCHEMA`, `meter_key` and the `dim_channel`
-placeholder are fuel-agnostic, and `gas_main` remains a perfectly good `channel_id`. What
-changes is the *route*: gas arrives only via **Download My Data**, the manual XML/CSV export.
+placeholder are fuel-agnostic and never knew about fuels in the first place.
 
-So `import-greenbutton` is not a stopgap that the Connect client eventually replaces. It is
-the permanent gas path and the bulk-historical path, and both commands will coexist. That is
-worth knowing before building either, because the tempting simplification — "build Connect,
-delete the importer" — would silently drop gas forever.
+And in this deployment it costs nothing: **the property has no gas service** (owner, 2026-08-18).
+So the `gas_main` half of §13 is *moot*, not blocked — there is no meter to export. The
+`channel_map.json` note that promised "a 'gas_main' entry joins it if the gas meter is exported
+too" has been removed, because a note describing work that will never happen reads as a backlog
+item to the next person.
+
+`import-greenbutton` therefore keeps a narrower reason to exist than "the gas path": **bulk
+history** beyond whatever `HistoryLength` Connect grants, and the fallback if the vendor
+registration is not approved. Both commands coexist; the tempting simplification of "build
+Connect, delete the importer" still loses something, just less than it would have.
 
 Also settled by the same research, and *not* deviations, just answers to questions §13 left
 open: Connect exists (§13 hedged "if LG&E actually offers it", and told us to assume manual

@@ -214,7 +214,7 @@
       "short_label": "LG&E electric meter",
       "category": "meter",
       "placeholder": true,
-      "notes": "PLACEHOLDER for the future Green Button import (PLAN.md §13), kept here to prove dim_channel holds an 'lge' channel with no code change — the source vocabulary is model.SOURCES, not a two-source enum. device_id is the ESPI UsagePoint (meter id); it becomes real when `energycap import-greenbutton` is built and the first export is read. A 'gas_main' entry joins it if the gas meter is exported too."
+      "notes": "PLACEHOLDER for the future Green Button import (PLAN.md §13), kept here to prove dim_channel holds an 'lge' channel with no code change — the source vocabulary is model.SOURCES, not a two-source enum. device_id is the ESPI UsagePoint (meter id); it becomes real once the Green Button Connect registration is approved and the first export is read (docs/lge-greenbutton.md). Electric is the only channel this house will ever have here: the property has no gas service, and LG&E's Green Button Connect carries electric usage only (DEVIATIONS #166) — so there is deliberately no 'gas_main' entry to add."
     }
   ]
 }

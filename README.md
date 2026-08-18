@@ -35,6 +35,13 @@ locally, Athena remotely, or by an LLM over MCP.
 - [Settled by the first live run](#settled-by-the-first-live-run-2026-08-17)
 - [Known-unproven](#known-unproven)
 
+Two other directories are worth knowing about. **`site/`** is a small public web site
+(published to <https://energycap.ericpullen.com/> by `.github/workflows/pages.yml`) that exists
+because LG&E's Green Button Connect registration requires public client, policy, logo, portal,
+redirect and notification URLs — its redirect page is what hands an OAuth authorization code to
+the collector running inside the house. **`docs/lge-greenbutton.md`** is the research behind
+that registration and the application itself.
+
 ---
 
 ## The data model in brief

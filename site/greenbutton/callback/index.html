@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorization received — energycap</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <img src="/logo.png" alt="energycap logo">
+  <div>
+    <h1>Authorization callback</h1>
+    <p>energycap · Green Button Connect</p>
+  </div>
+</header>
+
+<div id="panel"></div>
+
+<h2>Why this page exists</h2>
+
+<p>energycap runs on a machine inside the home, which has no public address. The utility needs
+a public HTTPS address to return you to, so it returns you here — and this page hands the
+authorization to the collector on your own machine.</p>
+
+<p><strong>This page is static.</strong> It is plain HTML served from GitHub Pages with no
+server-side code, no analytics, and nothing loaded from any other host. The authorization code
+is read by script in your own browser and goes only where you send it. It is removed from the
+address bar as soon as it is read, so it does not linger in your browser history.</p>
+
+<footer>
+  <a href="/">energycap</a> ·
+  <a href="/privacy">Privacy policy</a> ·
+  <a href="/greenbutton/">Green Button Connect</a>
+</footer>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var panel = document.getElementById("panel");
+  var params = new URLSearchParams(window.location.search);
+  var query = window.location.search;
+
+  // Strip the code out of the address bar (and therefore out of history) the
+  // moment it has been read. Everything below uses the captured copy.
+  if (query) {
+    history.replaceState(null, "", window.location.pathname);
+  }
+
+  function el(tag, attrs, text) {
+    var node = document.createElement(tag);
+    for (var key in attrs || {}) { node.setAttribute(key, attrs[key]); }
+    if (text !== undefined) { node.textContent = text; }
+    return node;
+  }
+
+  var error = params.get("error");
+  var code = params.get("code");
+
+  if (error) {
+    panel.appendChild(el("h2", null, "The utility reported an error"));
+    var box = el("div", { "class": "note" });
+    box.appendChild(el("p", null, error));
+    var detail = params.get("error_description");
+    if (detail) { box.appendChild(el("p", { "class": "muted" }, detail)); }
+    box.appendChild(el("p", { "class": "muted" },
+      "Nothing was authorized. You can start again from the My Meter site."));
+    panel.appendChild(box);
+    return;
+  }
+
+  if (!code) {
+    panel.appendChild(el("div", { "class": "card" })).appendChild(
+      el("p", null,
+        "There is no authorization in this request. This page is the redirect target " +
+        "for Green Button Connect; it does something only when the utility sends you " +
+        "here at the end of an authorization.")
+    );
+    return;
+  }
+
+  panel.appendChild(el("h2", null, "Authorization received"));
+
+  var card = el("div", { "class": "card" });
+  card.appendChild(el("p", { "style": "margin-top:0" },
+    "Hand this to the collector running on your own machine. It must be running, " +
+    "and you must be on the same computer."));
+
+  var portRow = el("div", { "class": "row" });
+  portRow.appendChild(el("label", { "for": "port", "class": "muted" }, "Collector port"));
+  var port = el("input", { "id": "port", "type": "number", "value": "8080",
+                           "min": "1", "max": "65535",
+                           "style": "width:6.5rem;padding:0.45rem 0.6rem;font:inherit" });
+  portRow.appendChild(port);
+  card.appendChild(portRow);
+
+  var actions = el("div", { "class": "row", "style": "margin-top:0.9rem" });
+  var hand = el("a", { "class": "btn", "id": "hand" }, "Hand off to the collector");
+  function retarget() {
+    hand.setAttribute("href", "http://localhost:" + (port.value || "8080") +
+                              "/greenbutton/callback" + query);
+  }
+  retarget();
+  port.addEventListener("input", retarget);
+  actions.appendChild(hand);
+
+  var copy = el("button", { "class": "secondary", "type": "button" }, "Copy the code");
+  copy.addEventListener("click", function () {
+    navigator.clipboard.writeText(code).then(function () {
+      copy.textContent = "Copied";
+    }, function () {
+      copy.textContent = "Copy failed — select it below";
+    });
+  });
+  actions.appendChild(copy);
+  card.appendChild(actions);
+  panel.appendChild(card);
+
+  panel.appendChild(el("h3", null, "Or paste it in by hand"));
+  panel.appendChild(el("p", { "class": "muted" },
+    "If the hand-off does not work — the collector is on a different machine, or is not " +
+    "running — run this in the repository. The code is single-use and expires quickly, so " +
+    "do it now rather than later."));
+
+  var cmd = el("pre");
+  var state = params.get("state");
+  cmd.appendChild(el("code", null,
+    "uv run energycap greenbutton-authorize --code " + code +
+    (state ? " --state " + state : "")));
+  panel.appendChild(cmd);
+})();
+</script>
+</body>
+</html>

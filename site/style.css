@@ -1,0 +1,156 @@
+/* energycap — the public pages the Green Button Connect registration points at.
+   Deliberately tiny and self-contained: no fonts, scripts or assets from any
+   other host, because the callback page handles an OAuth authorization code. */
+
+:root {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --ink: #0f172a;
+  --ink-2: #475569;
+  --ink-3: #64748b;
+  --accent: #0e7490;
+  --accent-ink: #ffffff;
+  --code-bg: #f1f5f9;
+  --warn-bg: #fffbeb;
+  --warn-border: #fcd34d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220;
+    --surface: #111c2e;
+    --border: #24354f;
+    --ink: #e8eef7;
+    --ink-2: #a7b6cb;
+    --ink-3: #8496ae;
+    --accent: #22d3ee;
+    --accent-ink: #06202b;
+    --code-bg: #0a1526;
+    --warn-bg: #241d05;
+    --warn-border: #7a5c07;
+  }
+}
+
+/* so the native number spinner and focus ring follow the page, not the OS default */
+html { color-scheme: light dark; }
+
+* { box-sizing: border-box; }
+
+input {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+body {
+  margin: 0;
+  padding: 2.5rem 1.25rem 4rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+main { max-width: 44rem; margin: 0 auto; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 2rem;
+}
+
+header img { width: 54px; height: 45px; border-radius: 6px; }
+header h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+header p { margin: 0.15rem 0 0; color: var(--ink-3); font-size: 0.9rem; }
+
+h2 {
+  margin: 2.25rem 0 0.6rem;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+h3 { margin: 1.5rem 0 0.4rem; font-size: 1rem; }
+
+p, li { color: var(--ink-2); }
+p { margin: 0.7rem 0; }
+ul { padding-left: 1.25rem; }
+li { margin: 0.35rem 0; }
+
+strong { color: var(--ink); }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.875em;
+}
+
+code { background: var(--code-bg); padding: 0.12em 0.35em; border-radius: 4px; }
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+}
+
+pre code { background: none; padding: 0; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin: 1.25rem 0;
+}
+
+.note {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+  margin: 1.25rem 0;
+  font-size: 0.94rem;
+}
+
+button, .btn {
+  display: inline-block;
+  font: inherit;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 0;
+  border-radius: 8px;
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+
+.muted { color: var(--ink-3); font-size: 0.9rem; }
+
+footer {
+  margin-top: 3.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  color: var(--ink-3);
+  font-size: 0.875rem;
+}
+
+footer a { color: var(--ink-3); }

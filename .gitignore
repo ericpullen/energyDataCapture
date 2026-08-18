@@ -165,7 +165,11 @@ venv.bak/
 .ropeproject
 
 # mkdocs documentation
-/site
+#   The GitHub Python template ignores `/site` here as mkdocs build output. This
+#   project has no mkdocs, and `/site` is *source*: the public pages the LG&E Green
+#   Button Connect registration points at (see docs/lge-greenbutton.md). Ignoring it
+#   silently un-publishes an approved OAuth redirect URI, so the rule is gone and a
+#   test in tests/test_site.py asserts it stays gone.
 
 # mypy
 .mypy_cache/

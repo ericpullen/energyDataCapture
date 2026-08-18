@@ -59,10 +59,18 @@ customers to share **electric** usage data", and the required function block set
 FB 5 = *Interval Electricity Metering*. There is no gas function block in the required list.
 
 `PLAN.md` §13 assumed gas would come along ("gas likely daily therms/CCF", `channel_id`
-`gas_main`, `ccf_interval`/`CCF`). It will not, via Connect. Gas stays a **Download My Data**
-problem, which means `import-greenbutton` keeps its reason to exist even after the Connect
-client is built — it becomes the gas path and the historical-backfill path, not dead code.
-Recorded in `DEVIATIONS.md`.
+`gas_main`, `ccf_interval`/`CCF`). It will not, via Connect.
+
+**In practice this costs us nothing: the property has no gas service** (confirmed by the owner,
+2026-08-18), so there is no gas meter to export and the `gas_main` half of §13 is moot rather
+than blocked. The design stays fuel-agnostic — `METER_SCHEMA`, `meter_key` and `dim_channel`
+never knew about fuels — but nothing should be built for gas, and the `channel_map.json` note
+suggesting a future `gas_main` entry has been removed so it does not read as pending work.
+Recorded in `DEVIATIONS.md` #166.
+
+What *does* survive is `import-greenbutton`'s reason to exist: Download My Data remains the
+route for **bulk history** beyond whatever `HistoryLength` Connect grants, and the fallback if
+the vendor registration is not approved.
 
 ### Customer-side gotcha
 
@@ -74,58 +82,80 @@ is independent of the vendor approval.
 
 ---
 
-## 2. The one decision that gates the form
+## 2. Posture: a public site *and* the localhost hand-off
 
-Six of the eighteen fields are URIs that a human reviewer will click. That forces a posture
-choice, and it is the only thing here that is genuinely yours to pick:
+Six of the eighteen fields are URIs a human reviewer will click, so the app needs a real public
+presence — but the collector runs on a machine inside the house with no public address, which is
+exactly the situation OAuth redirect URIs are worst at. The resolution is to do both, and it is
+now built (`site/`, published to **`https://energycap.ericpullen.com/`** via GitHub Pages):
 
-**Option A — Desktop application.** `Third-Party Application Type: Desktop`, redirect URI
-`http://localhost:8080/greenbutton/callback`. The health server already listens on 8080, so
-it can host the callback with no new infrastructure and no inbound firewall hole. Honest
-(this genuinely is a single-machine desktop collector) and cheapest. **Risk:** the Notify URI
-still has to be a public HTTPS endpoint, and a reviewer may bounce a `localhost` redirect on
-sight.
+- **The public HTTPS redirect URI is the one registered**, so it survives review and works
+  from any browser. It is a *static* page.
+- **That page hands the authorization to `localhost`.** It reads `code`/`state` out of the query
+  string in the visitor's own browser, then offers a button to
+  `http://localhost:<port>/greenbutton/callback?…` plus a copy-and-paste CLI fallback. Nothing
+  is transmitted to the site or to anyone else — there is no server-side code to transmit it
+  *with* — and the code is stripped from the address bar with `history.replaceState` as soon as
+  it is read, so it does not linger in browser history.
 
-**Option B — Web application.** Static one-pager for client/policy/logo/portal URIs, plus a
-Lambda Function URL or Cloudflare Worker for the redirect and notify callbacks. More credible
-to a reviewer and gives a real notify endpoint; costs an afternoon and a public footprint.
+So `localhost` is not registered as the redirect URI; it is the hand-off *target*, which sidesteps
+the question of whether the form accepts a list at all. If the form does accept multiple redirect
+URIs, adding `http://localhost:8080/greenbutton/callback` as a second one lets the collector be
+driven directly, and is worth asking for in the approval correspondence — but nothing depends on
+it.
 
-**Recommendation: A, with B's static page.** Put up a genuine one-page site (GitHub Pages is
-enough — free, HTTPS, stable) carrying the description, privacy policy and logo so the URI
-fields point at something real, declare Desktop, and use the localhost redirect. If the
-review bounces on the redirect or the notify URI, add the Function URL and resubmit — but
-don't build the serverless half speculatively for a form that may not need it.
+**Application type is therefore `Web`**, not `Desktop`: the registered redirect is a web page on
+a public origin, and describing it as anything else would be inaccurate.
 
-Notify is a nicety regardless: a daily subscription can simply be **polled**, so nothing in
-the pipeline should depend on inbound push.
+### Trailing slashes are load-bearing
+
+`redirect_uri` is compared by **exact string match** in OAuth, and GitHub Pages serves these
+pages as directories — `/privacy` 301-redirects to `/privacy/`. Registering the un-slashed form
+invites a redirect in the middle of an authorization and a `redirect_uri` mismatch that, with a
+manually-approved one-shot registration, would be expensive to discover. **Every URI in the form
+below is the canonical trailing-slash form**, which is what the site actually serves with no
+redirect.
+
+### The one field GitHub Pages cannot honestly satisfy
+
+**Notify URI.** A static host answers `GET` but not `POST`, so a push notification to it would
+fail. This is survivable because a daily subscription can simply be **polled** — and it should
+be regardless, since a collector with no inbound access must never depend on push. The
+registered notify page says exactly that in plain language, so nobody reading it is misled.
+
+If LG&E requires a working `POST` endpoint, the fix is a Lambda Function URL (or a Cloudflare
+Worker) that returns 200 and drops a marker in S3 — roughly half an hour. Deliberately not built
+yet: it is speculative work for a requirement that may not exist.
 
 ---
 
-## 3. Draft application
+## 3. The application, ready to submit
 
-Substitute the four bracketed values. Everything else is ready to paste.
+Values settled with the owner 2026-08-18. **The phone number is deliberately not recorded in
+this file** — the repository is public — so it is the one field to fill in by hand; it is in the
+conversation where it was given.
 
 | Field | Value |
 |---|---|
 | Software Version | `1.0.0` |
 | Client Name | `energycap` |
 | Third-Party Name | `energycap` |
-| Contact | `[a monitored email address]` |
-| Policy URI | `https://[host]/energycap/privacy` |
+| Contact | `eric@ericpullen.com` |
+| Policy URI | `https://energycap.ericpullen.com/privacy/` |
 | Third-Party Application Description | *see below* |
-| Redirect URI | `http://localhost:8080/greenbutton/callback` |
+| Redirect URI | `https://energycap.ericpullen.com/greenbutton/callback/` |
 | Third-Party Application Status | `Production` |
-| Client URI | `https://[host]/energycap` |
+| Client URI | `https://energycap.ericpullen.com/` |
 | Token Endpoint Authentication Method | `client_secret_basic` |
-| Third-Party Application Type | `Desktop` |
+| Third-Party Application Type | `Web` |
 | Scope | `FB=1_3_4_5;IntervalDuration=900_3600;BlockDuration=Daily;HistoryLength=63072000;SubscriptionFrequency=Daily` |
 | Third-Party Application Use | `Energy management` |
 | Grant Types | `authorization_code refresh_token client_credentials` |
-| Third-Party Phone | `1-[XXX-XXX-XXXX]` |
+| Third-Party Phone | *(fill in by hand — not committed to a public repo)* |
 | Response Types | `code` |
-| Third-Party User Portal Screen URI | `https://[host]/energycap` |
-| Third-Party Notify URI | `https://[host]/greenbutton/notify` |
-| Logo URI | `https://[host]/energycap/logo.png` (≤ 180×150) |
+| Third-Party User Portal Screen URI | `https://energycap.ericpullen.com/greenbutton/` |
+| Third-Party Notify URI | `https://energycap.ericpullen.com/greenbutton/notify/` |
+| Logo URI | `https://energycap.ericpullen.com/logo.png` (180×150 exactly) |
 | Software ID | `597b1e33-dae8-4262-8fa1-8ae1ea0a68ec` |
 
 **Description** (truthful — this is a single-household personal deployment, and describing it
@@ -161,6 +191,38 @@ as a commercial service to a human reviewer would be both dishonest and easy to 
 
 ---
 
+## 3a. Standing the site up
+
+The pages exist in `site/` and `.github/workflows/pages.yml` publishes them. Three one-time
+steps, in this order, because the form must not be submitted before the URIs resolve:
+
+1. **GitHub** → repository *Settings* → *Pages* → *Build and deployment* → *Source*:
+   **GitHub Actions**. The workflow runs on any push to `main` that touches `site/`, and can be
+   run by hand with *Actions* → *Publish site* → *Run workflow*.
+2. **Route 53** → the `ericpullen.com` hosted zone → add a **CNAME** record:
+   `energycap` → `ericpullen.github.io`. (`site/CNAME` already claims the name on the GitHub
+   side; the DNS record is what makes it resolve, and GitHub then issues the certificate
+   automatically — allow a few minutes, and tick *Enforce HTTPS* in the Pages settings once it
+   appears.)
+3. **Verify all six registered URIs return 200 over HTTPS** before submitting the form:
+
+   ```bash
+   for p in / /privacy/ /greenbutton/ /greenbutton/callback/ /greenbutton/notify/ /logo.png; do
+     printf '%-28s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "https://energycap.ericpullen.com$p")"
+   done
+   ```
+
+   All six must be a bare `200`, not a `301` — see the trailing-slash note in §2.
+
+Only `site/` is published, deliberately: this research file and the rest of the repo are read on
+GitHub and have no business being served from the application's own origin.
+
+Moving to AWS later (CloudFront + S3) is a DNS change and a different publish step; nothing in
+the registration has to change, which is the point of registering a hostname we control rather
+than a `github.io` URL.
+
+---
+
 ## 4. What happens after approval
 
 Nothing in `src/` should change before the approval email lands, because it carries the
@@ -172,7 +234,14 @@ shape:
 1. `sources/lge_greenbutton.py` — OAuth2 client (authorization code → refresh token, token
    cache on `/data` at mode 600 like the others), plus ESPI XML parsing.
 2. A scheduled daily stage fetching the subscription, with day1/day2 re-fetch for revisions.
-3. `import-greenbutton` retargeted at gas and at bulk historical XML.
+3. `import-greenbutton` retargeted at bulk historical XML (and at Download My Data if the
+   registration is not approved).
+4. **`energycap greenbutton-authorize --code … [--state …]`** — the CLI that exchanges an
+   authorization code for tokens. The published callback page already tells the operator to run
+   exactly this, and prints the command with the real code filled in, so **the name is now a
+   contract**: if it changes, `site/greenbutton/callback/index.html` changes with it.
+5. Optionally `GET /greenbutton/callback` on the health server, so the callback page's hand-off
+   button works without a copy-and-paste. Same contract: the path is published.
 
 Two things to carry over from the existing sources: the **token cache must never be logged**
 (the scrubber is tested, §15.8), and **a missing interval stays missing** — ESPI omits
