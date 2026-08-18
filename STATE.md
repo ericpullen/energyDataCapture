@@ -145,10 +145,21 @@ cache at `{SPOOL_DIR}/tokens/lge.json` mode 600, `energycap greenbutton-authoriz
 `energycap fetch-greenbutton`, `GET /greenbutton/callback` on the health port, and a
 `greenbutton_daily` job at 09:15 local that skips silently until someone authorises.
 
-All three credentials were verified live before any of it was written (§3c). **What has never
-run is the authorisation itself** — that needs a person in a browser, and a MyMeter *local*
-account, whose registration code arrived 2026-08-18. Until that happens, `fetch-greenbutton`
-raises "authorise first" and the scheduled job reports `skipped: not_authorized`.
+**Authorised and fetching, 2026-08-18.** Tokens are cached at `data/tokens/lge.json` (mode 600,
+on the bind mount, so the container sees them), and `fetch-greenbutton` pulls real intervals.
+
+The first live fetch found two silent corruptions and one surprise, all in `DEVIATIONS.md` #169:
+LG&E's `published-min` wants **ISO-8601 with a `Z`**, not the spec's epoch seconds — and
+camelCase `publishedMin` succeeds while ignoring the filter, returning 49 MB instead of 415 KB;
+every UsagePoint publishes the same energy as **both a 900s and a 3600s series**, which the
+canonical dedupe key silently collapsed until `METER_DEDUPE_KEY` gained `interval_s`; and
+Connect exposes a **second meter the download does not**.
+
+That second meter is the **barn** (`1326254`) — a separate service, confirmed by the owner.
+~150 W baseline around the clock with a single large load running late afternoon into evening
+at up to **14.7 kW**, 3.6–40 kWh/day. Nothing sub-meters it, so the meter row is the only
+visibility out there. Both meters are now in `channel_map.json` with the two retired house ids,
+and **the map has no placeholders left** — 26 real channels across all three sources.
 
 **Meter data did not wait for it.** Download My Data needs no OAuth, so
 `energycap import-greenbutton` is built and has been run against a real 10-day export, and

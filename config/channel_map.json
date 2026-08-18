@@ -208,13 +208,39 @@
     },
     {
       "source": "lge",
-      "device_id": "PLACEHOLDER-LGE-METER-ID",
+      "device_id": "1308468",
       "channel_id": "electric_main",
-      "label": "LG&E electric meter — whole-home interval energy",
-      "short_label": "LG&E electric meter",
+      "label": "LG&E electric meter — house (whole-home interval energy)",
+      "short_label": "LG&E house meter",
       "category": "meter",
-      "placeholder": true,
-      "notes": "PLACEHOLDER for the future Green Button import (PLAN.md §13), kept here to prove dim_channel holds an 'lge' channel with no code change — the source vocabulary is model.SOURCES, not a two-source enum. device_id is the ESPI UsagePoint (meter id); it becomes real once the Green Button Connect registration is approved and the first export is read (docs/lge-greenbutton.md). Electric is the only channel this house will ever have here: the property has no gas service, and LG&E's Green Button Connect carries electric usage only (DEVIATIONS #166) — so there is deliberately no 'gas_main' entry to add."
+      "notes": "REAL — the house service, and the meter the whole-house comparison uses (`energycap compare-meter --meter 1308468`). device_id is the UsagePoint's `name`, i.e. the number on the bill, not the opaque UsagePoint id. Runs 74-99 kWh/day (August 2026). Published as BOTH a 900s and a 3600s series covering the same energy — see DEVIATIONS #169; never sum them."
+    },
+    {
+      "source": "lge",
+      "device_id": "1326254",
+      "channel_id": "electric_main",
+      "label": "LG&E electric meter — barn (second service, interval energy)",
+      "short_label": "LG&E barn meter",
+      "category": "meter",
+      "notes": "REAL — a second, separately metered service for the barn, confirmed by the owner 2026-08-18. Exposed by Green Button CONNECT only: the Download My Data export does not contain it (DEVIATIONS #169). Runs 3.6-40 kWh/day, far more variable than the house. Nothing on the property sub-meters it, so there is no panel-side series to compare it against — this row is the only visibility into the barn until CTs go in out there."
+    },
+    {
+      "source": "lge",
+      "device_id": "944006",
+      "channel_id": "electric_main",
+      "label": "LG&E electric meter — house (retired meter id)",
+      "short_label": "LG&E house meter (old id)",
+      "category": "meter",
+      "notes": "The Download My Data export republishes the house series under two retired meter ids, 944006 and 944401, identical to the watt-hour (DEVIATIONS #168) — the same service through meter swaps. Mapped so a reader who meets one in the data knows what it is; summing them with 1308468 would treble the house."
+    },
+    {
+      "source": "lge",
+      "device_id": "944401",
+      "channel_id": "electric_main",
+      "label": "LG&E electric meter — house (retired meter id)",
+      "short_label": "LG&E house meter (old id)",
+      "category": "meter",
+      "notes": "The Download My Data export republishes the house series under two retired meter ids, 944006 and 944401, identical to the watt-hour (DEVIATIONS #168) — the same service through meter swaps. Mapped so a reader who meets one in the data knows what it is; summing them with 1308468 would treble the house."
     }
   ]
 }

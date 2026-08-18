@@ -931,16 +931,20 @@ def test_the_shipped_map_covers_the_eight_bryant_energy_components() -> None:
 
 
 def test_the_shipped_map_builds_against_the_inventory(s3) -> None:
-    """Since `energycap discover` ran against the real panels (2026-08-17) the
-    Leviton entries carry real hub ids, so both sources reach dim_channel."""
+    """Every source now reaches dim_channel with real ids.
+
+    `energycap discover` gave the Leviton entries real hub ids (2026-08-17), and
+    Green Button Connect gave the LG&E entries real meter numbers (2026-08-18) —
+    so nothing in the shipped map is documentation any more.
+    """
     summary = dim.build(
         map_path=SHIPPED_MAP, inventory_path=MONTFORT, bucket=BUCKET, client=s3
     )
-    assert summary["sources"] == ["bryant", "leviton"]
-    # 10 Bryant + the 12 live Leviton channels discovery found.
-    assert summary["rows"] == 22
-    # Only the future LG&E meter is still documentation rather than data.
-    assert summary["placeholders"] == 1
+    assert summary["sources"] == ["bryant", "leviton", "lge"]
+    # 10 Bryant + 12 live Leviton + 4 LG&E meter ids (house, barn, two retired
+    # aliases of the house the Download export republishes — DEVIATIONS #168).
+    assert summary["rows"] == 26
+    assert summary["placeholders"] == 0
 
     table = s3io.read_table(BUCKET, summary["key"], client=s3)
     by_channel = rows_by_channel(table)
@@ -967,16 +971,13 @@ def test_the_shipped_map_builds_against_the_inventory(s3) -> None:
     assert strips["slots"] == "6,8"
 
 
-def test_the_leviton_entries_are_real_and_only_lge_is_still_a_placeholder() -> None:
+def test_every_shipped_entry_is_real() -> None:
     entries = dim.load_channel_map(SHIPPED_MAP)
-    placeholders = [entry for entry in entries if entry.placeholder]
 
-    # Discovery has happened, so no Leviton entry may still be documentation —
-    # a placeholder here would silently drop a real channel out of dim_channel.
-    assert {entry.source for entry in placeholders} == {"lge"}
-    # Every placeholder explains itself to whoever opens the file next.
-    for entry in placeholders:
-        assert entry.notes and "PLACEHOLDER" in entry.notes
+    # Discovery has happened for Leviton (2026-08-17) and Green Button Connect
+    # for LG&E (2026-08-18), so nothing here may still be documentation — a
+    # placeholder silently drops a real channel out of dim_channel.
+    assert [e.device_id for e in entries if e.placeholder] == []
 
     leviton = [e for e in entries if e.source == "leviton"]
     assert leviton, "the shipped map must describe the live Leviton channels"
@@ -1110,3 +1111,48 @@ def test_updated_at_is_an_aware_utc_timestamp(tmp_path: Path) -> None:
     value = table.to_pylist()[0]["updated_at"]
     assert isinstance(value, datetime) and value.tzinfo is not None
     assert str(dim.DIM_SCHEMA.field("updated_at").type) == "timestamp[us, tz=UTC]"
+
+
+# ------------------------------------------- the committed map, as shipped
+
+
+def test_the_shipped_map_has_no_placeholders_left() -> None:
+    """Every channel in ``config/channel_map.json`` is now a real one.
+
+    The LG&E entry was the last placeholder — a stand-in proving ``dim_channel``
+    could hold an ``lge`` channel before there was one. Both real meters landed
+    2026-08-18. A placeholder reappearing means someone described a channel they
+    had not actually seen, and ``build-dim`` silently drops those, so the
+    semantic layer would lose a channel without saying so.
+    """
+    import json
+
+    entries = json.loads(
+        (Path(__file__).resolve().parent.parent / "config" / "channel_map.json")
+        .read_text(encoding="utf-8")
+    )["mappings"]
+    placeholders = [e["device_id"] for e in entries if e.get("placeholder")]
+    assert placeholders == [], placeholders
+
+
+def test_both_lge_meters_are_mapped_and_distinguishable() -> None:
+    """House and barn are separate services on one account.
+
+    They must never be summed — ``compare-meter`` refuses to guess between them
+    — so a reader meeting either id in the data needs to know which is which.
+    The retired ids the download republishes are mapped for the same reason.
+    """
+    import json
+
+    entries = json.loads(
+        (Path(__file__).resolve().parent.parent / "config" / "channel_map.json")
+        .read_text(encoding="utf-8")
+    )["mappings"]
+    meters = {e["device_id"]: e for e in entries if e["source"] == "lge"}
+
+    assert "1308468" in meters and "house" in meters["1308468"]["label"].lower()
+    assert "1326254" in meters and "barn" in meters["1326254"]["label"].lower()
+    # The download's retired aliases of the house meter (DEVIATIONS #168).
+    assert {"944006", "944401"} <= set(meters)
+    assert all(e["category"] == "meter" for e in meters.values())
+    assert all(e["channel_id"] == "electric_main" for e in meters.values())
