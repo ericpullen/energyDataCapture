@@ -56,7 +56,12 @@ jobs:
             test -f "$page" || { echo "missing: $page"; exit 1; }
           done
 
+      # `enablement` turns Pages on for the repository if it is off, so the site
+      # does not depend on someone having clicked Settings → Pages first. Without
+      # it the first run after a merge fails with "Get Pages site failed".
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
