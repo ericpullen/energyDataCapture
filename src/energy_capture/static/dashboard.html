@@ -215,6 +215,12 @@ code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px
   </section>
 
   <section>
+    <h2>Utility meter <span class="sub">LG&amp;E Green Button — billed energy, and how well the CTs track it</span></h2>
+    <div id="meter" class="strip"></div>
+    <div id="meter-note" class="hint"></div>
+  </section>
+
+  <section>
     <h2>The math <span class="sub">spool aggregated by local hour — mean, sample_count / expected, coverage, kWh</span></h2>
     <div style="margin-bottom:8px">
       <label class="hint"><input type="checkbox" id="allmetrics"> show every metric (default: watts only, the metric kWh is defined for)</label>
@@ -934,6 +940,7 @@ function render() {
   // Never rebuild the figure out from under a drag in progress.
   if (!dragging) drawOverlay();
   renderHvac();
+  renderMeter();
   renderHourly();
   renderTables();
 
@@ -1062,6 +1069,60 @@ function renderHvac() {
   if (zone) out.push(stat("Zone fan", zone.readings.fan));
   $("hvac").innerHTML = out.join("") +
     `<div class="tile"><div class="k">Zones</div><div class="v">${h.zones.length}</div><div class="d">${esc(h.zones.map((z) => z.channel_id).join(", "))} · device ${esc(h.system.device_id)}</div></div>`;
+}
+
+function renderMeter() {
+  const m = snap.meter || {};
+  if (!m.available) {
+    $("meter").innerHTML = tile("Utility meter", badge("neutral", "no data"),
+      esc(m.hint || m.error || "not fetched yet"));
+    $("meter-note").textContent = "";
+    return;
+  }
+
+  const out = [];
+  for (const meter of m.meters) {
+    const alias = meter.aliases && meter.aliases.length
+      ? ` · also published as ${esc(meter.aliases.join(", "))}`
+      : "";
+    out.push(tile(
+      esc(meter.label),
+      `${fmt(meter.yesterday_kwh)} <span class="sub">kWh yesterday</span>`,
+      `${fmt(meter.today_kwh)} kWh today so far · ${meter.interval_s}s intervals${alias}`
+    ));
+  }
+
+  // Freshness is a first-class tile, not a footnote: the utility publishes
+  // hours behind and the fetch is daily, so "today" is never "now".
+  out.push(tile(
+    "Meter data ends",
+    m.stale ? badge("warning", age(m.age_s)) : `<span class="sub">${esc(age(m.age_s))}</span>`,
+    esc((m.last_reading_local || "").slice(0, 16) + " local")
+  ));
+
+  const c = m.comparison || {};
+  if (c.available) {
+    const pct = c.difference_pct;
+    // Within a few percent is instrument tolerance on both sides; a big or
+    // drifting gap is the signal worth surfacing.
+    const level = Math.abs(pct) <= 5 ? "good" : Math.abs(pct) <= 15 ? "warning" : "serious";
+    const word = Math.abs(pct) <= 5 ? "tracking" : Math.abs(pct) <= 15 ? "drifting" : "off";
+    out.push(tile(
+      "Panels vs meter",
+      `${pct > 0 ? "+" : ""}${pct}% ${badge(level, word)}`,
+      `${esc(c.local_day)} · meter ${fmt(c.meter_kwh)} kWh, panels ${fmt(c.panel_kwh)} kWh ` +
+      `over ${c.hours_compared} fully covered hour(s)`
+    ));
+  } else {
+    out.push(tile("Panels vs meter", badge("neutral", "not computed"),
+      esc(c.reason || c.error || "no complete day yet")));
+  }
+
+  $("meter").innerHTML = out.join("");
+  const excluded = c.hours_excluded
+    ? ` ${c.hours_excluded} hour(s) of that day are excluded from the comparison: the collector missed part of them, so the panel figure would be understated.`
+    : "";
+  $("meter-note").textContent = (m.note || "") + excluded;
 }
 
 function renderHourly() {

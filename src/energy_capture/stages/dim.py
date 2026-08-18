@@ -164,6 +164,12 @@ ENTRY_KEYS: frozenset[str] = frozenset(
         "priority",
         "estimated_watts",
         "placeholder",
+        # Marks the one channel a whole-system comparison should use when a
+        # source exposes several. The account has two LG&E meters — the house
+        # and a separately metered barn — and only the house has panel CTs to
+        # compare against, which is knowledge that belongs in the map rather
+        # than in a heuristic ("the bigger one is the house") in code.
+        "primary",
         "updated_at",
         # Free-form human documentation. Never written to the Parquet file — it
         # is for whoever edits the map next, not for a query engine.
@@ -367,6 +373,8 @@ class ChannelEntry:
     priority: str | None = None
     estimated_watts: float | None = None
     placeholder: bool = False
+    #: See ``ALLOWED_KEYS``: the channel a whole-system comparison should pick.
+    primary: bool = False
     updated_at: datetime | None = None
     notes: str | None = None
 
@@ -488,6 +496,7 @@ def _parse_entry(raw: Any, index: int, errors: list[str]) -> ChannelEntry | None
         priority=_text(raw.get("priority")),
         estimated_watts=estimated_watts,
         placeholder=flag,
+        primary=bool(raw.get("primary", False)),
         updated_at=updated_at,
         notes=_text(raw.get("notes")),
     )

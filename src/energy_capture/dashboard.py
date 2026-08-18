@@ -873,6 +873,9 @@ def _load_labels(
             "blackstart_device_id": entry.blackstart_device_id,
             "label_source": "channel_map" if entry.label or entry.short_label else None,
             "placeholder": entry.placeholder,
+            # Which meter a whole-system comparison should use when a source
+            # exposes several (the house, not the barn) — read by the meter card.
+            "primary": entry.primary,
         }
 
     # Anything whose label lives in blackstart's inventory: resolve it the way
@@ -901,6 +904,11 @@ def _load_labels(
             "blackstart_device_id": row.blackstart_device_id,
             "label_source": "blackstart" if row.blackstart_device_id else "channel_map",
             "placeholder": False,
+            # `primary` is map-only metadata — it never reaches the dim_channel
+            # Parquet, so a resolved row does not carry it. This pass rewrites
+            # every key, not only the blackstart-labelled ones, so the flag has
+            # to be carried across or it is silently lost.
+            "primary": bool(labels.get(row.key, {}).get("primary", False)),
         }
     return labels
 
@@ -2009,8 +2017,36 @@ def build_snapshot(
         "overlay": overlay,
         "hvac": _hvac_block(latest_by_channel, labels, reference),
         "hourly": hourly,
+        # The utility meter. A second read path entirely — meter intervals live
+        # in Parquet, never in the spool — so it is its own module, and every
+        # failure inside it comes back as a block the page can render rather
+        # than an exception that would take the whole snapshot down.
+        "meter": _meter_block(reference, spool_path, labels, errors, resolved),
         "errors": errors,
     }
+
+
+def _meter_block(
+    reference: datetime,
+    spool_path: Path | str | None,
+    labels: dict[tuple[str, str, str], dict[str, Any]],
+    errors: list[str],
+    settings: Settings | None,
+) -> dict[str, Any]:
+    """The meter card, or a reason it is absent. Never raises."""
+    try:
+        from energy_capture import meterview
+
+        return meterview.meter_block(
+            now=reference,
+            settings=settings,
+            spool_path=spool_path,
+            labels=labels,
+        )
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        errors.append(f"meter card unavailable: {detail}")
+        return {"available": False, "error": detail}
 
 
 def _overlay_block(

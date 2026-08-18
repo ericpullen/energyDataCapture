@@ -213,7 +213,8 @@
       "label": "LG&E electric meter — house (whole-home interval energy)",
       "short_label": "LG&E house meter",
       "category": "meter",
-      "notes": "REAL — the house service, and the meter the whole-house comparison uses (`energycap compare-meter --meter 1308468`). device_id is the UsagePoint's `name`, i.e. the number on the bill, not the opaque UsagePoint id. Runs 74-99 kWh/day (August 2026). Published as BOTH a 900s and a 3600s series covering the same energy — see DEVIATIONS #169; never sum them."
+      "notes": "REAL — the house service. `primary: true` marks it as the meter the whole-house comparison uses, since the barn has no panel CTs to compare against; `compare-meter` and the /ui meter card both read it. device_id is the UsagePoint's `name`, i.e. the number on the bill, not the opaque UsagePoint id. Runs 74-99 kWh/day (August 2026). Published as BOTH a 900s and a 3600s series covering the same energy — see DEVIATIONS #169; never sum them.",
+      "primary": true
     },
     {
       "source": "lge",
