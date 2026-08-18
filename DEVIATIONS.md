@@ -2756,6 +2756,41 @@ and does show it as a break.
 
 ---
 
+## 166. PLAN.md §13 assumed LG&E Green Button would carry gas — Connect is electric-only
+
+§13 designs the `meter` dataset for both fuels: "gas likely daily therms/CCF", `channel_id`
+`gas_main`, unit mapping `ccf_interval`/`CCF`. Researched against the utility on 2026-08-18
+(`docs/lge-greenbutton.md`), and the gas half cannot come from Connect:
+
+- LG&E's own [3PV registration PDF][gbpdf] says "Green Button Connect (GBC) allows customers
+  to share **electric** usage data with 3rd Party Vendors."
+- The registration form's required function blocks are exactly **1** (Common), **3** (Connect
+  My Data), **4** (Interval Metering) and **5** (Interval **Electric** Metering). ESPI has no
+  gas block in that set, and padding the `FB=` list with blocks the custodian does not
+  support is a way to fail scope validation for nothing.
+
+[gbpdf]: https://lge-ku.com/sites/default/files/media/files/downloads/LGE-KU-Green-Button-Connect-Third-Party%20Vendor-Registration-Process.pdf
+
+**Nothing in the schema changes** — `METER_SCHEMA`, `meter_key` and the `dim_channel`
+placeholder are fuel-agnostic, and `gas_main` remains a perfectly good `channel_id`. What
+changes is the *route*: gas arrives only via **Download My Data**, the manual XML/CSV export.
+
+So `import-greenbutton` is not a stopgap that the Connect client eventually replaces. It is
+the permanent gas path and the bulk-historical path, and both commands will coexist. That is
+worth knowing before building either, because the tempting simplification — "build Connect,
+delete the importer" — would silently drop gas forever.
+
+Also settled by the same research, and *not* deviations, just answers to questions §13 left
+open: Connect exists (§13 hedged "if LG&E actually offers it", and told us to assume manual
+import first — that hedge is now resolved in Connect's favour); supported granularity is
+`IntervalDuration` 900 or 3600 only; a **daily** subscription is available, so the fetch
+cadence can match the Bryant daily-energy stage; and registration is a one-shot,
+human-reviewed form whose approval email is the only source of the OAuth endpoints — there is
+no developer portal and no published base URI, so no client code should be written until it
+arrives.
+
+---
+
 # Status — what is done, and what has never been executed
 
 **This is the honest final state. PLAN.md §16's definition of done is roughly half met.**

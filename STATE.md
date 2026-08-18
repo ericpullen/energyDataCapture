@@ -122,19 +122,37 @@ What §13 specifies for the mapping, once real data is in hand: ESPI `UsagePoint
 `powerOfTenMultiplier` applied. Glue table `energy_meter` with the same partition-projection
 treatment. Idempotent on the standard dedupe key.
 
-**Open questions to settle first** — §13 says "verify Connect availability when building":
+**Researched 2026-08-18 — see `docs/lge-greenbutton.md`**, which answers §13's "verify
+Connect availability when building" and drafts the registration form field by field. In short:
 
-1. Does LG&E/PPL actually offer Green Button **Connect** (the OAuth'd, self-updating API), or
-   only **Download** My Data? This decides everything downstream. §13's preference order is
-   Connect first, Download as the fallback, and it assumes Download until proven otherwise.
-2. If Connect exists: what is the registration path — is third-party/self registration open,
-   or is it a utility-approved-partner arrangement? What OAuth flow, what scopes, what token
-   lifetime, and is there a sandbox?
-3. What is the real interval granularity (15/30/60-minute electric kWh; gas likely daily
-   therms or CCF) and how far back does history go?
-4. How stale is the data — MyMeter typically lags a day or more, which matters for how the
-   scheduler should fetch it and whether late-arriving revisions need the same day1/day2
-   treatment the Bryant daily energy fetch uses.
+- **Connect exists** and is real OAuth2/ESPI. §13's "assume manual import first" hedge is
+  resolved in Connect's favour.
+- **Registration is a one-shot, human-reviewed form** on the MyMeter site — one per vendor,
+  ever, covering all customers. There is **no developer portal and no published API base
+  URI**: the OAuth endpoints and the 3PV credentials arrive in the approval email. So no
+  client code should be written until it lands.
+- Granularity is **900 or 3600 seconds only**; a **daily subscription** is available, so the
+  fetch cadence can mirror the Bryant daily-energy stage.
+- **Connect is electric-only.** §13 assumed gas would come along; it does not, so
+  `import-greenbutton` becomes the permanent gas and bulk-history path rather than a stopgap
+  (DEVIATIONS #166).
+
+Two things blocking progress, both outside the code:
+
+1. **The posture decision** — Desktop app with a `localhost` redirect versus a hosted web
+   app. `docs/lge-greenbutton.md` §2 lays out the trade and recommends Desktop plus a real
+   static one-pager for the URI fields; four bracketed values in the §3 draft need filling in
+   before it can be submitted.
+2. **The MyMeter *local* account** — needs a registration code requested by email from
+   `MyMeter@lge-ku.com`, and its address **cannot match the My Account primary email**. It is
+   the long-latency item and it is independent of vendor approval, so it is worth starting
+   first.
+
+Still unknown, and to be asked in the approval correspondence: the endpoints and any sandbox,
+the maximum accepted `HistoryLength` (the draft guesses 730 days), token lifetimes and
+re-consent schedule, publication lag and whether readings get revised, and whether raw and
+VEE readings arrive as separate `MeterReading`s — if so they need distinct `metric` values
+rather than colliding on the dedupe key.
 
 Worth knowing that the old collector's frontend already parsed LG&E exports client-side:
 `~/code/bryantDataCollector/frontend/index.html` handles an uploaded `Usage.csv` **and**
