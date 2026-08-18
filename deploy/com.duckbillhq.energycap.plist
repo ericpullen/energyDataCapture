@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — do not install this file as-is. Every __PLACEHOLDER__ below must be
+  replaced with a real absolute path; deploy/README.md has the sed one-liner and
+  the launchctl commands.
+
+  This is a LaunchAgent, not a LaunchDaemon, and that is deliberate: Apple's
+  `container` subsystem is itself a per-user launchd service, so a root
+  LaunchDaemon would not see it. The consequence — this only starts after the
+  owning user logs in — is covered in deploy/README.md, "The boot question".
+
+  This replaces docker-compose.yml's `restart: unless-stopped` with KeepAlive.
+  The supervised process is scripts/energycap-container.sh, which runs the
+  container in the FOREGROUND on purpose. Never add the detach flag to
+  ProgramArguments: the script would exit immediately, KeepAlive would restart
+  it, and you would have a hot loop instead of a collector.
+
+  (Two consecutive hyphens are illegal inside an XML comment, which is why the
+  flags are spelled out in words here. plutil tolerates them; strict XML parsers
+  such as Python's plistlib and xmllint reject the whole file.)
+
+  NOTHING HERE HAS EVER BEEN LOADED. The container CLI is not installed on the
+  development machine, so this template is unverified.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.duckbillhq.energycap</string>
+
+    <!-- __REPO_ROOT__ = absolute path of the energyDataCapture checkout,
+         e.g. /Users/energycap/code/energyDataCapture -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_ROOT__/scripts/energycap-container.sh</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin, which does
+             NOT include wherever `container` was installed. Without this the job
+             fails every restart with "the `container` CLI is not installed".
+             Check `command -v container` and make sure its directory is listed. -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+        <!-- __DATA_DIR__ = host directory bind-mounted at /data (spool.db,
+             tokens/, status.json). Defaults to __REPO_ROOT__/data if you drop
+             this key; set it explicitly if the spool lives on another disk. -->
+        <key>ENERGYCAP_DATA_DIR</key>
+        <string>__DATA_DIR__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- The `restart: unless-stopped` replacement. Plain <true/>, not a dict:
+         restart on ANY exit, clean or not, exactly like compose did. To stop it
+         for real, bootout/disable the job — do not `container stop` and expect
+         it to stay down. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Floor on restart frequency. A container that dies instantly (bad .env,
+         unwritable /data, port already bound) then costs one attempt per 30s
+         instead of hot-looping. launchd's implicit minimum is 10s; 30 leaves
+         room to read the log before the next attempt. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Seconds launchd waits after SIGTERM before SIGKILL. The wrapper turns
+         that SIGTERM into a graceful `container stop` with a 30 second grace
+         period, so this must exceed 30: it is the equivalent of compose's
+         stop_grace_period: 30s. launchd's default (20s) would SIGKILL the
+         wrapper mid-shutdown, before the poller closes its spool transaction. -->
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
+
+    <!-- Structured JSON logs, one object per line, straight from the container's
+         stdout. launchd creates these FILES but not their directory:
+         `mkdir -p __DATA_DIR__/logs` before the first bootstrap.
+         Unlike compose's json-file driver these are NOT size-capped — see
+         deploy/README.md, "What you lost", for the newsyslog rotation stanza. -->
+    <key>StandardOutPath</key>
+    <string>__DATA_DIR__/logs/energycap.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__DATA_DIR__/logs/energycap.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — energycap</title>
+<meta name="description" content="How energycap handles energy usage data, including data retrieved through Green Button Connect.">
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <img src="/logo.png" alt="energycap logo">
+  <div>
+    <h1>Privacy policy</h1>
+    <p>energycap · last updated 18 August 2026</p>
+  </div>
+</header>
+
+<p>energycap is a personal, single-household energy monitoring application operated by
+<strong>Eric Pullen</strong>. It has one user, who is also its operator and the utility
+account holder whose data it processes. This policy describes what it collects and what
+happens to it.</p>
+
+<h2>What data is collected</h2>
+
+<ul>
+  <li><strong>On-premises measurements</strong> from equipment in the operator's own home:
+    circuit-level electrical readings and HVAC status and energy telemetry.</li>
+  <li><strong>Utility metered usage</strong>, retrieved through Green Button Connect My Data
+    for the operator's own utility account: interval electricity usage, the associated meter
+    and usage-point identifiers, and the reading metadata that accompanies them.</li>
+</ul>
+
+<p>No data is collected about any other person, household, or utility account. No usage
+analytics, advertising identifiers, or tracking of any kind are collected, and these pages load
+nothing from any other host.</p>
+
+<h2>How it is used</h2>
+
+<p>Solely to produce the operator's own energy history and analysis of their own home:
+comparing utility-metered usage against on-premises measurements, attributing consumption to
+circuits and equipment, and reviewing changes over time.</p>
+
+<h2>How it is shared</h2>
+
+<p><strong>It is not.</strong> Data is never sold, rented, licensed, published, or shared with
+any third party. It is not aggregated with, benchmarked against, or combined with any other
+customer's data — there are no other customers. No advertising or marketing use is made of it,
+and it is not used to train any model or service offered to anyone else.</p>
+
+<p>The only circumstance in which data would be disclosed is a legally binding demand, and
+disclosure would be limited to what the demand actually compels.</p>
+
+<h2>Where it is stored, and for how long</h2>
+
+<p>On a computer in the operator's home and in the operator's own private cloud storage
+account, under access controls that permit only the operator. Credentials and access tokens are
+held only on that machine's local storage with owner-only file permissions, and are never
+written to logs or to the public source repository.</p>
+
+<p>Because the purpose is a long-term energy history, data is retained indefinitely unless the
+operator deletes it. On revocation of Green Button access, retrieval stops immediately; already
+retrieved data remains in the operator's own archive, which is their own record of their own
+consumption.</p>
+
+<h2>Revoking access</h2>
+
+<p>Green Button Connect authorization can be withdrawn at any time from the utility's
+My&nbsp;Meter site, which stops all further data sharing. See
+<a href="/greenbutton/">Green Button Connect</a> for details.</p>
+
+<h2>Security</h2>
+
+<p>All data transfers use HTTPS. Access tokens are stored with owner-only permissions on the
+collecting machine and are refreshed rather than re-authenticated. The application's source
+code is public, so its handling of credentials and data can be inspected directly:
+<a href="https://github.com/ericpullen/energyDataCapture">github.com/ericpullen/energyDataCapture</a>.
+Automated tests specifically assert that credentials and tokens never reach log output.</p>
+
+<h2>Changes to this policy</h2>
+
+<p>Material changes will be reflected in the date at the top of this page. Since the
+application has a single user, who is its operator, changes affect no one else.</p>
+
+<h2>Contact</h2>
+
+<div class="card">
+  <p style="margin-top:0">Eric Pullen ·
+  <a href="mailto:eric@ericpullen.com">eric@ericpullen.com</a></p>
+</div>
+
+<footer>
+  <a href="/">energycap</a> ·
+  <a href="/greenbutton/">Green Button Connect</a> ·
+  <a href="https://github.com/ericpullen/energyDataCapture">Source</a>
+</footer>
+
+</main>
+</body>
+</html>

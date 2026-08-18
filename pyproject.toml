@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "energy-capture"
+version = "0.1.0"
+description = "Household energy + HVAC time-series capture: Leviton/Bryant cloud -> SQLite spool -> partitioned Parquet in S3"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [{ name = "Eric Pullen" }]
+
+dependencies = [
+    # Leviton LWHEM-2 cloud client (wrapped behind sources/leviton.py adapter).
+    "aioleviton>=0.3.3",
+    "httpx>=0.27",
+    "pyarrow>=17",
+    "duckdb>=1.1",
+    "boto3>=1.34",
+    "typer>=0.12",
+    "pydantic-settings>=2.5",
+    "tenacity>=9.0",
+    # The container image has no system tz database; America/Kentucky/Louisville
+    # must resolve from the wheel or every local-date partition is wrong.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.24",
+    "moto[s3,glue]>=5.0",
+]
+
+[project.scripts]
+energycap = "energy_capture.cli:app"
+
+[dependency-groups]
+# uv installs the "dev" group by default, so `uv sync` gives you the test deps.
+dev = ["energy-capture[dev]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/energy_capture"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning:energy_capture.*"]

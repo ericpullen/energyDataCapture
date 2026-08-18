@@ -1,0 +1,66 @@
+# Publishes site/ to GitHub Pages at https://energycap.ericpullen.com/
+#
+# These pages are not decoration: Green Button Connect registration points six
+# required URIs at them (client, policy, logo, user-portal, redirect, notify), and
+# the redirect page is what hands an OAuth authorization code to the collector
+# running inside the house. See docs/lge-greenbutton.md.
+#
+# Only site/ is published — deliberately. The rest of the repo, docs/ included, is
+# read on GitHub and has no business being served from the app's own origin.
+#
+# One-time setup in the repository settings: Pages → Build and deployment →
+# Source: "GitHub Actions". The custom domain comes from site/CNAME.
+
+name: Publish site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A half-deployed callback page would break an authorization in flight, so let a
+# running deploy finish rather than cancelling it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the pages the registration form points at all exist
+        run: |
+          set -euo pipefail
+          for page in \
+            site/index.html \
+            site/privacy/index.html \
+            site/greenbutton/index.html \
+            site/greenbutton/callback/index.html \
+            site/greenbutton/notify/index.html \
+            site/logo.png \
+            site/CNAME
+          do
+            test -f "$page" || { echo "missing: $page"; exit 1; }
+          done
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

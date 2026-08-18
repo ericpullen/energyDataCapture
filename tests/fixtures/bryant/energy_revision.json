@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "The NEXT day's getInfinityEnergy response (PLAN.md §7.2's day1/day2 pair).",
+    "Its day2 covers the same LOCAL date that energy_response.json called day1,",
+    "with RESTATED numbers -- the cloud revising a day after the fact. This is",
+    "the overlap the canonical dedupe key has to collapse, keeping the fresher",
+    "statement (PLAN.md §15.2)."
+  ],
+  "data": {
+    "infinityEnergy": {
+      "energyConfig": {
+        "cooling": {"display": "Cooling", "enabled": true},
+        "eheat": {"display": "Electric Heat", "enabled": true},
+        "fan": {"display": "Fan", "enabled": true},
+        "fangas": {"display": "Fan (Gas)", "enabled": false},
+        "gas": {"display": "Gas", "enabled": false},
+        "hpheat": {"display": "Heat Pump", "enabled": true},
+        "looppump": {"display": "Loop Pump", "enabled": false},
+        "reheat": {"display": "Reheat", "enabled": false},
+        "hspf": "9.5",
+        "seer": "16"
+      },
+      "energyPeriods": [
+        {
+          "energyPeriodType": "day1",
+          "eHeatDollars": 0.11,
+          "eHeatKwh": 1,
+          "coolingDollars": 1.32,
+          "coolingKwh": 12,
+          "fanDollars": 0.22,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 2,
+          "hPHeatDollars": 0.55,
+          "hPHeatKwh": 5,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        },
+        {
+          "energyPeriodType": "day2",
+          "eHeatDollars": 0.77,
+          "eHeatKwh": 7,
+          "coolingDollars": 0,
+          "coolingKwh": 0,
+          "fanDollars": 0.44,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 4,
+          "hPHeatDollars": 2.86,
+          "hPHeatKwh": 26,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        }
+      ]
+    }
+  }
+}

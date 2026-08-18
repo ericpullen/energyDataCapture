@@ -1,0 +1,86 @@
+# energycap — one service, one long-running process (PLAN.md §5, §14).
+#
+#   cp .env.example .env && $EDITOR .env     # credentials live here, never in git
+#   docker compose up -d && docker compose logs -f
+#   curl localhost:8080/healthz
+#
+# Deliberately NO database/queue/sidecar services: the spool is SQLite on the
+# mounted volume and the warehouse is S3.
+#
+# No `platform:` key — the image builds and runs native on the Apple-silicon
+# Mac Mini (and would build amd64 unchanged elsewhere).
+
+services:
+  energycap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: energycap:latest
+    container_name: energycap
+
+    # Definition of done: survives restart (and Mac Mini reboot) with no data
+    # loss. The spool lives on the volume below, so a restart replays cleanly.
+    restart: unless-stopped
+
+    # PID 1 signal forwarding + zombie reaping, so SIGTERM reaches the asyncio
+    # loop and the poller can close the spool transaction it is holding.
+    init: true
+    stop_grace_period: 30s
+
+    # Credentials and every other knob (PLAN.md §14). This file must exist;
+    # copy .env.example. Compose also reads it for ${...} interpolation below.
+    env_file:
+      - .env
+
+    # Overrides that must be true inside the container regardless of what the
+    # host .env says. SPOOL_DIR is the mount point; HEALTH_PORT must match the
+    # published port and the healthcheck.
+    environment:
+      SPOOL_DIR: /data
+      HEALTH_PORT: ${HEALTH_PORT:-8080}
+      # Container clock is UTC; TZ_LOCAL from .env drives all local-date math.
+      TZ: UTC
+
+    # /data: spool.db (+ -wal/-shm), tokens/*.json (mode 600), status.json.
+    # A named volume keeps the token caches off the host filesystem and inherits
+    # uid 10001 ownership from the image the first time it is created.
+    # To inspect the spool from the host instead, swap in a bind mount and
+    # `chown 10001:10001` the host directory first — bind mounts keep host
+    # ownership and the container runs non-root.
+    volumes:
+      - energycap-data:/data
+      # Optional: read-only AWS config if you authenticate with AWS_PROFILE
+      # rather than AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in .env.
+      # - ${HOME}/.aws:/home/energycap/.aws:ro
+      # Optional: blackstart inventory, only needed to run `build-dim` inside
+      # the container (PLAN.md §9 expects that command to run on the Mac).
+      # Set BLACKSTART_INVENTORY_PATH=/inventory/montfort.json if you enable it.
+      # - ${HOME}/code/blackstart/data/montfort.json:/inventory/montfort.json:ro
+
+    ports:
+      # host:container — the health server must bind 0.0.0.0 inside the
+      # container for this to be reachable from the Mac.
+      - "${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
+
+    # /healthz serves status.json and returns non-200 when the poller's last
+    # success is older than 3x its interval (PLAN.md §11). No curl/wget in
+    # python:3.12-slim, so probe with the interpreter; urlopen raises on non-200,
+    # which exits non-zero and marks the container unhealthy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('HEALTH_PORT','8080')+'/healthz',timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+    # Structured JSON logs go to stdout (PLAN.md §11); cap them so a long-lived
+    # container cannot fill the Mac Mini's disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  energycap-data:
+    name: energycap-data

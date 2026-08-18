@@ -1,0 +1,10 @@
+[
+  {
+    "id": 900001,
+    "access": "owner",
+    "status": "accepted",
+    "personId": "person-1234",
+    "residentialAccountId": 55501,
+    "residenceId": null
+  }
+]

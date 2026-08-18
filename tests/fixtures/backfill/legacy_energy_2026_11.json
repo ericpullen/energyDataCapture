@@ -1,0 +1,25 @@
+{
+  "2026-11-01": {
+    "period_type": "day1",
+    "collected_at": "2026-11-02T13:30:00.000000",
+    "data": {
+      "energyPeriodType": "day1",
+      "eHeatDollars": 0,
+      "eHeatKwh": 0,
+      "coolingDollars": 0.77,
+      "coolingKwh": 7,
+      "fanDollars": 0.22,
+      "fanGasDollars": 0,
+      "fanGasKwh": 0,
+      "fanKwh": 2,
+      "hPHeatDollars": 0,
+      "hPHeatKwh": 0,
+      "loopPumpDollars": 0,
+      "loopPumpKwh": 0,
+      "gasDollars": 0,
+      "gasKwh": 0,
+      "reheatDollars": 0,
+      "reheatKwh": 0
+    }
+  }
+}

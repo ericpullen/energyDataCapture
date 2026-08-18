@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subscription notifications — energycap</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <img src="/logo.png" alt="energycap logo">
+  <div>
+    <h1>Subscription notifications</h1>
+    <p>energycap · Green Button Connect</p>
+  </div>
+</header>
+
+<p>This is the notification address registered for energycap's Green Button Connect
+subscription.</p>
+
+<div class="note">
+  <p style="margin-top:0"><strong>energycap does not rely on push notifications.</strong> It
+  polls its subscription on a schedule instead, so no data is missed if a notification is never
+  delivered.</p>
+  <p style="margin-bottom:0">This address is currently served by a static host, which answers
+  <code>GET</code> but not <code>POST</code>. If the data custodian requires a notification
+  endpoint that accepts <code>POST</code>, tell us and one will be provided — see the contact
+  below.</p>
+</div>
+
+<h2>Why polling</h2>
+
+<p>The collector runs on a machine inside a home with no public address and no inbound access.
+Treating notifications as an optimisation rather than a dependency means a missed, delayed, or
+undeliverable notification cannot turn into a gap in the record — the next scheduled poll picks
+up whatever has been published.</p>
+
+<h2>Contact</h2>
+
+<div class="card">
+  <p style="margin-top:0">Eric Pullen ·
+  <a href="mailto:eric@ericpullen.com">eric@ericpullen.com</a></p>
+</div>
+
+<footer>
+  <a href="/">energycap</a> ·
+  <a href="/privacy">Privacy policy</a> ·
+  <a href="/greenbutton/">Green Button Connect</a>
+</footer>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,48 @@
+{
+  "2026-03-07": {
+    "period_type": "day2",
+    "collected_at": "2026-03-09T13:31:04.112000",
+    "data": {
+      "energyPeriodType": "day2",
+      "eHeatDollars": 0.11,
+      "eHeatKwh": 1,
+      "coolingDollars": 0,
+      "coolingKwh": 0,
+      "fanDollars": 0.22,
+      "fanGasDollars": 0,
+      "fanGasKwh": 0,
+      "fanKwh": 2,
+      "hPHeatDollars": 1.54,
+      "hPHeatKwh": 14,
+      "loopPumpDollars": 0,
+      "loopPumpKwh": 0,
+      "gasDollars": 0,
+      "gasKwh": 0,
+      "reheatDollars": 0,
+      "reheatKwh": 0
+    }
+  },
+  "2026-03-08": {
+    "period_type": "day1",
+    "collected_at": "2026-03-09T13:31:04.112000",
+    "data": {
+      "energyPeriodType": "day1",
+      "eHeatDollars": 0.33,
+      "eHeatKwh": 3,
+      "coolingDollars": 0,
+      "coolingKwh": 0,
+      "fanDollars": 0.44,
+      "fanGasDollars": 0,
+      "fanGasKwh": 0,
+      "fanKwh": 4,
+      "hPHeatDollars": 1.87,
+      "hPHeatKwh": 17,
+      "loopPumpDollars": 0,
+      "loopPumpKwh": 0,
+      "gasDollars": 0,
+      "gasKwh": 0,
+      "reheatDollars": 0,
+      "reheatKwh": 0
+    }
+  }
+}

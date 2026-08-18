@@ -1,0 +1,109 @@
+{
+  "_comment": [
+    "A realistic getInfinityEnergy response for a heat pump + electric strips",
+    "system (PLAN.md §7.2). Shaped from the old collector's query in",
+    "~/code/bryantDataCollector/carrier_energy.py and its captured output in",
+    "energy_data/energy_2026_01.json (which is the `data` half of a real",
+    "response: plain JSON numbers, ints for Kwh and floats for Dollars).",
+    "energyConfig keys are lowercase, energyPeriods fields are camelCase --",
+    "that casing split is the trap this fixture exists to pin.",
+    "gas / fangas / looppump / reheat are structurally absent on this system:",
+    "enabled=false, so they must emit NO rows even though the period object",
+    "still carries zeros for them.",
+    "month1/year1 ride along in energyPeriods and are not day grain."
+  ],
+  "data": {
+    "infinityEnergy": {
+      "energyConfig": {
+        "cooling": {"display": "Cooling", "enabled": true},
+        "eheat": {"display": "Electric Heat", "enabled": true},
+        "fan": {"display": "Fan", "enabled": true},
+        "fangas": {"display": "Fan (Gas)", "enabled": false},
+        "gas": {"display": "Gas", "enabled": false},
+        "hpheat": {"display": "Heat Pump", "enabled": true},
+        "looppump": {"display": "Loop Pump", "enabled": false},
+        "reheat": {"display": "Reheat", "enabled": false},
+        "hspf": "9.5",
+        "seer": "16"
+      },
+      "energyPeriods": [
+        {
+          "energyPeriodType": "day1",
+          "eHeatDollars": 0.44,
+          "eHeatKwh": 4,
+          "coolingDollars": 0,
+          "coolingKwh": 0,
+          "fanDollars": 0.33,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 3,
+          "hPHeatDollars": 2.3099999,
+          "hPHeatKwh": 21,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        },
+        {
+          "energyPeriodType": "day2",
+          "eHeatDollars": 0.55,
+          "eHeatKwh": 5,
+          "coolingDollars": 0,
+          "coolingKwh": 0,
+          "fanDollars": 0.11,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 1,
+          "hPHeatDollars": 2.4199998,
+          "hPHeatKwh": 22,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        },
+        {
+          "energyPeriodType": "month1",
+          "eHeatDollars": 14.3,
+          "eHeatKwh": 130,
+          "coolingDollars": 0,
+          "coolingKwh": 0,
+          "fanDollars": 6.71,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 61,
+          "hPHeatDollars": 71.5,
+          "hPHeatKwh": 650,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        },
+        {
+          "energyPeriodType": "year1",
+          "eHeatDollars": 96.8,
+          "eHeatKwh": 880,
+          "coolingDollars": 143.0,
+          "coolingKwh": 1300,
+          "fanDollars": 44.0,
+          "fanGasDollars": 0,
+          "fanGasKwh": 0,
+          "fanKwh": 400,
+          "hPHeatDollars": 341.0,
+          "hPHeatKwh": 3100,
+          "loopPumpDollars": 0,
+          "loopPumpKwh": 0,
+          "gasDollars": 0,
+          "gasKwh": 0,
+          "reheatDollars": 0,
+          "reheatKwh": 0
+        }
+      ]
+    }
+  }
+}

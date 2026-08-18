@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 2,
+  "home": {
+    "name": "Montfort Residence",
+    "serviceAmps": 400
+  },
+  "devices": [
+    {
+      "id": "A-28",
+      "panel": "A",
+      "slots": [
+        28
+      ],
+      "poles": 1,
+      "amps": 20,
+      "hardware": {
+        "manufacturer": "Leviton",
+        "catalogNumber": "LB120-T",
+        "legacyCatalogNumber": "LB120",
+        "breakerType": "standard thermal-magnetic",
+        "voltage": "120V~",
+        "interruptRating": "10kA",
+        "hacr": true,
+        "issueNo": null,
+        "smartReplacement": "LB120-ST",
+        "photoVerified": true
+      },
+      "role": "branch",
+      "label": "Sump Pump",
+      "labelSource": "single circuit",
+      "circuitType": "120V branch",
+      "physicalMarking": null,
+      "priority": "critical",
+      "shedIn": [],
+      "circuits": [
+        {
+          "room": "Unfinished Basement",
+          "endpoint": "Sump Pump",
+          "estimatedWatts": 800,
+          "fedFromSlot": 28,
+          "priority": "critical",
+          "verified": true,
+          "verificationMethod": "breaker walk-through"
+        }
+      ],
+      "notes": [],
+      "estimatedWattsTotal": 800
+    },
+    {
+      "id": "B-1-3",
+      "panel": "B",
+      "slots": [
+        1,
+        3
+      ],
+      "poles": 2,
+      "amps": 50,
+      "hardware": {
+        "manufacturer": "Leviton",
+        "catalogNumber": "LB250-T",
+        "legacyCatalogNumber": "LB250",
+        "breakerType": "standard thermal-magnetic",
+        "voltage": "120/240V~",
+        "interruptRating": "10kA",
+        "hacr": true,
+        "issueNo": "0109618",
+        "smartReplacement": "LB250-ST",
+        "photoVerified": true
+      },
+      "role": "branch",
+      "label": "Cooktop",
+      "labelSource": "walkthrough",
+      "circuitType": "240V appliance",
+      "physicalMarking": null,
+      "priority": null,
+      "shedIn": [
+        "truckHome"
+      ],
+      "circuits": [
+        {
+          "room": "Kitchen",
+          "endpoint": "Stovetop",
+          "estimatedWatts": 7500,
+          "fedFromSlot": [
+            1,
+            3
+          ],
+          "voltage": "240V",
+          "verified": true,
+          "verificationMethod": "breaker walk-through"
+        }
+      ],
+      "notes": [],
+      "estimatedWattsTotal": 7500
+    }
+  ]
+}

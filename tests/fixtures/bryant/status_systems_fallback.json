@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "The reference-proven fallback shape: getInfinitySystems($userName) returns EVERY",
+    "system the account can see, keyed on userName - the serial is not an input and comes",
+    "back in profile.serial, so the caller filters client-side. Two systems here; the",
+    "second is ours (CARRIER_SERIAL = TEST0000001 in the test environment). Picking the",
+    "first system, or assuming there is only one, would archive a stranger's house."
+  ],
+  "data": {
+    "infinitySystems": [
+      {
+        "profile": {"serial": "OTHER000999", "name": "Cabin", "model": "SYSTXCCWIC01-B", "brand": "Bryant", "idutype": "fancoil", "odutype": "multistghp"},
+        "status": {
+          "utcTime": "2026-08-16T18:00:30.128Z",
+          "isDisconnected": false,
+          "cfgem": "F",
+          "mode": "off",
+          "oat": "55",
+          "odu": {"type": "multistghp", "opstat": "off"},
+          "idu": {"type": "fancoil", "opstat": "off", "cfm": "0", "blwrpm": "0"},
+          "zones": [
+            {"id": "1", "name": "ZONE 1", "enabled": "on", "rt": "62", "rh": "50", "fan": "off", "htsp": "55", "clsp": "85", "hold": "off", "currentActivity": "away", "zoneconditioning": "idle"}
+          ]
+        }
+      },
+      {
+        "profile": {"serial": "TEST0000001", "name": "HVAC", "model": "SYSTXCCWIC01-B", "brand": "Bryant", "idutype": "fancoil", "odutype": "multistghp"},
+        "status": {
+          "utcTime": "2026-08-16T18:00:30.128Z",
+          "localTime": "2026-08-16T14:00:28.900",
+          "localTimeOffset": "-04:00",
+          "isDisconnected": false,
+          "cfgem": "F",
+          "mode": "cool",
+          "oat": "88",
+          "filtrlvl": "22",
+          "humid": "off",
+          "humlvl": "19",
+          "uvlvl": "100",
+          "vent": "None",
+          "ventlvl": 100,
+          "vacatrunning": "off",
+          "oprstsmsg": "None",
+          "odu": {"type": "multistghp", "opstat": "low", "opmode": "cool", "iducfm": "1000", "blwrpm": "None", "comprpm": "None", "oducoiltmp": "None"},
+          "idu": {"type": "fancoil", "opstat": "low", "cfm": "None", "iducfm": "None", "blwrpm": "800", "statpress": "None", "coiltemp": "None"},
+          "zones": [
+            {"id": "1", "name": "ZONE 1", "enabled": "on", "rt": "73", "rh": "44", "fan": "high", "htsp": "68", "clsp": "74", "hold": "off", "currentActivity": "home", "zoneconditioning": "active_cool", "damperposition": "None", "occupancy": "None"}
+          ]
+        }
+      }
+    ]
+  }
+}

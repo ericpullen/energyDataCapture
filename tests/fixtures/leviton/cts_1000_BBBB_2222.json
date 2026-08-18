@@ -1,0 +1,16 @@
+[
+  {
+    "_comment": "Firmware v2 spurious zeros on both legs. Recorded verbatim (PLAN.md §2.3) - filtering is a query-time concern, and a zero here is a real reading as far as this pipeline is concerned.",
+    "id": 4101,
+    "name": "Garage feeder",
+    "channel": 4,
+    "iotWhemId": "1000_BBBB_2222",
+    "activePower": 0,
+    "activePower2": 0,
+    "rmsCurrent": 0,
+    "rmsCurrent2": 0,
+    "energyConsumption": 15330.25,
+    "connected": true,
+    "usageType": "OTHER"
+  }
+]

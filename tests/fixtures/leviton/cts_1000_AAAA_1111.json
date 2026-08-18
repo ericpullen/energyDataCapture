@@ -1,0 +1,44 @@
+[
+  {
+    "_comment": "A full CT pair: both clamps installed, so both legs produce rows.",
+    "id": 4001,
+    "name": "HVAC subpanel feeder",
+    "channel": 1,
+    "iotWhemId": "1000_AAAA_1111",
+    "activePower": 900,
+    "activePower2": 880,
+    "rmsCurrent": 7.5,
+    "rmsCurrent2": 7.3,
+    "energyConsumption": 88123.5,
+    "energyImport": 0,
+    "connected": true,
+    "usageType": "OTHER"
+  },
+  {
+    "_comment": "Single-leg CT: the leg-B fields are null. Leg B must emit NOTHING (a gap), never a zero.",
+    "id": 4002,
+    "name": "Well pump",
+    "channel": 2,
+    "iotWhemId": "1000_AAAA_1111",
+    "activePower": 340,
+    "activePower2": null,
+    "rmsCurrent": 2.8,
+    "rmsCurrent2": null,
+    "energyConsumption": 9021.0,
+    "connected": true,
+    "usageType": "OTHER"
+  },
+  {
+    "_comment": "Clamp is not installed on anything: usageType NOT_USED means skip the whole object.",
+    "id": 4003,
+    "name": "Spare",
+    "channel": 3,
+    "iotWhemId": "1000_AAAA_1111",
+    "activePower": 0,
+    "activePower2": 0,
+    "rmsCurrent": 0,
+    "rmsCurrent2": 0,
+    "connected": true,
+    "usageType": "NOT_USED"
+  }
+]

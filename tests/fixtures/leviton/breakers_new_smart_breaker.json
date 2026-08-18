@@ -1,0 +1,23 @@
+[
+  {
+    "_comment": "Hub A's breaker list AFTER a new smart breaker is installed in slot 21. Re-discovery (every LEVITON_DISCOVERY_INTERVAL_S) must pick it up without a restart (PLAN.md §6.2).",
+    "id": "4C4556527611_A65E",
+    "name": "EV charger",
+    "model": "LB230-2P",
+    "branchType": "GENERAL",
+    "position": 21,
+    "poles": 2,
+    "currentRating": 50,
+    "currentState": "ON",
+    "currentState2": "ON",
+    "connected": true,
+    "power": 3600,
+    "power2": 3550,
+    "rmsCurrent": 30.0,
+    "rmsCurrent2": 30.0,
+    "rmsVoltage": 120,
+    "rmsVoltage2": 121,
+    "serialNumber": "SB-0000-0021",
+    "iotWhemId": "1000_AAAA_1111"
+  }
+]

@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "Hand-built from the shape of dahlb/carrier-api's maintainer-committed real capture",
+    "(tests/graphql/systems.json, 2025-03-03) but with a THREE-zone system: zones 1 and 3",
+    "installed, zone 2 physically absent. Note that the absent zone still reports plausible",
+    "numbers for rh/htsp/clsp and even a heating conditioning state - only rt is honestly",
+    "'None'. Emitting rows for it would fabricate ~80k rows/day.",
+    "Every numeric field is a JSON string, exactly as the API sends it."
+  ],
+  "data": {
+    "infinityStatus": {
+      "utcTime": "2026-08-16T18:00:30.128Z",
+      "localTime": "2026-08-16T14:00:28.900",
+      "localTimeOffset": "-04:00",
+      "isDisconnected": false,
+      "cfgem": "F",
+      "mode": "cool",
+      "oat": "91.5",
+      "filtrlvl": "22",
+      "humid": "off",
+      "humlvl": "19",
+      "uvlvl": "100",
+      "vent": "None",
+      "ventlvl": 100,
+      "vacatrunning": "off",
+      "oprstsmsg": "None",
+      "odu": {
+        "type": "multistghp",
+        "opstat": "high",
+        "opmode": "cool",
+        "iducfm": "1180",
+        "blwrpm": "None",
+        "comprpm": "None",
+        "oducoiltmp": "None"
+      },
+      "idu": {
+        "type": "fancoil",
+        "opstat": "high",
+        "cfm": "1180",
+        "iducfm": "None",
+        "blwrpm": "875",
+        "statpress": "0.60000002384185791",
+        "coiltemp": "None"
+      },
+      "zones": [
+        {
+          "id": "1",
+          "name": "ZONE 1",
+          "enabled": "on",
+          "rt": "71.5",
+          "rh": "38",
+          "fan": "med",
+          "htsp": "70",
+          "clsp": "78.0",
+          "hold": "off",
+          "currentActivity": "home",
+          "zoneconditioning": "active_cool",
+          "damperposition": "None",
+          "occupancy": "None"
+        },
+        {
+          "id": "2",
+          "name": "Zone 2",
+          "enabled": "off",
+          "rt": "None",
+          "rh": "34",
+          "fan": "off",
+          "htsp": "60.0",
+          "clsp": "80.0",
+          "hold": "off",
+          "currentActivity": "away",
+          "zoneconditioning": "active_heat",
+          "damperposition": "None",
+          "occupancy": "None"
+        },
+        {
+          "id": "3",
+          "name": "Upstairs",
+          "enabled": "on",
+          "rt": "68",
+          "rh": "41",
+          "fan": "low",
+          "htsp": "68.0",
+          "clsp": "76",
+          "hold": "on",
+          "currentActivity": "home",
+          "zoneconditioning": "idle",
+          "damperposition": "None",
+          "occupancy": "None"
+        }
+      ]
+    }
+  }
+}

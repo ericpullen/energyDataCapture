@@ -1,0 +1,1221 @@
+<!doctype html>
+<!--
+  energycap — the local dashboard served at GET /ui by energy_capture.health.
+
+  One file. No framework, no build step, no CDN, no external asset of any kind:
+  it renders with the network unplugged, which is the point — it is a window
+  onto a collector that runs in a house, not a web app.
+
+  The one rule this page must not break (CLAUDE.md rule 1: a gap stays a gap):
+
+    * Lines BREAK when consecutive samples are more than gap_threshold_s apart.
+      A visible break is the correct rendering of "the collector was down".
+    * Nothing is zero-filled. A missing hour has no row and says so; a missing
+      sample is a break, never a point at 0.
+    * "The load was off" (samples present, value 0) and "the collector was down"
+      (no samples) get different marks and different words, everywhere.
+    * Every aggregate is shown with its sample_count and the expected count, so
+      a partial hour looks partial at a glance.
+
+  The watts chart's window MOVES (30m / 1h / 6h / 24h, panning, drag, arrows),
+  and everything above still holds when it does:
+
+    * the axis is drawn from the window the SERVER answered with, never from what
+      this page asked for, so a request that was clamped or ignored cannot make
+      the chart mislabel itself;
+    * above an hour the server buckets, and an empty bucket arrives as an explicit
+      null — the line breaks there exactly as it does at a raw gap. A bucket with
+      fewer samples than expected is drawn with a hollow mark and says so;
+    * the axis states what one mark IS ("2.5-minute buckets"), never implying 30s
+      resolution across a day;
+    * panning stops at the oldest row the spool still holds, and says so, rather
+      than scrolling into empty space that reads as an outage;
+    * panning back STOPS the chart following now. The rest of the page keeps
+      refreshing; the chart's window stays where it was put until "Live" is clicked.
+
+  Colour: three categorical slots (blue/orange/aqua), assigned to an ENTITY and
+  kept for as long as that entity is on screen — a change of selection never
+  repaints a survivor. Status colours are separate, never themed, and always ship
+  with an icon and a word; text always wears text tokens, never a series colour.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>energycap — live</title>
+<style>
+/* ---------------------------------------------------------------- tokens */
+:root {
+  --surface:#fcfcfb; --card:#ffffff; --text-1:#0b0b0b; --text-2:#52514e;
+  --line:#e5e4e0; --line-strong:#d3d2cd;
+  /* categorical slots 1-3, fixed order, never cycled, never a 4th */
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  /* de-emphasis mark for the small multiples (one series each, no legend) */
+  --mark-muted:#8d8c85;
+  /* status — fixed, never themed, never used for a data series */
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    --surface:#1a1a19; --card:#222221; --text-1:#ffffff; --text-2:#c3c2b7;
+    --line:#33322f; --line-strong:#454440;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+    --mark-muted:#8b8a82;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --surface:#1a1a19; --card:#222221; --text-1:#ffffff; --text-2:#c3c2b7;
+  --line:#33322f; --line-strong:#454440;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --mark-muted:#8b8a82;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+
+/* ------------------------------------------------------------------ page */
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--surface); color:var(--text-1);
+  font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  padding:0 20px 48px;
+}
+h1 { font-size:15px; font-weight:600; margin:0; letter-spacing:.02em; }
+h2 { font-size:13px; font-weight:600; margin:26px 0 10px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-2); }
+h2 .sub { text-transform:none; letter-spacing:0; font-weight:400; margin-left:8px; }
+.sub, .hint { color:var(--text-2); font-size:12px; }
+a { color:inherit; }
+
+header {
+  position:sticky; top:0; z-index:5; background:var(--surface);
+  display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+  padding:12px 0 10px; border-bottom:1px solid var(--line); margin-bottom:4px;
+}
+header .spacer { flex:1 1 auto; }
+button {
+  font:inherit; font-size:12px; color:var(--text-1); background:var(--card);
+  border:1px solid var(--line-strong); border-radius:6px; padding:5px 10px; cursor:pointer;
+}
+button:hover { border-color:var(--text-2); }
+button[aria-pressed="true"] { background:var(--text-1); color:var(--surface); border-color:var(--text-1); }
+
+#banner { border-radius:8px; padding:9px 12px; margin:10px 0 0; font-size:13px;
+  border:1px solid var(--line-strong); background:var(--card); }
+#banner[data-level="critical"] { border-color:var(--critical); }
+#banner[data-level="warning"] { border-color:var(--warning); }
+#main.stale { opacity:.55; }
+
+/* --------------------------------------------------------------- status */
+.strip { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); margin-top:12px; }
+.tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; box-shadow:var(--shadow); }
+.tile .k { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-2); }
+.tile .v { font-size:19px; margin-top:3px; }
+.tile .d { font-size:12px; color:var(--text-2); margin-top:3px; }
+.icon { font-weight:700; font-size:12px; margin-right:4px; }
+.icon.good{color:var(--good);} .icon.warning{color:var(--warning);}
+.icon.serious{color:var(--serious);} .icon.critical{color:var(--critical);}
+.icon.neutral{color:var(--text-2);}
+.swatch { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:baseline; }
+
+/* ------------------------------------------------------------- live now */
+.grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); }
+.chan { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; box-shadow:var(--shadow); }
+.chan .top { display:flex; align-items:baseline; gap:8px; }
+.chan .name { font-weight:600; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chan .val { font-size:17px; white-space:nowrap; }
+.chan .unit { font-size:12px; color:var(--text-2); margin-left:2px; }
+.chan .meta { font-size:11.5px; color:var(--text-2); margin-top:2px; display:flex; gap:8px; flex-wrap:wrap; }
+/* viewBox + width:100% so the sparkline scales with the card instead of
+   overflowing it on a narrow screen (the page must never scroll sideways). */
+.chan svg { display:block; width:100%; height:auto; margin-top:6px; }
+.tag { border:1px solid var(--line-strong); border-radius:999px; padding:0 6px; font-size:10.5px; color:var(--text-2); }
+
+/* --------------------------------------------------------------- charts */
+figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; box-shadow:var(--shadow); }
+figure svg { display:block; width:100%; height:auto; touch-action:none; }
+figure:focus-visible { outline:2px solid var(--text-2); outline-offset:2px; }
+/* the movable window's controls — layout only, no new colours */
+.rangebar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
+.rangebar .gap { flex:1 1 auto; }
+.rangebar .state { font-size:12px; color:var(--text-2); }
+button[disabled] { opacity:.4; cursor:default; }
+button[disabled]:hover { border-color:var(--line-strong); }
+#ovhit { cursor:grab; }
+#ovhit.drag { cursor:grabbing; }
+.legend { display:flex; flex-wrap:wrap; gap:14px; font-size:12px; color:var(--text-2); margin-bottom:8px; }
+.tip {
+  position:absolute; pointer-events:none; z-index:20; background:var(--card); color:var(--text-1);
+  border:1px solid var(--line-strong); border-radius:8px; padding:7px 9px; font-size:12px;
+  box-shadow:var(--shadow); min-width:150px;
+}
+.tip .r { display:flex; justify-content:space-between; gap:12px; font-variant-numeric:tabular-nums; }
+.tip .h { color:var(--text-2); margin-bottom:4px; }
+
+/* --------------------------------------------------------------- tables */
+table { border-collapse:collapse; width:100%; font-size:12.5px; font-variant-numeric:tabular-nums; }
+.scroll { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow); }
+th, td { text-align:right; padding:5px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }
+th { color:var(--text-2); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.05em; background:var(--card); }
+th:first-child, td:first-child, .l { text-align:left; }
+tbody tr:last-child td { border-bottom:none; }
+td.absent { color:var(--text-2); font-style:italic; }
+tr.norow td { text-align:left; color:var(--text-2); }
+.meter { display:inline-block; width:54px; height:6px; border-radius:3px; background:var(--line); vertical-align:middle; margin-right:6px; overflow:hidden; }
+.meter i { display:block; height:100%; border-radius:3px; }
+.hourhead td { background:var(--surface); font-weight:600; color:var(--text-1); text-align:left; }
+footer { margin-top:26px; color:var(--text-2); font-size:11.5px; border-top:1px solid var(--line); padding-top:10px; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>energycap</h1>
+  <span id="freshness" class="sub"></span>
+  <span class="spacer"></span>
+  <button id="btn-pause" aria-pressed="false">Pause</button>
+  <button id="btn-tables" aria-pressed="false">Show tables</button>
+  <button id="btn-theme">Theme: auto</button>
+</header>
+
+<div id="banner" hidden></div>
+
+<div id="main">
+  <section id="strip" class="strip"></section>
+
+  <section>
+    <h2>Live now <span class="sub">latest value per channel, last 30 min — one series each, so the label is the identity</span></h2>
+    <div id="live" class="grid"></div>
+    <div id="live-table" hidden></div>
+  </section>
+
+  <section>
+    <h2 id="overlay-title">Watts <span class="sub"></span></h2>
+    <!-- The window controls live OUTSIDE the redrawn figure, so they never
+         disappear when the window being viewed happens to hold no samples. -->
+    <div class="rangebar" id="rangebar" role="group" aria-label="Chart time window">
+      <span class="hint">Window</span>
+      <button type="button" class="win" data-window="1800" aria-pressed="true">30m</button>
+      <button type="button" class="win" data-window="3600" aria-pressed="false">1h</button>
+      <button type="button" class="win" data-window="21600" aria-pressed="false">6h</button>
+      <button type="button" class="win" data-window="86400" aria-pressed="false">24h</button>
+      <span style="width:8px"></span>
+      <button type="button" id="pan-back" title="Back half a window (Left arrow)" aria-label="Pan back half a window">◀</button>
+      <button type="button" id="pan-fwd" title="Forward half a window (Right arrow)" aria-label="Pan forward half a window">▶</button>
+      <button type="button" id="btn-live" aria-pressed="true" title="Follow now (Home)">Live</button>
+      <span class="gap"></span>
+      <span class="state" id="range-state"></span>
+    </div>
+    <div id="overlay-wrap"></div>
+    <div id="overlay-table" hidden></div>
+  </section>
+
+  <section>
+    <h2>HVAC <span class="sub">Bryant Evolution — current readings, not a chart</span></h2>
+    <div id="hvac" class="strip"></div>
+  </section>
+
+  <section>
+    <h2>The math <span class="sub">spool aggregated by local hour — mean, sample_count / expected, coverage, kWh</span></h2>
+    <div style="margin-bottom:8px">
+      <label class="hint"><input type="checkbox" id="allmetrics"> show every metric (default: watts only, the metric kWh is defined for)</label>
+    </div>
+    <div id="hourly"></div>
+  </section>
+</div>
+
+<footer id="foot"></footer>
+
+<script>
+"use strict";
+/* =========================================================================
+   State
+   ========================================================================= */
+const REFRESH_MS = 5000;
+let snap = null;          // last successful /ui/data document
+let lastOkAt = null;      // Date of that success
+let lastError = null;     // string, or null
+let paused = false;
+let tables = false;
+let timer = null;
+let localOffsetMs = 0;    // (local wall clock - utc), derived from the server
+
+// ------------------------------------------------------- the chart's window
+// The ONLY client-side state the chart has. Everything drawn — axis, ticks,
+// resolution wording, bucket width — comes from the document the server
+// answered with, so an ignored or clamped request can never make the chart
+// claim a window it is not showing.
+const CHART_DEFAULT_S = 1800;
+let chartWindowS = CHART_DEFAULT_S;
+let chartEnd = null;      // ms epoch at the window's right edge; null == LIVE
+let chartHonored = true;  // did the server answer the window we asked for?
+let chartSig = "";        // last drawn figure's signature (skip identical redraws)
+let dragging = null;      // in-flight drag-to-pan
+const slotByKey = new Map();   // entity -> categorical slot. Colour follows the
+const freeSlots = [1, 2, 3];   // ENTITY: a survivor never gets repainted.
+
+/* ------------------------------------------------------------- utilities */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Date.parse is only specified for 3 fractional digits; the spool writes 6.
+const tms = (iso) => Date.parse(String(iso).replace(/(\.\d{3})\d+/, "$1"));
+
+// All wall-clock text comes from the server's `local` field. Where a label is
+// needed for an interpolated instant (an axis tick), it is derived from the
+// server's own utc/local pair, never from the browser's timezone — the browser
+// may not be in America/Kentucky/Louisville at all.
+function hhmm(msUtc, offsetMs) {
+  const d = new Date(msUtc + (offsetMs === undefined ? localOffsetMs : offsetMs));
+  return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
+}
+const clock = (isoLocal) => (isoLocal || "").slice(11, 19);
+
+const ICON = { good: "✓", warning: "!", serious: "▲", critical: "✕", neutral: "○", in_progress: "◔" };
+function badge(level, word) {
+  const lvl = ICON[level] ? level : "neutral";
+  return `<span class="icon ${lvl}" aria-hidden="true">${ICON[lvl]}</span>${esc(word)}`;
+}
+// The same mark where the word is already on screen a line below. Status colour is
+// never on its own: the glyph carries the shape and the label carries the word, so
+// this keeps the word as the accessible name rather than dropping it.
+function statusMark(level, word) {
+  const lvl = ICON[level] ? level : "neutral";
+  return `<span class="icon ${lvl}" role="img" aria-label="${esc(word)}" title="${esc(word)}">${ICON[lvl]}</span>`;
+}
+
+function fmt(v, unit) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const a = Math.abs(v);
+  let dp = 1;
+  if (unit === "W") dp = a >= 100 ? 0 : 1;
+  else if (unit === "kWh") dp = 3;
+  else if (unit === "A") dp = 2;
+  else if (unit === "rpm" || unit === "CFM") dp = 0;
+  else if (unit === "enum") dp = 0;
+  return v.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+function age(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 90) return Math.round(s) + "s ago";
+  if (s < 5400) return Math.round(s / 60) + "m ago";
+  return (s / 3600).toFixed(1) + "h ago";
+}
+function dur(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 5400) return Math.round(s / 60) + " min";
+  return (s / 3600).toFixed(1) + " h";
+}
+const slotVar = (n) => `var(--s${n})`;
+
+function slotFor(key) {
+  if (slotByKey.has(key)) return slotByKey.get(key);
+  const n = freeSlots.shift();
+  if (n === undefined) return null;      // never a 4th series, never a cycled hue
+  slotByKey.set(key, n);
+  return n;
+}
+function reconcileSlots(keys) {
+  for (const [key, n] of [...slotByKey]) {
+    if (!keys.includes(key)) { slotByKey.delete(key); freeSlots.push(n); freeSlots.sort(); }
+  }
+  // New entities claim slots in key order, never in rank order, so the same
+  // three channels get the same three colours on every page load — and a
+  // channel that survives a change of selection keeps the slot it already has.
+  [...keys].sort().forEach(slotFor);
+}
+
+/* =========================================================================
+   Fetch loop
+   ========================================================================= */
+function dataUrl() {
+  const params = new URLSearchParams();
+  params.set("window_s", String(chartWindowS));
+  // No `end` IS live: the server resolves the right edge to its own now. A pinned
+  // end is history and does not move, so a refresh cannot yank the reader back.
+  if (chartEnd !== null) params.set("end", new Date(chartEnd).toISOString());
+  return "/ui/data?" + params.toString();
+}
+
+async function refresh() {
+  const asked = { window_s: chartWindowS, live: chartEnd === null };
+  try {
+    const res = await fetch(dataUrl(), { cache: "no-store" });
+    if (!res.ok) {
+      let detail = "HTTP " + res.status;
+      try {
+        const doc = await res.json();
+        if (doc && doc.detail) detail += " — " + doc.parameter + ": " + doc.detail;
+      } catch (ignored) { /* not JSON; the status is all we have */ }
+      throw new Error(detail);
+    }
+    snap = await res.json();
+    lastOkAt = new Date();
+    lastError = null;
+    // Did the server answer the window we asked for? If it did not, we say so
+    // rather than drawing its window under our labels.
+    const ov = snap.overlay || {};
+    chartHonored = ov.window_s === asked.window_s && ov.live === asked.live;
+  } catch (err) {
+    // Never silently keep showing stale numbers: say so, loudly, and dim them.
+    lastError = err && err.message ? err.message : String(err);
+  }
+  render();
+}
+function schedule() {
+  if (timer) clearInterval(timer);
+  if (!paused) timer = setInterval(refresh, REFRESH_MS);
+}
+
+/* ------------------------------------------------- window / panning controls */
+const nowMs = () => (snap && snap.now ? tms(snap.now.utc) : Date.now());
+
+// How far back the spool can actually be read. Panning stops here: past it there
+// is no data because nothing was ever stored, which is NOT an outage and must
+// not be drawn as one.
+function extentMs() {
+  const e = (snap && snap.spool && snap.spool.extent) || null;
+  return {
+    oldest: e && e.oldest ? tms(e.oldest.utc) : null,
+    newest: e && e.newest ? tms(e.newest.utc) : null,
+  };
+}
+function minEndMs() {
+  const ext = extentMs(), now = nowMs();
+  if (ext.oldest === null) return now;
+  return Math.min(ext.oldest + chartWindowS * 1000, now);
+}
+const currentEndMs = () => (chartEnd === null ? nowMs() : chartEnd);
+const canPanBack = () => currentEndMs() > minEndMs() + 1000;
+
+function setEnd(ms) {
+  const now = nowMs();
+  const clamped = Math.max(minEndMs(), Math.min(now, ms));
+  // Panning back to the right edge is the same thing as asking to be live again.
+  chartEnd = clamped >= now - 1500 ? null : clamped;
+  refresh();
+}
+function panBy(deltaMs) { setEnd(currentEndMs() + deltaMs); }
+function panWindows(fraction) { panBy(fraction * chartWindowS * 1000); }
+function setWindow(seconds) {
+  const end = chartEnd;
+  chartWindowS = seconds;
+  // Keep the right edge where the reader put it, re-clamped for the new width —
+  // and if the new width swallows everything back to now, that IS live again.
+  if (end === null) { refresh(); return; }
+  setEnd(end);
+}
+function goLive() { chartEnd = null; refresh(); }
+
+// "one 2.5-minute bucket" / "one 30s sample" — the plural the server reports,
+// made singular for "each mark is ...".
+const oneOf = (resolution) => String(resolution || "").replace(/s$/, "");
+// A local wall clock with its date when the window spans more than today: at 24h
+// "no data before 02:30" is ambiguous, and the ambiguity is a whole day wide.
+const stampShort = (isoLocal) => (isoLocal || "").slice(0, 16).replace("T", " ");
+
+function windowLabel(seconds) {
+  if (!seconds) return "—";
+  if (seconds < 3600) return Math.round(seconds / 60) + " min";
+  const hours = seconds / 3600;
+  return (hours % 1 ? hours.toFixed(1) : hours) + " h";
+}
+
+function renderRangeBar() {
+  const ov = snap.overlay || {};
+  document.querySelectorAll("#rangebar .win").forEach((b) => {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.window) === ov.window_s));
+  });
+  const live = ov.live !== false;
+  $("btn-live").setAttribute("aria-pressed", String(live));
+  $("btn-live").disabled = live;
+  $("pan-fwd").disabled = live;
+  $("pan-back").disabled = !canPanBack();
+
+  const ext = snap.spool && snap.spool.extent;
+  const oldest = ext && ext.oldest ? stampShort(ext.oldest.local) : null;
+  let state = live
+    ? badge("good", "Live") + ` — following now, refreshing every ${snap.refresh_s}s`
+    : badge("neutral", "History") +
+      ` — ${esc(stampRange(ov))}, frozen while you read it`;
+  if (!canPanBack() && oldest) {
+    state += ` · no data before ${esc(oldest)} (the spool starts there)`;
+  }
+  if (!chartHonored) {
+    state = badge("warning", "Window not applied") +
+      " — this server answered with its own window (" + esc(windowLabel(ov.window_s)) +
+      (ov.live === false ? ", history" : ", live") + "); the chart below shows exactly that.";
+  }
+  $("range-state").innerHTML = state;
+}
+
+// "14:00 → 14:30" / "Aug 15 14:00 → Aug 16 14:00" — always the SERVER's local
+// wall clock, never the browser's idea of the local zone.
+function stampRange(ov) {
+  const a = ov.window_start.local, b = ov.window_end.local;
+  const sameDay = a.slice(0, 10) === b.slice(0, 10);
+  return sameDay
+    ? `${a.slice(11, 16)} → ${b.slice(11, 16)} local`
+    : `${a.slice(0, 10)} ${a.slice(11, 16)} → ${b.slice(0, 10)} ${b.slice(11, 16)} local`;
+}
+
+/* =========================================================================
+   Sparkline — one series, gaps left as gaps
+   ========================================================================= */
+const ZERO_FLOOR = new Set(["watts", "amps", "cfm", "blower_rpm", "humidity_pct", "stage_pct"]);
+
+// The two window-edge absences the server reports separately from `gaps` (which
+// means "between two observed samples" and so cannot describe an edge). Drawn with
+// exactly the same wash, because to a reader they are the same fact: no samples.
+function edgeBands(series, X, y, height) {
+  return [series.leading_gap, series.trailing_gap].filter(Boolean).map((g) => {
+    const x1 = X(tms(g.after.utc)), x2 = X(tms(g.before.utc));
+    return `<rect x="${x1.toFixed(1)}" y="${y}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${height}" fill="var(--critical)" opacity=".10"/>`;
+  }).join("");
+}
+
+// Every span in which this series has NO sample: the interior gaps (more than
+// gap_threshold_s between two observed points) plus the two window edges.
+function absentIntervals(series, t0, t1) {
+  const pts = series.points;
+  if (!pts.length) return [[t0, t1]];
+  const out = [];
+  const gapMs = series.gap_threshold_s * 1000;
+  let prev = null;
+  for (const p of pts) {
+    const t = tms(p[0]);
+    if (prev !== null && t - prev > gapMs) out.push([prev, t]);
+    prev = t;
+  }
+  if (series.leading_gap) out.push([tms(series.leading_gap.after.utc), tms(series.leading_gap.before.utc)]);
+  if (series.trailing_gap) out.push([tms(series.trailing_gap.after.utc), tms(series.trailing_gap.before.utc)]);
+  return out.sort((a, b) => a[0] - b[0]);
+}
+
+// Both lists are sorted and non-overlapping, so one pass suffices. Used to shade
+// only the spans where NO charted channel had a sample: painting each series'
+// absence separately would stack three translucent rectangles into one opaque
+// block, making the wash mean "how many series are selected" instead of "no data".
+function intersectIntervals(a, b) {
+  const out = [];
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    const s = Math.max(a[i][0], b[j][0]), e = Math.min(a[i][1], b[j][1]);
+    if (e > s) out.push([s, e]);
+    if (a[i][1] < b[j][1]) i++; else j++;
+  }
+  return out;
+}
+
+// "no samples until 13:55" / "nothing since 14:08" — the edge absences in words.
+function edgePhrases(series) {
+  const out = [];
+  if (series.leading_gap) out.push("no samples until " + clock(series.leading_gap.before.local));
+  if (series.trailing_gap) out.push("nothing since " + clock(series.trailing_gap.after.local));
+  return out;
+}
+
+function sparkline(series, color, w, h) {
+  const pts = series.points;
+  const t0 = tms(series.window_start.utc), t1 = tms(series.window_end.utc);
+  if (!pts.length) {
+    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="no samples in this window">
+      <rect x="0" y="0" width="${w}" height="${h}" fill="var(--critical)" opacity=".10"/>
+      <text x="${w / 2}" y="${h / 2 + 4}" text-anchor="middle" font-size="10" fill="var(--text-2)">no samples in this window</text></svg>`;
+  }
+  const vals = pts.map((p) => p[2]);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (ZERO_FLOOR.has(series.metric)) lo = Math.min(0, lo);
+  if (hi === lo) { hi = lo + 1; lo = lo - 1; }
+  const pad = (hi - lo) * 0.08;
+  lo -= pad; hi += pad;
+  const X = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 2) + 1;
+  const Y = (v) => h - 3 - ((v - lo) / (hi - lo)) * (h - 6);
+
+  // Break the path wherever the sample spacing exceeds the gap threshold.
+  const gapMs = series.gap_threshold_s * 1000;
+  let d = "", prev = null, bands = "";
+  for (const p of pts) {
+    const t = tms(p[0]);
+    if (prev !== null && t - prev > gapMs) {
+      const x1 = X(prev), x2 = X(t);
+      bands += `<rect x="${x1.toFixed(1)}" y="0" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${h}" fill="var(--critical)" opacity=".10"/>`;
+      d += ` M ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+    } else {
+      d += `${d ? " L" : "M"} ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+    }
+    prev = t;
+  }
+  // Absence at the window edges is absence too: without this, a channel that went
+  // silent 12 minutes ago just draws a line that stops, which reads as "the chart
+  // ends here" rather than "nothing has arrived since".
+  bands = edgeBands(series, X, 0, h) + bands;
+  const last = pts[pts.length - 1];
+  const zeroLine = lo <= 0 && hi >= 0
+    ? `<line x1="0" y1="${Y(0).toFixed(1)}" x2="${w}" y2="${Y(0).toFixed(1)}" stroke="var(--line-strong)" stroke-width="1"/>` : "";
+  // Samples that read exactly 0 are REAL (the load was off) — marked on the
+  // baseline, deliberately unlike a gap, which is a break plus a red wash.
+  const zeros = ZERO_FLOOR.has(series.metric)
+    ? pts.filter((p) => p[2] === 0).map((p) => `<circle cx="${X(tms(p[0])).toFixed(1)}" cy="${Y(0).toFixed(1)}" r="1.6" fill="var(--text-2)"/>`).join("")
+    : "";
+  const label = [`${series.sample_count} of ${series.expected_samples} samples`,
+                 `${series.gaps.length} gap(s)`].concat(edgePhrases(series)).join(", ");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}">
+    ${bands}${zeroLine}${zeros}
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${X(tms(last[0])).toFixed(1)}" cy="${Y(last[2]).toFixed(1)}" r="4" fill="${color}" stroke="var(--card)" stroke-width="2"/>
+  </svg>`;
+}
+
+/* =========================================================================
+   Overlay chart — <= 3 series, crosshair, tooltip, direct end labels
+   ========================================================================= */
+let overlayState = null;
+
+// A point's value: the raw sample, or the bucket MEAN — which is null when the
+// bucket held no samples. null is a HOLE, and every reader of this must break
+// the line rather than reach for a neighbour.
+const pval = (p) => (p[2] === null || p[2] === undefined ? null : p[2]);
+// Bucketed points carry their own counts: [ts, local, mean, min, max, n, expected].
+const isPartial = (p) => p.length > 6 && p[5] > 0 && p[5] < p[6];
+
+// Every span in which this series has no sample, in either mode. Bucketed holes
+// come from the server as explicit spans; raw gaps are the existing computation.
+function chartAbsences(series, bucketed, t0, t1) {
+  if (!bucketed) return absentIntervals(series, t0, t1);
+  if (!series.points.length) return [[t0, t1]];
+  return (series.holes || []).map((h) => [tms(h.start.utc), tms(h.end.utc)]);
+}
+
+// x-axis tick spacing: the first step that keeps the axis under ~8 labels. The
+// window is now anything from 30 minutes to a day, so this cannot be a ladder of
+// three special cases any more.
+const XSTEPS_MS = [2, 5, 15, 30, 60, 120, 180, 360, 720].map((m) => m * 60000);
+function xTickStep(span) {
+  return XSTEPS_MS.find((s) => span / s <= 8) || XSTEPS_MS[XSTEPS_MS.length - 1];
+}
+
+function drawOverlay(force) {
+  const wrap = $("overlay-wrap");
+  const ov = snap.overlay;
+  const bucketed = ov.mode === "bucketed";
+  const chosen = (ov.series || []).filter((s) => s && s.points);
+  const width = Math.max(520, wrap.clientWidth || 900);
+
+  // Redrawing an unchanged history chart every 5s would throw away the reader's
+  // crosshair (and fight a drag in progress) for nothing.
+  const sig = [ov.window_start.utc, ov.window_end.utc, ov.mode, ov.bucket_s, width,
+               ov.keys.join(","), chosen.map((s) => s.points.length).join(",")].join("|");
+  if (!force && sig === chartSig && $("ovsvg")) return;
+  chartSig = sig;
+
+  $("overlay-title").querySelector(".sub").textContent =
+    `${windowLabel(ov.window_s)} · ${ov.resolution} · ${ov.selected_by}`;
+
+  const H = 260, mL = 52, mR = 168, mT = 12, mB = 26;
+  const t0 = tms(ov.window_start.utc), t1 = tms(ov.window_end.utc);
+  let hi = 0;
+  chosen.forEach((s) => s.points.forEach((p) => { const v = pval(p); if (v !== null && v > hi) hi = v; }));
+  if (hi <= 0) hi = 1;
+  const step = Math.pow(10, Math.floor(Math.log10(hi / 3)));
+  const tick = [1, 2, 2.5, 5, 10].map((m) => m * step).find((v) => hi / v <= 4) || step * 10;
+  const top = Math.ceil(hi / tick) * tick;
+  const X = (t) => mL + ((t - t0) / Math.max(1, t1 - t0)) * (width - mL - mR);
+  const Y = (v) => mT + (1 - v / top) * (H - mT - mB);
+
+  let grid = "", ticks = "";
+  for (let v = 0; v <= top + 1e-9; v += tick) {
+    grid += `<line x1="${mL}" y1="${Y(v).toFixed(1)}" x2="${width - mR}" y2="${Y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
+    ticks += `<text x="${mL - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--text-2)">${fmt(v, "W")}</text>`;
+  }
+  // A 24h window can straddle a DST change, and one page-wide utc->local offset
+  // would then mislabel part of the axis. Each tick borrows the offset of the
+  // nearest point, whose local wall clock came from the server (timeutil).
+  const offsetAt = (t) => {
+    let best = null, bd = Infinity;
+    for (const c of chosen) for (const p of c.points) {
+      const d = Math.abs(tms(p[0]) - t);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best ? Date.parse(best[1] + "Z") - tms(best[0]) : localOffsetMs;
+  };
+  const span = t1 - t0, xstep = xTickStep(span);
+  let xticks = "";
+  for (let t = Math.ceil(t0 / xstep) * xstep; t <= t1; t += xstep) {
+    xticks += `<text x="${X(t).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--text-2)">${hhmm(t, offsetAt(t))}</text>`;
+  }
+
+  // The stretch this window covers that the spool never held: not an outage, and
+  // not shaded like one. It is de-emphasised and named in words instead.
+  const ext = extentMs();
+  const preSpool = ext.oldest !== null && ext.oldest > t0 ? [t0, Math.min(t1, ext.oldest)] : null;
+  const preWash = preSpool
+    ? `<rect x="${X(preSpool[0]).toFixed(1)}" y="${mT}" width="${Math.max(1, X(preSpool[1]) - X(preSpool[0])).toFixed(1)}" height="${H - mT - mB}" fill="var(--mark-muted)" opacity=".10"/>`
+    : "";
+
+  // One wash, drawn once, over the spans where NOT ONE charted channel has a
+  // sample — the collector was down. Per-series absence is already carried by the
+  // break in that series' own line, so it is not shaded a second time.
+  let common = chosen.length ? chartAbsences(chosen[0], bucketed, t0, t1) : [[t0, t1]];
+  for (let k = 1; k < chosen.length; k++) {
+    common = intersectIntervals(common, chartAbsences(chosen[k], bucketed, t0, t1));
+  }
+  const floor = preSpool ? preSpool[1] : -Infinity;   // never call "never stored" an outage
+  common = common.map(([s, e]) => [Math.max(s, floor), e]).filter(([s, e]) => e > s);
+  const wash = common.map(([s, e]) =>
+    `<rect x="${X(s).toFixed(1)}" y="${mT}" width="${Math.max(1, X(e) - X(s)).toFixed(1)}" height="${H - mT - mB}" fill="var(--critical)" opacity=".10"/>`
+  ).join("");
+  const washMinutes = Math.round(common.reduce((a, [s, e]) => a + (e - s), 0) / 60000);
+
+  let paths = "", marks = "", ends = [];
+  chosen.forEach((c) => {
+    const n = slotFor(c.key), color = slotVar(n);
+    const gapMs = c.gap_threshold_s * 1000;
+    let d = "", prev = null, last = null;
+    for (const p of c.points) {
+      const t = tms(p[0]);
+      if (pval(p) === null) {
+        // AN EMPTY BUCKET IS A HOLE. Not a zero, not the neighbour's value: the
+        // pen lifts, and the next real value starts a new subpath below.
+        prev = null;
+        continue;
+      }
+      if (prev !== null && t - prev > gapMs) {
+        // A NEW SUBPATH — never an L across the hole. This single line is the
+        // whole of CLAUDE.md rule 1 as it applies to a chart.
+        d += ` M ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+      } else if (prev === null && d) {
+        d += ` M ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+      } else {
+        d += `${d ? " L" : "M"} ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+      }
+      prev = t;
+      last = p;
+    }
+    paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    // A bucket built from fewer samples than it should hold is a thinner fact than
+    // a full one: hollow mark, series colour, no new hue. Capped so a pathological
+    // window cannot put 1,700 circles in the DOM.
+    marks += c.points.filter(isPartial).slice(0, 240).map((p) =>
+      `<circle cx="${X(tms(p[0])).toFixed(1)}" cy="${Y(p[2]).toFixed(1)}" r="2.6" fill="var(--card)" stroke="${color}" stroke-width="1.5"><title>${p[5]} of ${p[6]} samples in this bucket</title></circle>`
+    ).join("");
+    if (last) ends.push({ c, n, color, x: X(tms(last[0])), y: Y(last[2]), v: last[2] });
+  });
+
+  // Direct labels at the line ends. When they collide they are nudged apart and
+  // joined to their line by a leader — never stacked loose (that detaches the
+  // label from its series and reads as noise).
+  ends.sort((a, b) => a.y - b.y);
+  const GAP_PX = 36;
+  let ly = -Infinity;
+  ends.forEach((e) => { e.ly = Math.max(e.y, ly + GAP_PX, mT + 16); ly = e.ly; });
+  // If pushing down ran off the bottom, shift the whole block up rather than
+  // clamping — clamping would silently stack two labels on top of each other.
+  const overflow = ends.length ? ends[ends.length - 1].ly - (H - mB - 4) : 0;
+  if (overflow > 0) ends.forEach((e) => { e.ly = Math.max(mT + 16, e.ly - overflow); });
+  let labels = "";
+  ends.forEach((e) => {
+    const lx = width - mR + 10;
+    labels += `<line x1="${(e.x + 5).toFixed(1)}" y1="${e.y.toFixed(1)}" x2="${lx - 4}" y2="${e.ly.toFixed(1)}" stroke="var(--line-strong)" stroke-width="1"/>`;
+    labels += `<circle cx="${e.x.toFixed(1)}" cy="${e.y.toFixed(1)}" r="4" fill="${e.color}" stroke="var(--card)" stroke-width="2"/>`;
+    labels += `<rect x="${lx}" y="${(e.ly - 13).toFixed(1)}" width="9" height="9" rx="2.5" fill="${e.color}"/>`;
+    labels += `<text x="${lx + 14}" y="${(e.ly - 5).toFixed(1)}" font-size="11.5" fill="var(--text-1)">${esc(trim(e.c.short_label || e.c.label, 20))}</text>`;
+    labels += `<text x="${lx + 14}" y="${(e.ly + 9).toFixed(1)}" font-size="11.5" fill="var(--text-2)" style="font-variant-numeric:tabular-nums">${fmt(e.v, "W")} W</text>`;
+  });
+
+  const legend = chosen.map((c) => {
+    const n = slotFor(c.key);
+    return `<span><span class="swatch" style="background:${slotVar(n)}"></span>${esc(c.label)}</span>`;
+  }).join("");
+  const partialCount = chosen.reduce((a, c) => a + (c.partial_buckets || 0), 0);
+  const emptyCount = chosen.reduce((a, c) => a + (c.empty_buckets || 0), 0);
+  const legendNote = chosen.length
+    ? `— shaded = no samples from any of these channels (${washMinutes} min); a break in one line = that channel had no sample; a flat 0 = the load was off` +
+      (bucketed
+        ? `; each mark is one ${esc(oneOf(ov.resolution))} (the mean of up to ${ov.expected_per_bucket} samples), a bucket with none is a break, and ${partialCount} hollow mark(s) = a bucket with fewer samples than that`
+        : "")
+    : "— no watt samples anywhere in this window. That is an absence, not a zero.";
+  const emptyText = chosen.length ? "" :
+    `<text x="${(mL + (width - mR - mL) / 2).toFixed(1)}" y="${(mT + (H - mT - mB) / 2).toFixed(1)}" text-anchor="middle" font-size="12" fill="var(--text-2)">no watt samples in this window${preSpool && preSpool[1] >= t1 ? " — the spool holds nothing this far back" : ""}</text>`;
+
+  wrap.innerHTML =
+    `<figure tabindex="0" aria-label="Watts, ${esc(stampRange(ov))}, ${esc(ov.resolution)}${chosen.length ? ", for " + esc(chosen.map((c) => c.label).join(", ")) : " — no samples"}">
+      <div class="legend">${legend}<span>${legendNote}</span></div>
+      <div style="position:relative">
+        <svg id="ovsvg" viewBox="0 0 ${width} ${H}" preserveAspectRatio="xMidYMid meet">
+          <g id="ovpan">${preWash}${wash}${paths}${marks}</g>
+          ${grid}${ticks}${xticks}${emptyText}
+          <line x1="${mL}" y1="${mT}" x2="${mL}" y2="${H - mB}" stroke="var(--line-strong)" stroke-width="1"/>
+          <g id="ovcross" style="display:none">
+            <line id="ovline" y1="${mT}" y2="${H - mB}" stroke="var(--text-2)" stroke-width="1"/>
+            <g id="ovdots"></g>
+          </g>
+          ${labels}
+          <rect id="ovhit" x="${mL}" y="${mT}" width="${width - mL - mR}" height="${H - mT - mB}" fill="transparent"/>
+        </svg>
+        <div id="ovtip" class="tip" hidden></div>
+      </div>
+      <p class="hint" style="margin:8px 0 0">
+        y axis in watts from 0; x axis ${esc(stampRange(ov))}, each mark is one <b>${esc(oneOf(ov.resolution))}</b>${bucketed ? ` (${ov.bucket_count} buckets, ${ov.expected_per_bucket} samples each when complete — this is <b>not</b> ${snap.poll_interval_s.leviton}s resolution)` : ""}.
+        Drag the plot to pan, ← / → to pan half a window, Shift + ← / → to move the crosshair, Home for live.
+        ${preSpool ? `The spool holds nothing before <b>${esc(stampShort(snap.spool.extent.oldest.local))}</b> local — that stretch is greyed, and it is not an outage.` : ""}
+        ${esc(ov.omitted.length)} other watt channel(s) not shown (max three series — the fourth would need a colour the palette does not have): ${esc(ov.omitted.map((o) => o.label).join(", ")) || "none"}.
+      </p>
+    </figure>`;
+
+  overlayState = { chosen, X, Y, t0, t1, mL, mR, mT, H, width, top, bucketed, bucketMs: (ov.bucket_s || 0) * 1000 };
+  bindOverlay();
+}
+
+function trim(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+function bindOverlay() {
+  const svg = $("ovsvg"), hit = $("ovhit"), tip = $("ovtip"), cross = $("ovcross"), pan = $("ovpan");
+  if (!svg || !overlayState) return;
+  const st = overlayState;
+  const hide = () => { cross.style.display = "none"; tip.hidden = true; };
+  const move = (clientX) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((clientX - box.left) / box.width) * st.width;
+    const t = st.t0 + ((px - st.mL) / (st.width - st.mL - st.mR)) * (st.t1 - st.t0);
+    showCrosshair(Math.min(st.t1, Math.max(st.t0, t)));
+  };
+
+  // Drag to pan. The plot follows the pointer while the button is down and the
+  // window is only actually moved on release, so a drag costs one request.
+  hit.addEventListener("pointerdown", (e) => {
+    dragging = { x: e.clientX, dx: 0, moved: false };
+    hit.classList.add("drag");
+    hit.setPointerCapture(e.pointerId);
+    hide();
+  });
+  hit.addEventListener("pointermove", (e) => {
+    if (!dragging) { move(e.clientX); return; }
+    dragging.dx = e.clientX - dragging.x;
+    if (Math.abs(dragging.dx) > 3) dragging.moved = true;
+    const box = svg.getBoundingClientRect();
+    pan.setAttribute("transform", `translate(${(dragging.dx / Math.max(1, box.width)) * st.width} 0)`);
+  });
+  const release = (e) => {
+    const drag = dragging;
+    dragging = null;
+    hit.classList.remove("drag");
+    if (hit.hasPointerCapture && e.pointerId !== undefined && hit.hasPointerCapture(e.pointerId)) {
+      hit.releasePointerCapture(e.pointerId);
+    }
+    pan.removeAttribute("transform");
+    if (!drag || !drag.moved) return;
+    const box = svg.getBoundingClientRect();
+    const plotPx = Math.max(1, box.width * ((st.width - st.mL - st.mR) / st.width));
+    panBy(-drag.dx * ((st.t1 - st.t0) / plotPx));   // content follows the finger
+  };
+  hit.addEventListener("pointerup", release);
+  hit.addEventListener("pointercancel", release);
+  hit.addEventListener("pointerleave", (e) => { if (!dragging) hide(); else release(e); });
+
+  const fig = svg.closest("figure");
+  fig.addEventListener("keydown", (e) => {
+    if (e.key === "Home") { e.preventDefault(); goLive(); return; }
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const back = e.key === "ArrowLeft";
+    if (!e.shiftKey) { panWindows(back ? -0.5 : 0.5); return; }
+    // Shift keeps the keyboard crosshair: reading values without a mouse is not
+    // something panning should have cost.
+    const stepMs = (st.t1 - st.t0) / 60;
+    const cur = st.cursor === undefined ? st.t1 : st.cursor;
+    showCrosshair(Math.min(st.t1, Math.max(st.t0, cur + (back ? -stepMs : stepMs))));
+  });
+}
+
+function showCrosshair(t) {
+  const st = overlayState;
+  if (!st) return;
+  st.cursor = t;
+  const svg = $("ovsvg"), tip = $("ovtip"), cross = $("ovcross"), line = $("ovline"), dots = $("ovdots");
+  const x = st.X(t);
+  line.setAttribute("x1", x); line.setAttribute("x2", x);
+  let rows = "", marks = "", stamp = null;
+  st.chosen.forEach((c) => {
+    const n = slotFor(c.key), color = slotVar(n);
+    const name = `<span><span class="swatch" style="background:${color}"></span>${esc(trim(c.short_label || c.label, 22))}</span>`;
+    // In bucketed mode the point under the cursor is the bucket CONTAINING t
+    // (buckets are contiguous, so it is an index); in raw mode it is the nearest
+    // sample, within one gap threshold, exactly as before.
+    const near = st.bucketed ? bucketAt(c, t, st) : nearest(c.points, t);
+    const within = !!near && (st.bucketed || Math.abs(tms(near[0]) - t) <= c.gap_threshold_s * 1000);
+    if (within && pval(near) !== null) {
+      stamp = stamp || near[1];
+      marks += `<circle cx="${st.X(tms(near[0])).toFixed(1)}" cy="${st.Y(near[2]).toFixed(1)}" r="4.5" fill="${color}" stroke="var(--card)" stroke-width="2"/>`;
+      const detail = st.bucketed
+        ? `<span>${fmt(near[2], "W")} W<span style="color:var(--text-2)"> mean · ${fmt(near[3], "W")}–${fmt(near[4], "W")} · ${near[5]}/${near[6]} samples${near[5] < near[6] ? " (partial)" : ""}</span></span>`
+        : `<span>${fmt(near[2], "W")} W</span>`;
+      rows += `<div class="r">${name}${detail}</div>`;
+    } else {
+      const why = st.bucketed && within
+        ? "no samples in this bucket — a hole, not a zero"
+        : "no sample — gap";
+      rows += `<div class="r">${name}<span style="color:var(--text-2)">${why}</span></div>`;
+    }
+  });
+  dots.innerHTML = marks;
+  cross.style.display = "";
+  const head = stamp
+    ? (st.bucketed ? "bucket from " : "") + stamp.slice(0, 19).replace("T", " ")
+    : hhmm(t) + " (no samples here)";
+  tip.innerHTML = `<div class="h">${esc(head)}</div>${rows}`;
+  tip.hidden = false;
+  const box = svg.getBoundingClientRect();
+  const px = (x / st.width) * box.width;
+  tip.style.left = Math.min(box.width - tip.offsetWidth - 4, Math.max(0, px + 14)) + "px";
+  tip.style.top = "8px";
+}
+
+function nearest(points, t) {
+  let best = null, bd = Infinity;
+  for (const p of points) {
+    const d = Math.abs(tms(p[0]) - t);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+// The bucket containing t. Buckets are contiguous and every one is present in
+// the payload (an empty one is a null, not a missing entry), so this is an index
+// rather than a search — and it can therefore return a HOLE, which is the point.
+function bucketAt(series, t, st) {
+  if (!series.points.length || !st.bucketMs) return null;
+  const i = Math.floor((t - tms(series.points[0][0])) / st.bucketMs);
+  return i >= 0 && i < series.points.length ? series.points[i] : null;
+}
+
+/* =========================================================================
+   Render
+   ========================================================================= */
+function render() {
+  const banner = $("banner"), main = $("main");
+  if (!snap) {
+    banner.hidden = false;
+    banner.dataset.level = "critical";
+    banner.innerHTML = badge("critical", "No data") + " — /ui/data could not be read" + (lastError ? ": <code>" + esc(lastError) + "</code>" : "");
+    return;
+  }
+  localOffsetMs = tms(snap.now.utc) ? (Date.parse(snap.now.local + "Z") - tms(snap.now.utc)) : 0;
+
+  const dataAge = lastOkAt ? (Date.now() - lastOkAt.getTime()) / 1000 : null;
+  if (lastError) {
+    banner.hidden = false;
+    banner.dataset.level = "critical";
+    banner.innerHTML = badge("critical", "Refresh failed") +
+      ` — <code>${esc(lastError)}</code>. The numbers below are frozen at ${esc(clock(snap.now.local))} (${dur(dataAge)} old) and are NOT current.`;
+    main.classList.add("stale");
+  } else if (snap.errors && snap.errors.length) {
+    banner.hidden = false;
+    banner.dataset.level = "warning";
+    banner.innerHTML = badge("warning", "Partial snapshot") + " — " + snap.errors.map(esc).join(" · ");
+    main.classList.remove("stale");
+  } else {
+    banner.hidden = true;
+    main.classList.remove("stale");
+  }
+
+  $("freshness").innerHTML = paused
+    ? badge("warning", "Paused") + ` — data from ${esc(clock(snap.now.local))}`
+    : `updated ${esc(clock(snap.now.local))} local · every ${snap.refresh_s}s`;
+
+  // Slots are assigned before anything draws, so the "Live now" sparkline of a
+  // charted channel already wears that channel's chart colour.
+  reconcileSlots(snap.overlay.keys);
+
+  renderStrip();
+  renderLive();
+  renderRangeBar();
+  // Never rebuild the figure out from under a drag in progress.
+  if (!dragging) drawOverlay();
+  renderHvac();
+  renderHourly();
+  renderTables();
+
+  const sp = snap.spool;
+  $("foot").innerHTML =
+    `Spool <code>${esc(sp.path)}</code> read ${esc(sp.mode)} · ${sp.channels} channel(s), ${sp.window_rows} row(s) in the window · ` +
+    `poll interval ${snap.poll_interval_s.leviton}s (Leviton) / ${snap.poll_interval_s.bryant}s (Bryant) · ` +
+    `timezone ${esc(snap.tz)} · status from ${esc(snap.status_source)}. ` +
+    `Raw snapshot: <a href="/ui/data">/ui/data</a> · liveness: <a href="/healthz">/healthz</a>. ` +
+    `Nothing on this page is interpolated, extrapolated or zero-filled.`;
+}
+
+function tile(k, v, d) {
+  return `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+}
+
+function renderStrip() {
+  const p = snap.process, out = [];
+  const hz = p.healthz_ok === null ? ["neutral", "unknown"] : p.healthz_ok ? ["good", "200 OK"] : ["critical", "503 stale"];
+  out.push(tile("/healthz", badge(hz[0], hz[1]),
+    `fails after ${esc(p.stale_after_intervals)}× the poll interval`));
+
+  const ing = p.ingest;
+  out.push(tile("Ingest", esc(ing.mode || "—"),
+    `values from <b>${esc(ing.value_source || "—")}</b> · ws ${ing.cycles_ws ?? 0} / rest-fallback ${ing.cycles_rest_fallback ?? 0} / rest ${ing.cycles_rest ?? 0} cycles`));
+
+  const ws = p.ws;
+  const wsLvl = ws.connected === null || ws.connected === undefined ? "neutral" : ws.connected ? (ws.synced ? "good" : "warning") : "critical";
+  const wsWord = ws.connected === null || ws.connected === undefined ? "not reported" : ws.connected ? (ws.synced ? "connected" : "connected, syncing") : "down";
+  const hubs = Object.entries(ws.hub_silence_s || {})
+    .map(([h, s]) => `${esc(h.slice(-4))} ${dur(s)}`).join(" · ") || "no hubs reported";
+  out.push(tile("WebSocket", badge(wsLvl, wsWord),
+    `sync ${esc(ws.sync_mode || "—")} · awaiting ${ws.awaiting_sync ?? 0} · hub silence: ${hubs}`));
+
+  const sp = p.spool;
+  out.push(tile("Spool", (sp.pending_rows ?? "—") + " <span class='sub'>pending</span>",
+    sp.oldest_pending ? `oldest ${esc(clock(sp.oldest_pending.local))} (${dur(sp.oldest_pending_age_s)})` : "nothing pending"));
+
+  p.pollers.forEach((poll) => {
+    const lvl = poll.never_succeeded ? "critical" : poll.stale ? "critical" : poll.age_s > poll.poll_interval_s * 1.5 ? "warning" : "good";
+    const word = poll.never_succeeded ? "never" : age(poll.age_s);
+    out.push(tile(esc(poll.label) + " poll", badge(lvl, word),
+      `every ${poll.poll_interval_s}s · ${poll.consecutive_failures || 0} consecutive failure(s)` +
+      (poll.last_error ? ` · <span title="${esc(poll.last_error)}">last error recorded</span>` : "")));
+  });
+
+  if (p.scheduler && p.scheduler.last_error) {
+    out.push(tile("Scheduler", badge("warning", esc(p.scheduler.job || "job failing")),
+      `<code>${esc(trim(p.scheduler.last_error, 90))}</code>`));
+  }
+  $("strip").innerHTML = out.join("");
+}
+
+function renderLive() {
+  const html = snap.channels.map((c) => {
+    const s = c.series;
+    const n = slotByKey.get(c.key);
+    const color = n ? slotVar(n) : "var(--mark-muted)";
+    const primary = s ? c.metrics[s.metric] : null;
+    const value = primary
+      ? (primary.enum && primary.enum.word
+          ? `${esc(primary.enum.word)} <span class="unit">code ${primary.enum.code}</span>`
+          : `${fmt(primary.value, primary.unit)}<span class="unit">${esc(primary.unit)}</span>`)
+      : "—";
+    const others = Object.keys(c.metrics).filter((m) => !s || m !== s.metric)
+      .map((m) => `<span class="tag">${esc(m)} ${fmt(c.metrics[m].value, c.metrics[m].unit)}</span>`).join(" ");
+    const gapNote = s && s.gaps.length
+      ? `<span>${badge("critical", s.gaps.length + " gap" + (s.gaps.length > 1 ? "s" : "") + " (" + dur(s.gaps.reduce((a, g) => a + g.seconds, 0)) + " with no samples)")}</span>`
+      : "";
+    const zeroNote = s && s.zero_samples
+      ? `<span>${s.zero_samples} sample(s) read 0 — load off, not missing</span>` : "";
+    const edgeNote = s && edgePhrases(s).length
+      ? `<span>${badge("serious", edgePhrases(s).join(" · "))}</span>` : "";
+    return `<div class="chan">
+      <div class="top">
+        <span class="name" title="${esc(c.key)}">${statusMark(c.status, c.status_word)}${esc(c.label)}</span>
+        <span class="val">${value}</span>
+      </div>
+      <div class="meta">
+        <span>${badge(c.status, c.status_word)} ${esc(age(c.age_s))}</span>
+        ${c.unmapped ? `<span class="tag" title="${esc(c.unmapped_note)}">unmapped</span>` : ""}
+        ${c.panel ? `<span class="tag">panel ${esc(c.panel)}</span>` : ""}
+      </div>
+      ${s ? sparkline(s, color, 260, 46) : `<p class="hint">no samples in the last window</p>`}
+      <div class="meta">
+        ${s ? `<span>${esc(s.metric)} · ${s.sample_count}/${s.expected_samples} samples (${s.coverage_pct ?? 0}%)</span>` : ""}
+        ${gapNote}${edgeNote}${zeroNote}
+      </div>
+      ${others ? `<div class="meta">${others}</div>` : ""}
+    </div>`;
+  }).join("");
+  $("live").innerHTML = html || `<p class="hint">No channels in the spool yet.</p>`;
+}
+
+function renderHvac() {
+  const h = snap.hvac;
+  if (!h.present) {
+    $("hvac").innerHTML = `<div class="tile"><div class="k">HVAC</div><div class="v">${badge("neutral", "no data")}</div><div class="d">${esc(h.reason)}</div></div>`;
+    return;
+  }
+  const out = [];
+  const stat = (label, r, suffix) => {
+    if (!r || !r.present) {
+      return tile(label, `<span class="sub">not reported</span>`, esc((r && r.reason) || "absent"));
+    }
+    const shown = r.enum
+      ? (r.enum.word ? esc(r.enum.word) + ` <span class="sub">(code ${r.enum.code})</span>`
+                     : `<span class="sub">unrecognised code ${r.enum.code}</span>`)
+      : fmt(r.value, r.unit) + `<span class="sub"> ${esc(suffix || r.unit)}</span>`;
+    return tile(label, shown, `${esc(age(r.age_s))} · ${esc(clock(r.ts.local))}`);
+  };
+  const zone = h.zones[0];
+  if (zone) {
+    out.push(stat("Indoor", zone.readings.indoor_temp_f, "°F"));
+    out.push(stat("Humidity", zone.readings.humidity_pct, "%"));
+    out.push(stat("Setpoint — heat", zone.readings.setpoint_heat_f, "°F"));
+    out.push(stat("Setpoint — cool", zone.readings.setpoint_cool_f, "°F"));
+  }
+  const sys = h.system.readings;
+  out.push(stat("Outdoor", sys.outdoor_temp_f, "°F"));
+  out.push(stat("Mode", sys.mode));
+  out.push(stat(h.system.stage_representation === "enum" ? "Stage" : "Compressor capacity",
+    h.system.stage_representation === "enum" ? sys.stage : sys.stage_pct, "%"));
+  out.push(stat("Blower", sys.blower_rpm, "rpm"));
+  out.push(stat("Airflow", sys.cfm, "CFM"));
+  if (zone) out.push(stat("Zone fan", zone.readings.fan));
+  $("hvac").innerHTML = out.join("") +
+    `<div class="tile"><div class="k">Zones</div><div class="v">${h.zones.length}</div><div class="d">${esc(h.zones.map((z) => z.channel_id).join(", "))} · device ${esc(h.system.device_id)}</div></div>`;
+}
+
+function renderHourly() {
+  const all = $("allmetrics").checked;
+  const hy = snap.hourly;
+  const rows = hy.rows.filter((r) => all || r.metric === "watts");
+  const byHour = new Map();
+  rows.forEach((r) => {
+    const k = r.hour_start.utc;
+    if (!byHour.has(k)) byHour.set(k, []);
+    byHour.get(k).push(r);
+  });
+
+  let body = "";
+  [...hy.hours].reverse().forEach((hour) => {
+    const list = byHour.get(hour.hour_start.utc) || [];
+    const label = hour.local_hour_start.slice(11, 16) + " local" +
+      (hour.ambiguous_local_hour ? " (DST fall-back — this wall-clock hour happens twice today)" : "") +
+      (hour.in_progress ? " · in progress" : "");
+    body += `<tr class="hourhead"><td colspan="8">${esc(hour.local_hour_start.slice(0, 10))} ${esc(label)}</td></tr>`;
+    if (!list.length) {
+      body += `<tr class="norow"><td colspan="8">${badge("serious", "no rows for this hour")} — no samples were collected. Absent, not zero: nothing is filled in.</td></tr>`;
+      return;
+    }
+    list.forEach((r) => {
+      const cov = r.coverage_pct;
+      const lvl = r.in_progress ? "neutral" : r.coverage_status;
+      const meterColor = r.in_progress ? "var(--text-2)" : `var(--${r.coverage_status})`;
+      // channel_id alone is NOT unique — both load centres have a ct_1_a — so the
+      // name leads and the raw id rides along beside it.
+      body += `<tr>
+        <td class="l" title="${esc(r.key)}">${esc(r.short_label || r.label || r.channel_id)}
+          <span class="sub">${esc(r.channel_id)}</span>${r.unmapped ? ' <span class="tag">unmapped</span>' : ""}</td>
+        <td class="l">${esc(r.metric)}</td>
+        <td>${fmt(r.mean, r.unit)}</td>
+        <td>${fmt(r.min, r.unit)}</td>
+        <td>${fmt(r.max, r.unit)}</td>
+        <td>${r.sample_count} / ${r.expected_samples}</td>
+        <td><span class="meter"><i style="width:${Math.min(100, cov ?? 0)}%;background:${meterColor}"></i></span>${cov ?? "—"}% ${badge(lvl, r.coverage_word)}</td>
+        <td>${r.kwh === null ? `<span class="absent" title="kWh is defined for watts only — a 0 here would read as 'no energy used'">n/a</span>` : fmt(r.kwh, "kWh")}</td>
+      </tr>`;
+    });
+  });
+
+  $("hourly").innerHTML = `<div class="scroll"><table>
+    <thead><tr>
+      <th class="l">Channel</th><th class="l">Metric</th><th>Mean</th><th>Min</th><th>Max</th>
+      <th>Samples / expected</th><th>Coverage</th><th>kWh</th>
+    </tr></thead><tbody>${body}</tbody></table></div>
+    <p class="hint" style="margin-top:8px">
+      <code>${esc(hy.kwh_formula)}</code> — observed time only, never extrapolated across a gap, and NULL (never 0) for every metric except watts.
+      Expected counts come from the real length of each local hour, so today (${esc(hy.local_day.date)}) has
+      <b>${hy.local_day.hours_in_day} hours</b> and a channel should produce ${hy.local_day.expected_samples_per_channel} samples over the whole day
+      (23 h / 2,760 on spring-forward, 25 h / 3,000 on fall-back). ${esc(hy.note)}
+    </p>`;
+}
+
+/* ---------------------------------------------- table views (relief rule) */
+function renderTables() {
+  const liveT = $("live-table"), ovT = $("overlay-table");
+  liveT.hidden = !tables; ovT.hidden = !tables;
+  if (!tables) return;
+
+  liveT.innerHTML = `<div class="scroll" style="margin-top:10px"><table>
+    <thead><tr><th class="l">Channel</th><th class="l">Metric</th><th>Latest</th><th>Min</th><th>Max</th><th>Samples / expected</th><th class="l">Gaps</th><th>Zero samples</th><th class="l">Last sample (local)</th></tr></thead>
+    <tbody>${snap.channels.map((c) => {
+      const s = c.series;
+      return `<tr>
+        <td class="l">${esc(c.label)}${c.unmapped ? ' <span class="tag">unmapped</span>' : ""}</td>
+        <td class="l">${s ? esc(s.metric) : "—"}</td>
+        <td>${s ? fmt(c.metrics[s.metric].value, s.unit) : "—"}</td>
+        <td>${s ? fmt(s.min, s.unit) : "—"}</td>
+        <td>${s ? fmt(s.max, s.unit) : "—"}</td>
+        <td>${s ? s.sample_count + " / " + s.expected_samples : "—"}</td>
+        <td class="l">${s ? [s.gaps.length + (s.gaps.length ? " (" + dur(s.gaps.reduce((a, g) => a + g.seconds, 0)) + ")" : "")].concat(edgePhrases(s)).join("; ") : "—"}</td>
+        <td>${s ? s.zero_samples : "—"}</td>
+        <td class="l">${esc(c.latest_ts.local)}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+
+  // The chart in numbers — the same document the chart drew, so a bucketed view
+  // tabulates buckets (mean and its sample count), not phantom 30s samples.
+  const ov = snap.overlay;
+  const bucketed = ov.mode === "bucketed";
+  const chosen = ov.series || [];
+  if (!chosen.length) { ovT.innerHTML = ""; return; }
+  const ROW_CAP = 300;
+  const stamps = new Map();
+  chosen.forEach((c) => c.points.forEach((p) => stamps.set(tms(p[0]), p[1])));
+  const all = [...stamps.keys()].sort((a, b) => b - a);
+  const order = all.slice(0, ROW_CAP);
+  const lookup = chosen.map((c) => {
+    const m = new Map();
+    c.points.forEach((p) => m.set(tms(p[0]), p));
+    return m;
+  });
+  const cell = (p) => {
+    if (!p) return `<td class="absent" title="no sample at this instant">no sample</td>`;
+    if (pval(p) === null) return `<td class="absent" title="no samples fell in this bucket — a hole, not a zero">no samples</td>`;
+    return bucketed
+      ? `<td>${fmt(p[2], "W")} <span class="sub">${p[5]}/${p[6]}</span></td>`
+      : `<td>${fmt(p[2], "W")}</td>`;
+  };
+  ovT.innerHTML = `<div class="scroll" style="margin-top:10px"><table>
+    <thead><tr><th class="l">${bucketed ? "Bucket start (local)" : "Time (local)"}</th>${chosen.map((c) => `<th>${esc(trim(c.short_label || c.label, 24))} (W${bucketed ? " mean, n/expected" : ""})</th>`).join("")}</tr></thead>
+    <tbody>${order.map((t) => `<tr><td class="l">${esc(stamps.get(t).slice(bucketed ? 5 : 11, 19).replace("T", " "))}</td>` +
+      lookup.map((m) => cell(m.get(t))).join("") + "</tr>").join("")}
+    </tbody></table></div>
+    <p class="hint">Every value plotted above, in numbers${all.length > ROW_CAP ? ` (newest ${ROW_CAP} of ${all.length} rows)` : ""}.
+    ${bucketed ? `Each row is one ${esc(oneOf(ov.resolution))}: the mean of the samples that exist in it, with that count over the count a full bucket would hold. "no samples" is a hole — never a zero and never filled in.` : "Blank cells are absent samples, never zeros."}</p>`;
+}
+
+/* =========================================================================
+   Controls
+   ========================================================================= */
+$("btn-pause").addEventListener("click", (e) => {
+  paused = !paused;
+  e.target.textContent = paused ? "Resume" : "Pause";
+  e.target.setAttribute("aria-pressed", String(paused));
+  schedule();
+  if (!paused) refresh(); else render();
+});
+$("btn-tables").addEventListener("click", (e) => {
+  tables = !tables;
+  e.target.textContent = tables ? "Hide tables" : "Show tables";
+  e.target.setAttribute("aria-pressed", String(tables));
+  if (snap) renderTables();
+});
+$("btn-theme").addEventListener("click", (e) => {
+  const cur = document.documentElement.getAttribute("data-theme") || "auto";
+  const next = cur === "auto" ? "light" : cur === "light" ? "dark" : "auto";
+  if (next === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", next);
+  e.target.textContent = "Theme: " + next;
+  if (snap) render();
+});
+$("allmetrics").addEventListener("change", () => { if (snap) renderHourly(); });
+
+/* ------------------------------------------------- the chart's time window */
+document.querySelectorAll("#rangebar .win").forEach((b) => {
+  b.addEventListener("click", () => setWindow(Number(b.dataset.window)));
+});
+$("pan-back").addEventListener("click", () => panWindows(-0.5));
+$("pan-fwd").addEventListener("click", () => panWindows(0.5));
+$("btn-live").addEventListener("click", goLive);
+
+let resizeTimer = null;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (snap) drawOverlay(true); }, 150);
+});
+
+refresh();
+schedule();
+</script>
+</body>
+</html>
