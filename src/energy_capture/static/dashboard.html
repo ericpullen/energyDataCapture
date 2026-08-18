@@ -17,6 +17,22 @@
     * Every aggregate is shown with its sample_count and the expected count, so
       a partial hour looks partial at a glance.
 
+  The watts chart's window MOVES (30m / 1h / 6h / 24h, panning, drag, arrows),
+  and everything above still holds when it does:
+
+    * the axis is drawn from the window the SERVER answered with, never from what
+      this page asked for, so a request that was clamped or ignored cannot make
+      the chart mislabel itself;
+    * above an hour the server buckets, and an empty bucket arrives as an explicit
+      null — the line breaks there exactly as it does at a raw gap. A bucket with
+      fewer samples than expected is drawn with a hollow mark and says so;
+    * the axis states what one mark IS ("2.5-minute buckets"), never implying 30s
+      resolution across a day;
+    * panning stops at the oldest row the spool still holds, and says so, rather
+      than scrolling into empty space that reads as an outage;
+    * panning back STOPS the chart following now. The rest of the page keeps
+      refreshing; the chart's window stays where it was put until "Live" is clicked.
+
   Colour: three categorical slots (blue/orange/aqua), assigned to an ENTITY and
   kept for as long as that entity is on screen — a change of selection never
   repaints a survivor. Status colours are separate, never themed, and always ship
@@ -118,6 +134,14 @@ button[aria-pressed="true"] { background:var(--text-1); color:var(--surface); bo
 figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; box-shadow:var(--shadow); }
 figure svg { display:block; width:100%; height:auto; touch-action:none; }
 figure:focus-visible { outline:2px solid var(--text-2); outline-offset:2px; }
+/* the movable window's controls — layout only, no new colours */
+.rangebar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
+.rangebar .gap { flex:1 1 auto; }
+.rangebar .state { font-size:12px; color:var(--text-2); }
+button[disabled] { opacity:.4; cursor:default; }
+button[disabled]:hover { border-color:var(--line-strong); }
+#ovhit { cursor:grab; }
+#ovhit.drag { cursor:grabbing; }
 .legend { display:flex; flex-wrap:wrap; gap:14px; font-size:12px; color:var(--text-2); margin-bottom:8px; }
 .tip {
   position:absolute; pointer-events:none; z-index:20; background:var(--card); color:var(--text-1);
@@ -166,6 +190,21 @@ code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px
 
   <section>
     <h2 id="overlay-title">Watts <span class="sub"></span></h2>
+    <!-- The window controls live OUTSIDE the redrawn figure, so they never
+         disappear when the window being viewed happens to hold no samples. -->
+    <div class="rangebar" id="rangebar" role="group" aria-label="Chart time window">
+      <span class="hint">Window</span>
+      <button type="button" class="win" data-window="1800" aria-pressed="true">30m</button>
+      <button type="button" class="win" data-window="3600" aria-pressed="false">1h</button>
+      <button type="button" class="win" data-window="21600" aria-pressed="false">6h</button>
+      <button type="button" class="win" data-window="86400" aria-pressed="false">24h</button>
+      <span style="width:8px"></span>
+      <button type="button" id="pan-back" title="Back half a window (Left arrow)" aria-label="Pan back half a window">◀</button>
+      <button type="button" id="pan-fwd" title="Forward half a window (Right arrow)" aria-label="Pan forward half a window">▶</button>
+      <button type="button" id="btn-live" aria-pressed="true" title="Follow now (Home)">Live</button>
+      <span class="gap"></span>
+      <span class="state" id="range-state"></span>
+    </div>
     <div id="overlay-wrap"></div>
     <div id="overlay-table" hidden></div>
   </section>
@@ -199,6 +238,18 @@ let paused = false;
 let tables = false;
 let timer = null;
 let localOffsetMs = 0;    // (local wall clock - utc), derived from the server
+
+// ------------------------------------------------------- the chart's window
+// The ONLY client-side state the chart has. Everything drawn — axis, ticks,
+// resolution wording, bucket width — comes from the document the server
+// answered with, so an ignored or clamped request can never make the chart
+// claim a window it is not showing.
+const CHART_DEFAULT_S = 1800;
+let chartWindowS = CHART_DEFAULT_S;
+let chartEnd = null;      // ms epoch at the window's right edge; null == LIVE
+let chartHonored = true;  // did the server answer the window we asked for?
+let chartSig = "";        // last drawn figure's signature (skip identical redraws)
+let dragging = null;      // in-flight drag-to-pan
 const slotByKey = new Map();   // entity -> categorical slot. Colour follows the
 const freeSlots = [1, 2, 3];   // ENTITY: a survivor never gets repainted.
 
@@ -214,8 +265,8 @@ const tms = (iso) => Date.parse(String(iso).replace(/(\.\d{3})\d+/, "$1"));
 // needed for an interpolated instant (an axis tick), it is derived from the
 // server's own utc/local pair, never from the browser's timezone — the browser
 // may not be in America/Kentucky/Louisville at all.
-function hhmm(msUtc) {
-  const d = new Date(msUtc + localOffsetMs);
+function hhmm(msUtc, offsetMs) {
+  const d = new Date(msUtc + (offsetMs === undefined ? localOffsetMs : offsetMs));
   return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
 }
 const clock = (isoLocal) => (isoLocal || "").slice(11, 19);
@@ -278,13 +329,34 @@ function reconcileSlots(keys) {
 /* =========================================================================
    Fetch loop
    ========================================================================= */
+function dataUrl() {
+  const params = new URLSearchParams();
+  params.set("window_s", String(chartWindowS));
+  // No `end` IS live: the server resolves the right edge to its own now. A pinned
+  // end is history and does not move, so a refresh cannot yank the reader back.
+  if (chartEnd !== null) params.set("end", new Date(chartEnd).toISOString());
+  return "/ui/data?" + params.toString();
+}
+
 async function refresh() {
+  const asked = { window_s: chartWindowS, live: chartEnd === null };
   try {
-    const res = await fetch("/ui/data", { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    const res = await fetch(dataUrl(), { cache: "no-store" });
+    if (!res.ok) {
+      let detail = "HTTP " + res.status;
+      try {
+        const doc = await res.json();
+        if (doc && doc.detail) detail += " — " + doc.parameter + ": " + doc.detail;
+      } catch (ignored) { /* not JSON; the status is all we have */ }
+      throw new Error(detail);
+    }
     snap = await res.json();
     lastOkAt = new Date();
     lastError = null;
+    // Did the server answer the window we asked for? If it did not, we say so
+    // rather than drawing its window under our labels.
+    const ov = snap.overlay || {};
+    chartHonored = ov.window_s === asked.window_s && ov.live === asked.live;
   } catch (err) {
     // Never silently keep showing stale numbers: say so, loudly, and dim them.
     lastError = err && err.message ? err.message : String(err);
@@ -294,6 +366,98 @@ async function refresh() {
 function schedule() {
   if (timer) clearInterval(timer);
   if (!paused) timer = setInterval(refresh, REFRESH_MS);
+}
+
+/* ------------------------------------------------- window / panning controls */
+const nowMs = () => (snap && snap.now ? tms(snap.now.utc) : Date.now());
+
+// How far back the spool can actually be read. Panning stops here: past it there
+// is no data because nothing was ever stored, which is NOT an outage and must
+// not be drawn as one.
+function extentMs() {
+  const e = (snap && snap.spool && snap.spool.extent) || null;
+  return {
+    oldest: e && e.oldest ? tms(e.oldest.utc) : null,
+    newest: e && e.newest ? tms(e.newest.utc) : null,
+  };
+}
+function minEndMs() {
+  const ext = extentMs(), now = nowMs();
+  if (ext.oldest === null) return now;
+  return Math.min(ext.oldest + chartWindowS * 1000, now);
+}
+const currentEndMs = () => (chartEnd === null ? nowMs() : chartEnd);
+const canPanBack = () => currentEndMs() > minEndMs() + 1000;
+
+function setEnd(ms) {
+  const now = nowMs();
+  const clamped = Math.max(minEndMs(), Math.min(now, ms));
+  // Panning back to the right edge is the same thing as asking to be live again.
+  chartEnd = clamped >= now - 1500 ? null : clamped;
+  refresh();
+}
+function panBy(deltaMs) { setEnd(currentEndMs() + deltaMs); }
+function panWindows(fraction) { panBy(fraction * chartWindowS * 1000); }
+function setWindow(seconds) {
+  const end = chartEnd;
+  chartWindowS = seconds;
+  // Keep the right edge where the reader put it, re-clamped for the new width —
+  // and if the new width swallows everything back to now, that IS live again.
+  if (end === null) { refresh(); return; }
+  setEnd(end);
+}
+function goLive() { chartEnd = null; refresh(); }
+
+// "one 2.5-minute bucket" / "one 30s sample" — the plural the server reports,
+// made singular for "each mark is ...".
+const oneOf = (resolution) => String(resolution || "").replace(/s$/, "");
+// A local wall clock with its date when the window spans more than today: at 24h
+// "no data before 02:30" is ambiguous, and the ambiguity is a whole day wide.
+const stampShort = (isoLocal) => (isoLocal || "").slice(0, 16).replace("T", " ");
+
+function windowLabel(seconds) {
+  if (!seconds) return "—";
+  if (seconds < 3600) return Math.round(seconds / 60) + " min";
+  const hours = seconds / 3600;
+  return (hours % 1 ? hours.toFixed(1) : hours) + " h";
+}
+
+function renderRangeBar() {
+  const ov = snap.overlay || {};
+  document.querySelectorAll("#rangebar .win").forEach((b) => {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.window) === ov.window_s));
+  });
+  const live = ov.live !== false;
+  $("btn-live").setAttribute("aria-pressed", String(live));
+  $("btn-live").disabled = live;
+  $("pan-fwd").disabled = live;
+  $("pan-back").disabled = !canPanBack();
+
+  const ext = snap.spool && snap.spool.extent;
+  const oldest = ext && ext.oldest ? stampShort(ext.oldest.local) : null;
+  let state = live
+    ? badge("good", "Live") + ` — following now, refreshing every ${snap.refresh_s}s`
+    : badge("neutral", "History") +
+      ` — ${esc(stampRange(ov))}, frozen while you read it`;
+  if (!canPanBack() && oldest) {
+    state += ` · no data before ${esc(oldest)} (the spool starts there)`;
+  }
+  if (!chartHonored) {
+    state = badge("warning", "Window not applied") +
+      " — this server answered with its own window (" + esc(windowLabel(ov.window_s)) +
+      (ov.live === false ? ", history" : ", live") + "); the chart below shows exactly that.";
+  }
+  $("range-state").innerHTML = state;
+}
+
+// "14:00 → 14:30" / "Aug 15 14:00 → Aug 16 14:00" — always the SERVER's local
+// wall clock, never the browser's idea of the local zone.
+function stampRange(ov) {
+  const a = ov.window_start.local, b = ov.window_end.local;
+  const sameDay = a.slice(0, 10) === b.slice(0, 10);
+  return sameDay
+    ? `${a.slice(11, 16)} → ${b.slice(11, 16)} local`
+    : `${a.slice(0, 10)} ${a.slice(11, 16)} → ${b.slice(0, 10)} ${b.slice(11, 16)} local`;
 }
 
 /* =========================================================================
@@ -409,24 +573,50 @@ function sparkline(series, color, w, h) {
    ========================================================================= */
 let overlayState = null;
 
-function drawOverlay() {
+// A point's value: the raw sample, or the bucket MEAN — which is null when the
+// bucket held no samples. null is a HOLE, and every reader of this must break
+// the line rather than reach for a neighbour.
+const pval = (p) => (p[2] === null || p[2] === undefined ? null : p[2]);
+// Bucketed points carry their own counts: [ts, local, mean, min, max, n, expected].
+const isPartial = (p) => p.length > 6 && p[5] > 0 && p[5] < p[6];
+
+// Every span in which this series has no sample, in either mode. Bucketed holes
+// come from the server as explicit spans; raw gaps are the existing computation.
+function chartAbsences(series, bucketed, t0, t1) {
+  if (!bucketed) return absentIntervals(series, t0, t1);
+  if (!series.points.length) return [[t0, t1]];
+  return (series.holes || []).map((h) => [tms(h.start.utc), tms(h.end.utc)]);
+}
+
+// x-axis tick spacing: the first step that keeps the axis under ~8 labels. The
+// window is now anything from 30 minutes to a day, so this cannot be a ladder of
+// three special cases any more.
+const XSTEPS_MS = [2, 5, 15, 30, 60, 120, 180, 360, 720].map((m) => m * 60000);
+function xTickStep(span) {
+  return XSTEPS_MS.find((s) => span / s <= 8) || XSTEPS_MS[XSTEPS_MS.length - 1];
+}
+
+function drawOverlay(force) {
   const wrap = $("overlay-wrap");
   const ov = snap.overlay;
-  const chosen = ov.keys.map((k) => snap.channels.find((c) => c.key === k)).filter(Boolean);
-  $("overlay-title").querySelector(".sub").textContent =
-    `last ${Math.round((tms(ov.window_end.utc) - tms(ov.window_start.utc)) / 60000)} min · ${ov.selected_by}`;
-
-  if (!chosen.length) {
-    wrap.innerHTML = `<figure><p class="hint">No watt samples in the window — nothing to overlay. That is an absence, not a zero.</p></figure>`;
-    overlayState = null;
-    return;
-  }
-
+  const bucketed = ov.mode === "bucketed";
+  const chosen = (ov.series || []).filter((s) => s && s.points);
   const width = Math.max(520, wrap.clientWidth || 900);
+
+  // Redrawing an unchanged history chart every 5s would throw away the reader's
+  // crosshair (and fight a drag in progress) for nothing.
+  const sig = [ov.window_start.utc, ov.window_end.utc, ov.mode, ov.bucket_s, width,
+               ov.keys.join(","), chosen.map((s) => s.points.length).join(",")].join("|");
+  if (!force && sig === chartSig && $("ovsvg")) return;
+  chartSig = sig;
+
+  $("overlay-title").querySelector(".sub").textContent =
+    `${windowLabel(ov.window_s)} · ${ov.resolution} · ${ov.selected_by}`;
+
   const H = 260, mL = 52, mR = 168, mT = 12, mB = 26;
   const t0 = tms(ov.window_start.utc), t1 = tms(ov.window_end.utc);
   let hi = 0;
-  chosen.forEach((c) => c.series.points.forEach((p) => { if (p[2] > hi) hi = p[2]; }));
+  chosen.forEach((s) => s.points.forEach((p) => { const v = pval(p); if (v !== null && v > hi) hi = v; }));
   if (hi <= 0) hi = 1;
   const step = Math.pow(10, Math.floor(Math.log10(hi / 3)));
   const tick = [1, 2, 2.5, 5, 10].map((m) => m * step).find((v) => hi / v <= 4) || step * 10;
@@ -439,43 +629,78 @@ function drawOverlay() {
     grid += `<line x1="${mL}" y1="${Y(v).toFixed(1)}" x2="${width - mR}" y2="${Y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
     ticks += `<text x="${mL - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--text-2)">${fmt(v, "W")}</text>`;
   }
-  const span = t1 - t0, xstep = span > 45 * 60000 ? 15 * 60000 : span > 20 * 60000 ? 5 * 60000 : 2 * 60000;
+  // A 24h window can straddle a DST change, and one page-wide utc->local offset
+  // would then mislabel part of the axis. Each tick borrows the offset of the
+  // nearest point, whose local wall clock came from the server (timeutil).
+  const offsetAt = (t) => {
+    let best = null, bd = Infinity;
+    for (const c of chosen) for (const p of c.points) {
+      const d = Math.abs(tms(p[0]) - t);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best ? Date.parse(best[1] + "Z") - tms(best[0]) : localOffsetMs;
+  };
+  const span = t1 - t0, xstep = xTickStep(span);
   let xticks = "";
   for (let t = Math.ceil(t0 / xstep) * xstep; t <= t1; t += xstep) {
-    xticks += `<text x="${X(t).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--text-2)">${hhmm(t)}</text>`;
+    xticks += `<text x="${X(t).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--text-2)">${hhmm(t, offsetAt(t))}</text>`;
   }
+
+  // The stretch this window covers that the spool never held: not an outage, and
+  // not shaded like one. It is de-emphasised and named in words instead.
+  const ext = extentMs();
+  const preSpool = ext.oldest !== null && ext.oldest > t0 ? [t0, Math.min(t1, ext.oldest)] : null;
+  const preWash = preSpool
+    ? `<rect x="${X(preSpool[0]).toFixed(1)}" y="${mT}" width="${Math.max(1, X(preSpool[1]) - X(preSpool[0])).toFixed(1)}" height="${H - mT - mB}" fill="var(--mark-muted)" opacity=".10"/>`
+    : "";
 
   // One wash, drawn once, over the spans where NOT ONE charted channel has a
   // sample — the collector was down. Per-series absence is already carried by the
   // break in that series' own line, so it is not shaded a second time.
-  let common = absentIntervals(chosen[0].series, t0, t1);
+  let common = chosen.length ? chartAbsences(chosen[0], bucketed, t0, t1) : [[t0, t1]];
   for (let k = 1; k < chosen.length; k++) {
-    common = intersectIntervals(common, absentIntervals(chosen[k].series, t0, t1));
+    common = intersectIntervals(common, chartAbsences(chosen[k], bucketed, t0, t1));
   }
+  const floor = preSpool ? preSpool[1] : -Infinity;   // never call "never stored" an outage
+  common = common.map(([s, e]) => [Math.max(s, floor), e]).filter(([s, e]) => e > s);
   const wash = common.map(([s, e]) =>
     `<rect x="${X(s).toFixed(1)}" y="${mT}" width="${Math.max(1, X(e) - X(s)).toFixed(1)}" height="${H - mT - mB}" fill="var(--critical)" opacity=".10"/>`
   ).join("");
   const washMinutes = Math.round(common.reduce((a, [s, e]) => a + (e - s), 0) / 60000);
 
-  let paths = "", ends = [];
+  let paths = "", marks = "", ends = [];
   chosen.forEach((c) => {
     const n = slotFor(c.key), color = slotVar(n);
-    const gapMs = c.series.gap_threshold_s * 1000;
-    let d = "", prev = null;
-    for (const p of c.series.points) {
+    const gapMs = c.gap_threshold_s * 1000;
+    let d = "", prev = null, last = null;
+    for (const p of c.points) {
       const t = tms(p[0]);
+      if (pval(p) === null) {
+        // AN EMPTY BUCKET IS A HOLE. Not a zero, not the neighbour's value: the
+        // pen lifts, and the next real value starts a new subpath below.
+        prev = null;
+        continue;
+      }
       if (prev !== null && t - prev > gapMs) {
         // A NEW SUBPATH — never an L across the hole. This single line is the
         // whole of CLAUDE.md rule 1 as it applies to a chart.
+        d += ` M ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
+      } else if (prev === null && d) {
         d += ` M ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
       } else {
         d += `${d ? " L" : "M"} ${X(t).toFixed(1)} ${Y(p[2]).toFixed(1)}`;
       }
       prev = t;
+      last = p;
     }
     paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-    const last = c.series.points[c.series.points.length - 1];
-    ends.push({ c, n, color, x: X(tms(last[0])), y: Y(last[2]), v: last[2] });
+    // A bucket built from fewer samples than it should hold is a thinner fact than
+    // a full one: hollow mark, series colour, no new hue. Capped so a pathological
+    // window cannot put 1,700 circles in the DOM.
+    marks += c.points.filter(isPartial).slice(0, 240).map((p) =>
+      `<circle cx="${X(tms(p[0])).toFixed(1)}" cy="${Y(p[2]).toFixed(1)}" r="2.6" fill="var(--card)" stroke="${color}" stroke-width="1.5"><title>${p[5]} of ${p[6]} samples in this bucket</title></circle>`
+    ).join("");
+    if (last) ends.push({ c, n, color, x: X(tms(last[0])), y: Y(last[2]), v: last[2] });
   });
 
   // Direct labels at the line ends. When they collide they are nudged apart and
@@ -503,15 +728,25 @@ function drawOverlay() {
     const n = slotFor(c.key);
     return `<span><span class="swatch" style="background:${slotVar(n)}"></span>${esc(c.label)}</span>`;
   }).join("");
+  const partialCount = chosen.reduce((a, c) => a + (c.partial_buckets || 0), 0);
+  const emptyCount = chosen.reduce((a, c) => a + (c.empty_buckets || 0), 0);
+  const legendNote = chosen.length
+    ? `— shaded = no samples from any of these channels (${washMinutes} min); a break in one line = that channel had no sample; a flat 0 = the load was off` +
+      (bucketed
+        ? `; each mark is one ${esc(oneOf(ov.resolution))} (the mean of up to ${ov.expected_per_bucket} samples), a bucket with none is a break, and ${partialCount} hollow mark(s) = a bucket with fewer samples than that`
+        : "")
+    : "— no watt samples anywhere in this window. That is an absence, not a zero.";
+  const emptyText = chosen.length ? "" :
+    `<text x="${(mL + (width - mR - mL) / 2).toFixed(1)}" y="${(mT + (H - mT - mB) / 2).toFixed(1)}" text-anchor="middle" font-size="12" fill="var(--text-2)">no watt samples in this window${preSpool && preSpool[1] >= t1 ? " — the spool holds nothing this far back" : ""}</text>`;
 
   wrap.innerHTML =
-    `<figure tabindex="0" aria-label="Watts over the last window for ${esc(chosen.map((c) => c.label).join(", "))}">
-      <div class="legend">${legend}<span>— shaded = no samples from any of these channels (${washMinutes} min); a break in one line = that channel had no sample; a flat 0 = the load was off</span></div>
+    `<figure tabindex="0" aria-label="Watts, ${esc(stampRange(ov))}, ${esc(ov.resolution)}${chosen.length ? ", for " + esc(chosen.map((c) => c.label).join(", ")) : " — no samples"}">
+      <div class="legend">${legend}<span>${legendNote}</span></div>
       <div style="position:relative">
         <svg id="ovsvg" viewBox="0 0 ${width} ${H}" preserveAspectRatio="xMidYMid meet">
-          ${wash}${grid}${ticks}${xticks}
+          <g id="ovpan">${preWash}${wash}${paths}${marks}</g>
+          ${grid}${ticks}${xticks}${emptyText}
           <line x1="${mL}" y1="${mT}" x2="${mL}" y2="${H - mB}" stroke="var(--line-strong)" stroke-width="1"/>
-          ${paths}
           <g id="ovcross" style="display:none">
             <line id="ovline" y1="${mT}" y2="${H - mB}" stroke="var(--text-2)" stroke-width="1"/>
             <g id="ovdots"></g>
@@ -521,35 +756,76 @@ function drawOverlay() {
         </svg>
         <div id="ovtip" class="tip" hidden></div>
       </div>
-      <p class="hint" style="margin:8px 0 0">y axis in watts from 0. ${esc(ov.omitted.length)} other watt channel(s) not shown (max three series — the fourth would need a colour the palette does not have): ${esc(ov.omitted.map((o) => o.label).join(", ")) || "none"}.</p>
+      <p class="hint" style="margin:8px 0 0">
+        y axis in watts from 0; x axis ${esc(stampRange(ov))}, each mark is one <b>${esc(oneOf(ov.resolution))}</b>${bucketed ? ` (${ov.bucket_count} buckets, ${ov.expected_per_bucket} samples each when complete — this is <b>not</b> ${snap.poll_interval_s.leviton}s resolution)` : ""}.
+        Drag the plot to pan, ← / → to pan half a window, Shift + ← / → to move the crosshair, Home for live.
+        ${preSpool ? `The spool holds nothing before <b>${esc(stampShort(snap.spool.extent.oldest.local))}</b> local — that stretch is greyed, and it is not an outage.` : ""}
+        ${esc(ov.omitted.length)} other watt channel(s) not shown (max three series — the fourth would need a colour the palette does not have): ${esc(ov.omitted.map((o) => o.label).join(", ")) || "none"}.
+      </p>
     </figure>`;
 
-  overlayState = { chosen, X, Y, t0, t1, mL, mR, mT, H, width, top };
+  overlayState = { chosen, X, Y, t0, t1, mL, mR, mT, H, width, top, bucketed, bucketMs: (ov.bucket_s || 0) * 1000 };
   bindOverlay();
 }
 
 function trim(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 function bindOverlay() {
-  const svg = $("ovsvg"), hit = $("ovhit"), tip = $("ovtip"), cross = $("ovcross");
+  const svg = $("ovsvg"), hit = $("ovhit"), tip = $("ovtip"), cross = $("ovcross"), pan = $("ovpan");
   if (!svg || !overlayState) return;
   const st = overlayState;
+  const hide = () => { cross.style.display = "none"; tip.hidden = true; };
   const move = (clientX) => {
     const box = svg.getBoundingClientRect();
     const px = ((clientX - box.left) / box.width) * st.width;
     const t = st.t0 + ((px - st.mL) / (st.width - st.mL - st.mR)) * (st.t1 - st.t0);
     showCrosshair(Math.min(st.t1, Math.max(st.t0, t)));
   };
-  hit.addEventListener("mousemove", (e) => move(e.clientX));
-  hit.addEventListener("mouseleave", () => { cross.style.display = "none"; tip.hidden = true; });
-  hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
+
+  // Drag to pan. The plot follows the pointer while the button is down and the
+  // window is only actually moved on release, so a drag costs one request.
+  hit.addEventListener("pointerdown", (e) => {
+    dragging = { x: e.clientX, dx: 0, moved: false };
+    hit.classList.add("drag");
+    hit.setPointerCapture(e.pointerId);
+    hide();
+  });
+  hit.addEventListener("pointermove", (e) => {
+    if (!dragging) { move(e.clientX); return; }
+    dragging.dx = e.clientX - dragging.x;
+    if (Math.abs(dragging.dx) > 3) dragging.moved = true;
+    const box = svg.getBoundingClientRect();
+    pan.setAttribute("transform", `translate(${(dragging.dx / Math.max(1, box.width)) * st.width} 0)`);
+  });
+  const release = (e) => {
+    const drag = dragging;
+    dragging = null;
+    hit.classList.remove("drag");
+    if (hit.hasPointerCapture && e.pointerId !== undefined && hit.hasPointerCapture(e.pointerId)) {
+      hit.releasePointerCapture(e.pointerId);
+    }
+    pan.removeAttribute("transform");
+    if (!drag || !drag.moved) return;
+    const box = svg.getBoundingClientRect();
+    const plotPx = Math.max(1, box.width * ((st.width - st.mL - st.mR) / st.width));
+    panBy(-drag.dx * ((st.t1 - st.t0) / plotPx));   // content follows the finger
+  };
+  hit.addEventListener("pointerup", release);
+  hit.addEventListener("pointercancel", release);
+  hit.addEventListener("pointerleave", (e) => { if (!dragging) hide(); else release(e); });
+
   const fig = svg.closest("figure");
   fig.addEventListener("keydown", (e) => {
+    if (e.key === "Home") { e.preventDefault(); goLive(); return; }
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
+    const back = e.key === "ArrowLeft";
+    if (!e.shiftKey) { panWindows(back ? -0.5 : 0.5); return; }
+    // Shift keeps the keyboard crosshair: reading values without a mouse is not
+    // something panning should have cost.
     const stepMs = (st.t1 - st.t0) / 60;
     const cur = st.cursor === undefined ? st.t1 : st.cursor;
-    showCrosshair(Math.min(st.t1, Math.max(st.t0, cur + (e.key === "ArrowRight" ? stepMs : -stepMs))));
+    showCrosshair(Math.min(st.t1, Math.max(st.t0, cur + (back ? -stepMs : stepMs))));
   });
 }
 
@@ -563,19 +839,32 @@ function showCrosshair(t) {
   let rows = "", marks = "", stamp = null;
   st.chosen.forEach((c) => {
     const n = slotFor(c.key), color = slotVar(n);
-    const near = nearest(c.series.points, t);
-    const within = near && Math.abs(tms(near[0]) - t) <= c.series.gap_threshold_s * 1000;
-    if (within) {
+    const name = `<span><span class="swatch" style="background:${color}"></span>${esc(trim(c.short_label || c.label, 22))}</span>`;
+    // In bucketed mode the point under the cursor is the bucket CONTAINING t
+    // (buckets are contiguous, so it is an index); in raw mode it is the nearest
+    // sample, within one gap threshold, exactly as before.
+    const near = st.bucketed ? bucketAt(c, t, st) : nearest(c.points, t);
+    const within = !!near && (st.bucketed || Math.abs(tms(near[0]) - t) <= c.gap_threshold_s * 1000);
+    if (within && pval(near) !== null) {
       stamp = stamp || near[1];
       marks += `<circle cx="${st.X(tms(near[0])).toFixed(1)}" cy="${st.Y(near[2]).toFixed(1)}" r="4.5" fill="${color}" stroke="var(--card)" stroke-width="2"/>`;
-      rows += `<div class="r"><span><span class="swatch" style="background:${color}"></span>${esc(trim(c.short_label || c.label, 22))}</span><span>${fmt(near[2], "W")} W</span></div>`;
+      const detail = st.bucketed
+        ? `<span>${fmt(near[2], "W")} W<span style="color:var(--text-2)"> mean · ${fmt(near[3], "W")}–${fmt(near[4], "W")} · ${near[5]}/${near[6]} samples${near[5] < near[6] ? " (partial)" : ""}</span></span>`
+        : `<span>${fmt(near[2], "W")} W</span>`;
+      rows += `<div class="r">${name}${detail}</div>`;
     } else {
-      rows += `<div class="r"><span><span class="swatch" style="background:${color}"></span>${esc(trim(c.short_label || c.label, 22))}</span><span style="color:var(--text-2)">no sample — gap</span></div>`;
+      const why = st.bucketed && within
+        ? "no samples in this bucket — a hole, not a zero"
+        : "no sample — gap";
+      rows += `<div class="r">${name}<span style="color:var(--text-2)">${why}</span></div>`;
     }
   });
   dots.innerHTML = marks;
   cross.style.display = "";
-  tip.innerHTML = `<div class="h">${esc(stamp ? stamp.slice(0, 19).replace("T", " ") : hhmm(t) + " (no samples here)")}</div>${rows}`;
+  const head = stamp
+    ? (st.bucketed ? "bucket from " : "") + stamp.slice(0, 19).replace("T", " ")
+    : hhmm(t) + " (no samples here)";
+  tip.innerHTML = `<div class="h">${esc(head)}</div>${rows}`;
   tip.hidden = false;
   const box = svg.getBoundingClientRect();
   const px = (x / st.width) * box.width;
@@ -590,6 +879,15 @@ function nearest(points, t) {
     if (d < bd) { bd = d; best = p; }
   }
   return best;
+}
+
+// The bucket containing t. Buckets are contiguous and every one is present in
+// the payload (an empty one is a null, not a missing entry), so this is an index
+// rather than a search — and it can therefore return a HOLE, which is the point.
+function bucketAt(series, t, st) {
+  if (!series.points.length || !st.bucketMs) return null;
+  const i = Math.floor((t - tms(series.points[0][0])) / st.bucketMs);
+  return i >= 0 && i < series.points.length ? series.points[i] : null;
 }
 
 /* =========================================================================
@@ -628,11 +926,13 @@ function render() {
 
   // Slots are assigned before anything draws, so the "Live now" sparkline of a
   // charted channel already wears that channel's chart colour.
-  reconcileSlots(snap.overlay.keys.filter((k) => snap.channels.some((c) => c.key === k)));
+  reconcileSlots(snap.overlay.keys);
 
   renderStrip();
   renderLive();
-  drawOverlay();
+  renderRangeBar();
+  // Never rebuild the figure out from under a drag in progress.
+  if (!dragging) drawOverlay();
   renderHvac();
   renderHourly();
   renderTables();
@@ -842,24 +1142,36 @@ function renderTables() {
       </tr>`;
     }).join("")}</tbody></table></div>`;
 
-  const chosen = snap.overlay.keys.map((k) => snap.channels.find((c) => c.key === k)).filter(Boolean);
+  // The chart in numbers — the same document the chart drew, so a bucketed view
+  // tabulates buckets (mean and its sample count), not phantom 30s samples.
+  const ov = snap.overlay;
+  const bucketed = ov.mode === "bucketed";
+  const chosen = ov.series || [];
   if (!chosen.length) { ovT.innerHTML = ""; return; }
+  const ROW_CAP = 300;
   const stamps = new Map();
-  chosen.forEach((c) => c.series.points.forEach((p) => stamps.set(tms(p[0]), p[1])));
-  const order = [...stamps.keys()].sort((a, b) => b - a);
+  chosen.forEach((c) => c.points.forEach((p) => stamps.set(tms(p[0]), p[1])));
+  const all = [...stamps.keys()].sort((a, b) => b - a);
+  const order = all.slice(0, ROW_CAP);
   const lookup = chosen.map((c) => {
     const m = new Map();
-    c.series.points.forEach((p) => m.set(tms(p[0]), p[2]));
+    c.points.forEach((p) => m.set(tms(p[0]), p));
     return m;
   });
+  const cell = (p) => {
+    if (!p) return `<td class="absent" title="no sample at this instant">no sample</td>`;
+    if (pval(p) === null) return `<td class="absent" title="no samples fell in this bucket — a hole, not a zero">no samples</td>`;
+    return bucketed
+      ? `<td>${fmt(p[2], "W")} <span class="sub">${p[5]}/${p[6]}</span></td>`
+      : `<td>${fmt(p[2], "W")}</td>`;
+  };
   ovT.innerHTML = `<div class="scroll" style="margin-top:10px"><table>
-    <thead><tr><th class="l">Time (local)</th>${chosen.map((c) => `<th>${esc(trim(c.short_label || c.label, 24))} (W)</th>`).join("")}</tr></thead>
-    <tbody>${order.map((t) => `<tr><td class="l">${esc(stamps.get(t).slice(11, 19))}</td>` +
-      lookup.map((m) => m.has(t)
-        ? `<td>${fmt(m.get(t), "W")}</td>`
-        : `<td class="absent" title="no sample at this instant">no sample</td>`).join("") + "</tr>").join("")}
+    <thead><tr><th class="l">${bucketed ? "Bucket start (local)" : "Time (local)"}</th>${chosen.map((c) => `<th>${esc(trim(c.short_label || c.label, 24))} (W${bucketed ? " mean, n/expected" : ""})</th>`).join("")}</tr></thead>
+    <tbody>${order.map((t) => `<tr><td class="l">${esc(stamps.get(t).slice(bucketed ? 5 : 11, 19).replace("T", " "))}</td>` +
+      lookup.map((m) => cell(m.get(t))).join("") + "</tr>").join("")}
     </tbody></table></div>
-    <p class="hint">Every value plotted above, in numbers. Blank cells are absent samples, never zeros.</p>`;
+    <p class="hint">Every value plotted above, in numbers${all.length > ROW_CAP ? ` (newest ${ROW_CAP} of ${all.length} rows)` : ""}.
+    ${bucketed ? `Each row is one ${esc(oneOf(ov.resolution))}: the mean of the samples that exist in it, with that count over the count a full bucket would hold. "no samples" is a hole — never a zero and never filled in.` : "Blank cells are absent samples, never zeros."}</p>`;
 }
 
 /* =========================================================================
@@ -887,10 +1199,19 @@ $("btn-theme").addEventListener("click", (e) => {
   if (snap) render();
 });
 $("allmetrics").addEventListener("change", () => { if (snap) renderHourly(); });
+
+/* ------------------------------------------------- the chart's time window */
+document.querySelectorAll("#rangebar .win").forEach((b) => {
+  b.addEventListener("click", () => setWindow(Number(b.dataset.window)));
+});
+$("pan-back").addEventListener("click", () => panWindows(-0.5));
+$("pan-fwd").addEventListener("click", () => panWindows(0.5));
+$("btn-live").addEventListener("click", goLive);
+
 let resizeTimer = null;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (snap) drawOverlay(); }, 150);
+  resizeTimer = setTimeout(() => { if (snap) drawOverlay(true); }, 150);
 });
 
 refresh();

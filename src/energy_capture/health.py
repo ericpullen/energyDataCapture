@@ -673,6 +673,16 @@ class HealthServer:
         becomes a JSON 500 rather than a dead socket: ``/healthz`` must not be
         able to break because a browser tab asked for a chart.
 
+        The **whole request target** goes to
+        :func:`~energy_capture.dashboard.handle_ui_data`, not just the store:
+        ``/ui/data`` takes the chart window's ``?window_s=`` / ``?end=``, and
+        that function is the only thing that can answer **400** for a malformed
+        one. Dropping the target here would silently answer every request with
+        the default live window — a chart showing something other than what was
+        asked for, which is the one thing this page must never do. A target with
+        no query string still yields ``(200, the document this route has always
+        returned)``.
+
         ``build_snapshot`` runs in a **worker thread**. It is synchronous SQLite
         plus a scan of the spool, and this event loop is also running the poll
         loops, the keepalive and the WebSocket reader (PLAN.md §5: one process).
@@ -701,13 +711,15 @@ class HealthServer:
                 return self._ui_error("dashboard page could not be read", exc)
         if path == dashboard.UI_DATA_PATH:
             try:
-                snapshot = await asyncio.to_thread(dashboard.build_snapshot, self._store)
+                status, snapshot = await asyncio.to_thread(
+                    dashboard.handle_ui_data, self._store, target
+                )
             except Exception as exc:
                 return self._ui_error("dashboard snapshot failed", exc)
             payload = (
                 json.dumps(snapshot, ensure_ascii=False, default=_jsonable) + "\n"
             ).encode("utf-8")
-            return (200, payload, "application/json")
+            return (status, payload, "application/json")
         return None
 
     def _ui_error(self, message: str, exc: BaseException) -> tuple[int, bytes, str]:

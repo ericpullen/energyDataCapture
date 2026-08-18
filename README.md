@@ -491,6 +491,20 @@ with the network unplugged — it opens the spool **read-only**, and it adds no 
 (DEVIATIONS.md #164). Like `/healthz`, it is unauthenticated: expose the port only to a
 network you trust.
 
+**Scrolling back in time.** The watts chart has a movable window: pick **30m / 1h / 6h /
+24h**, pan back and forward half a window at a time (the ◀ ▶ buttons, dragging the plot,
+or ← / →), and click **Live** (or press Home) to follow *now* again. Panning freezes the
+chart's window while the rest of the page keeps refreshing, and it stops at the oldest row
+the spool still holds — which the page names in words, because "the spool never had it" is
+not an outage. Over the wire this is `GET /ui/data?window_s=<60..86400>&end=<ISO-8601>`;
+both are optional, `end` omitted means *live*, and a malformed value is a **400** rather
+than a quietly different chart (DEVIATIONS.md #165). An hour or less is drawn from raw 30s
+samples; longer windows are **bucketed on the server** (24h → 2.5-minute buckets), and a
+bucket with no samples arrives as an explicit hole — the line breaks there exactly as it
+does at a raw gap — while a bucket with fewer samples than expected keeps the mean of the
+samples it actually has and says how many that was. The axis always states what one mark
+is, so a day of data never pretends to be 30-second resolution.
+
 Inside `energycap run` there is one asyncio process hosting the poll loops, the Leviton
 bandwidth keepalive (`PUT {"bandwidth": 1}` every 50s, never 0), the Leviton WebSocket
 subscriber and its watchdog, a small scheduler, and the health server. The keepalive is

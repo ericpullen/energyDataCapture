@@ -12,6 +12,46 @@ Two routes, both served by the existing :class:`~energy_capture.health.HealthSer
 ``GET /ui/data``
     The JSON snapshot below, which the page polls every 5s.
 
+    Two optional query parameters move the **overlay watts chart's** time window.
+    Nothing else on the page is affected by them: the "Live now" cards and "The
+    math" table keep their own fixed windows, and a request with no parameters at
+    all returns exactly the document it always did.
+
+    ``window_s``
+        Chart window length in seconds. Default :data:`CHART_DEFAULT_WINDOW_S`
+        (1800 — the live view). Clamped to
+        ``[CHART_MIN_WINDOW_S, CHART_MAX_WINDOW_S]`` = ``[60, 86400]``; a value
+        that is not a positive integer is a **400**, never a silent default.
+    ``end``
+        ISO-8601 instant at the RIGHT edge of the window (``2026-08-16T18:30:00Z``;
+        a bare naive value is read as UTC). Omit it to mean "now", which is what
+        *live* means here: a request that pins ``end`` is history and its window
+        does not move as the page refreshes. Unparseable, or more than
+        :data:`CHART_FUTURE_SKEW_S` in the future, is a **400**.
+
+    Unknown parameters are ignored (``/ui/data?since=now`` has always been a 200).
+    :func:`handle_ui_data` is the entry point that turns a request target into
+    ``(status, document)`` — including the 400s; :func:`build_snapshot` takes the
+    already-parsed :class:`ChartRequest`.
+
+Long windows are **bucketed on the server** (:data:`CHART_RAW_MAX_WINDOW_S`: an
+hour or less stays raw, so the live view is exactly as responsive as it was).
+Bucketing is the place a chart fabricates data, so:
+
+* **an empty bucket is an explicit hole** — ``mean``/``min``/``max`` are ``null``
+  and ``sample_count`` is ``0``. Never 0 W, never the previous bucket's value,
+  never an interpolation between neighbours. The page breaks the line there, the
+  same way it breaks it at a raw gap;
+* **a partial bucket keeps its real mean** — the mean of the samples that exist,
+  divided by how many exist, never by the expected count (dividing by the
+  expected count is `PLAN.md` §2.5's "extrapolate across a gap" wearing a hat).
+  Every bucket carries its own ``sample_count`` *and* ``expected`` so the page can
+  show it as partial rather than as solid fact;
+* **bucket boundaries are computed on ``ts_utc``** (CLAUDE.md rule 3) — aligned to
+  epoch multiples of the bucket width, so they are stable across refreshes and the
+  DST fall-back day's two 01:00 local hours land in different buckets rather than
+  merging into one.
+
 **This module never writes.** The spool is opened on a *separate* connection with
 ``mode=ro`` and a short ``busy_timeout``, so a dashboard request can neither block
 nor corrupt the poll loop that is writing to the same file (WAL means the reader
@@ -57,6 +97,7 @@ the compact form of the same pair: ``[ts_utc, ts_local, value]``.
 ``{``
   ``"generated": Stamp, "now": Stamp, "tz": str, "poll_interval_s": {...},``
   ``"process": {...},   # health, ingest mode, WS state, spool depth, poll ages``
+  ``"spool": {...},     # path, readability, and the DATA EXTENT (oldest/newest)``
   ``"channels": [...],  # one per (source, device_id, channel_id) in the spool``
   ``"overlay": {...},   # <=3 watt channels for the overlay chart, with slots``
   ``"hvac": {...},      # the Bryant picture, enums decoded to words``
@@ -73,6 +114,7 @@ keeps *all* timezone logic in ``timeutil`` — there is no date arithmetic in SQ
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -82,6 +124,7 @@ from datetime import date, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 
 from energy_capture import model, timeutil
 from energy_capture.logging import get_logger
@@ -91,6 +134,13 @@ if TYPE_CHECKING:  # imported lazily at runtime; health imports this module back
     from energy_capture.health import StatusStore
 
 __all__ = [
+    "CHART_DEFAULT_WINDOW_S",
+    "CHART_FUTURE_SKEW_S",
+    "CHART_MAX_BUCKETS",
+    "CHART_MAX_WINDOW_S",
+    "CHART_MIN_WINDOW_S",
+    "CHART_PRESETS_S",
+    "CHART_RAW_MAX_WINDOW_S",
     "GAP_INTERVAL_FACTOR",
     "HOURLY_WINDOW_HOURS",
     "KWH_FORMULA",
@@ -99,12 +149,18 @@ __all__ = [
     "UI_DATA_PATH",
     "UI_PAGE_PATH",
     "UI_PATHS",
+    "ChartParamError",
+    "ChartRequest",
     "build_snapshot",
+    "chart_bucket_width_s",
+    "chart_resolution_label",
     "decode_enum",
     "expected_samples",
     "expected_samples_for_local_day",
+    "handle_ui_data",
     "hour_buckets",
     "open_readonly",
+    "parse_chart_request",
     "render_page",
     "reset_label_cache",
     "reset_page_cache",
@@ -137,6 +193,48 @@ SERIES_WINDOW_MINUTES: int = 30
 
 #: "The math" table window.
 HOURLY_WINDOW_HOURS: int = 6
+
+# ------------------------------------------------------- the chart's window
+#
+# The overlay watts chart is the one thing on this page that can be moved
+# through time. These are the whole of its contract; the page's preset buttons
+# are :data:`CHART_PRESETS_S` and nothing else here knows about them.
+
+#: Default chart window: the live view, unchanged (``SERIES_WINDOW_MINUTES``).
+CHART_DEFAULT_WINDOW_S: int = SERIES_WINDOW_MINUTES * 60
+
+#: Shortest and longest window ``?window_s=`` may ask for. 24h is the cap the
+#: owner asked for; anything longer is clamped, not rejected, so a hand-typed
+#: ``window_s=999999`` still answers with a day rather than an error.
+CHART_MIN_WINDOW_S: int = 60
+CHART_MAX_WINDOW_S: int = 86400
+
+#: At or below this the chart returns RAW samples — the live view must stay
+#: exactly as responsive as it is. Above it the server buckets (an hour at 30s
+#: is 120 points per channel, which is still nothing; 24h is 2,880).
+CHART_RAW_MAX_WINDOW_S: int = 3600
+
+#: Upper bound on buckets across the window, so the payload stays small and the
+#: SVG stays cheap. 24h / 600 ≈ 144s, which :func:`chart_bucket_width_s` rounds
+#: up to a whole number of poll intervals (150s = 2.5 min at a 30s cadence).
+CHART_MAX_BUCKETS: int = 600
+
+#: A bucket is never narrower than this many poll intervals. At one interval per
+#: bucket, ordinary poll jitter would leave real buckets empty and the page would
+#: draw holes that are not holes — the opposite failure to fabricating data, and
+#: just as much a lie.
+CHART_MIN_BUCKET_INTERVALS: int = 2
+
+#: How far into the future ``?end=`` may sit before it is a 400. A browser's
+#: clock is not this process's clock; a minute of skew is not a bug.
+CHART_FUTURE_SKEW_S: float = 60.0
+
+#: The page's preset buttons: 30m / 1h / 6h / 24h.
+CHART_PRESETS_S: tuple[int, ...] = (1800, 3600, 21600, 86400)
+
+#: Query parameter names, in one place so the page and the parser agree.
+CHART_PARAM_WINDOW: str = "window_s"
+CHART_PARAM_END: str = "end"
 
 #: Quoted verbatim from ``stages/rollup.sql`` / PLAN.md §2.5, so a reader can see
 #: the two are the same statement and a future editor changing one notices the
@@ -216,6 +314,45 @@ WHERE ts_utc >= ? AND ts_utc < ?
 ORDER BY ts_utc
 """
 
+#: The oldest and newest instants the spool actually holds — the chart's panning
+#: limit, so the page can say "no data before 08:12" instead of drawing an empty
+#: chart that looks like an outage. Two statements rather than
+#: ``SELECT MIN(ts_utc), MAX(ts_utc)``: SQLite only rewrites a *single* bare
+#: min/max into an index seek, so the combined form scans the table while these
+#: two touch one index entry each.
+_OLDEST_SQL = "SELECT ts_utc FROM observations ORDER BY ts_utc LIMIT 1"
+_NEWEST_SQL = "SELECT ts_utc FROM observations ORDER BY ts_utc DESC LIMIT 1"
+
+#: Rank the chart's candidate channels over the chart window WITHOUT hauling
+#: every row into Python: 24h of watts is ~100k rows and only three channels are
+#: drawn. ``MAX(value)`` is the same "highest watts observed in the window" rule
+#: the overlay has always used. The leading column of ``ux_observations_dedupe``
+#: is ``ts_utc``, so the range predicate is an index seek, not a table scan.
+_CHART_RANK_SQL = """
+SELECT source, device_id, channel_id,
+       MAX(value) AS peak, MIN(value) AS trough, COUNT(*) AS samples, MIN(unit) AS unit
+FROM observations
+WHERE ts_utc >= ? AND ts_utc < ? AND metric = ?
+GROUP BY source, device_id, channel_id
+"""
+
+#: Rows for the (at most three) channels the chart draws. The channel predicate
+#: is spelled out as OR-ed triples rather than a row-value ``IN`` so it is
+#: obvious that only ``ts_utc`` drives the index.
+_CHART_POINTS_SQL_HEAD = """
+SELECT ts_utc, ts_local, source, device_id, channel_id, metric, unit, value
+FROM observations
+WHERE ts_utc >= ? AND ts_utc < ? AND metric = ?
+"""
+
+
+def _chart_points_sql(channels: int) -> str:
+    """:data:`_CHART_POINTS_SQL_HEAD` restricted to ``channels`` channel keys."""
+    clause = " OR ".join(
+        ["(source = ? AND device_id = ? AND channel_id = ?)"] * max(1, channels)
+    )
+    return f"{_CHART_POINTS_SQL_HEAD}  AND ({clause})\nORDER BY ts_utc\n"
+
 
 # --------------------------------------------------------------- the page
 
@@ -282,6 +419,177 @@ def _parse_utc(text: Any) -> datetime | None:
         return timeutil.ensure_utc(datetime.fromisoformat(raw))
     except ValueError:
         return None
+
+
+# ------------------------------------------------------- the chart request
+
+
+class ChartParamError(ValueError):
+    """A ``/ui/data`` chart parameter that must be answered with **400**.
+
+    Garbage is rejected rather than silently replaced with the default: a chart
+    that quietly shows a different window than the one asked for is a chart that
+    lies about what it is showing.
+    """
+
+    def __init__(self, param: str, message: str, value: Any = None) -> None:
+        super().__init__(f"{param}: {message}")
+        self.param = param
+        self.message = message
+        self.value = value
+
+    def as_document(self) -> dict[str, Any]:
+        """The JSON body for the 400."""
+        return {
+            "error": "bad chart parameter",
+            "parameter": self.param,
+            "detail": self.message,
+            "value": None if self.value is None else str(self.value),
+            "accepts": {
+                CHART_PARAM_WINDOW: (
+                    f"integer seconds, {CHART_MIN_WINDOW_S}..{CHART_MAX_WINDOW_S} "
+                    f"(default {CHART_DEFAULT_WINDOW_S}; longer values are clamped)"
+                ),
+                CHART_PARAM_END: (
+                    "ISO-8601 instant at the right edge of the window, e.g. "
+                    "2026-08-16T18:30:00Z (default: now, which means live)"
+                ),
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChartRequest:
+    """A validated request for the overlay chart's window.
+
+    ``end is None`` **is** what live means: the window's right edge is resolved
+    to the snapshot's own ``now`` at build time and therefore follows it. A
+    pinned ``end`` is history and does not move when the page refreshes.
+    """
+
+    window_s: int = CHART_DEFAULT_WINDOW_S
+    end: datetime | None = None
+    #: What the caller literally asked for, before clamping — echoed back so the
+    #: page can say "clamped to 24h" instead of silently disagreeing with itself.
+    requested_window_s: int | None = None
+    clamped: bool = False
+
+    @property
+    def live(self) -> bool:
+        return self.end is None
+
+
+def parse_chart_request(
+    query: str | Mapping[str, Any] | None, *, now: datetime | None = None
+) -> ChartRequest:
+    """Parse ``?window_s=&end=`` into a :class:`ChartRequest`.
+
+    Accepts a full request target (``/ui/data?window_s=3600``), a bare query
+    string, or an already-parsed mapping. Unknown parameters are **ignored** —
+    ``/ui/data?since=now`` has always been a 200 and stays one. Raises
+    :class:`ChartParamError` for anything malformed.
+    """
+    items: list[tuple[str, str]] = []
+    if isinstance(query, Mapping):
+        items = [(str(k), "" if v is None else str(v)) for k, v in query.items()]
+    elif query:
+        raw = str(query)
+        if "?" in raw:
+            raw = raw.split("?", 1)[1]
+        raw = raw.split("#", 1)[0].lstrip("?")
+        items = parse_qsl(raw, keep_blank_values=True)
+
+    # Last one wins, the way every HTTP stack reads a repeated parameter.
+    values = {key: value for key, value in items}
+
+    window_s = CHART_DEFAULT_WINDOW_S
+    requested: int | None = None
+    clamped = False
+    if CHART_PARAM_WINDOW in values:
+        text = values[CHART_PARAM_WINDOW].strip()
+        if not text.isdigit():
+            raise ChartParamError(
+                CHART_PARAM_WINDOW,
+                "must be a whole number of seconds (a positive integer)",
+                values[CHART_PARAM_WINDOW],
+            )
+        requested = int(text)
+        if requested <= 0:
+            raise ChartParamError(
+                CHART_PARAM_WINDOW, "must be greater than zero seconds", requested
+            )
+        window_s = min(CHART_MAX_WINDOW_S, max(CHART_MIN_WINDOW_S, requested))
+        clamped = window_s != requested
+
+    end: datetime | None = None
+    if CHART_PARAM_END in values:
+        text = values[CHART_PARAM_END].strip()
+        parsed = _parse_utc(text) if text else None
+        if parsed is None:
+            raise ChartParamError(
+                CHART_PARAM_END,
+                "must be an ISO-8601 instant, e.g. 2026-08-16T18:30:00Z",
+                values[CHART_PARAM_END],
+            )
+        reference = timeutil.ensure_utc(now) if now is not None else timeutil.now_utc()
+        if (parsed - reference).total_seconds() > CHART_FUTURE_SKEW_S:
+            raise ChartParamError(
+                CHART_PARAM_END,
+                (
+                    "is in the future — there is no data there. Allowed skew is "
+                    f"{CHART_FUTURE_SKEW_S:g}s; omit `end` to follow now"
+                ),
+                text,
+            )
+        end = parsed
+
+    return ChartRequest(
+        window_s=window_s, end=end, requested_window_s=requested, clamped=clamped
+    )
+
+
+def chart_bucket_width_s(
+    window_s: int, poll_interval_s: float, *, max_buckets: int = CHART_MAX_BUCKETS
+) -> float:
+    """Bucket width for a window: a whole number of poll intervals, >= 2 of them.
+
+    Rounding up to a multiple of the poll interval is what makes
+    ``expected samples per bucket`` an exact integer, which is what makes
+    "partial" mean something. 24h at a 30s cadence gives 150s (2.5 min, 576
+    buckets); 6h gives 60s (360 buckets).
+    """
+    step = float(poll_interval_s) if poll_interval_s > 0 else 30.0
+    needed = math.ceil(window_s / (max(1, max_buckets) * step))
+    return step * max(CHART_MIN_BUCKET_INTERVALS, needed)
+
+
+def chart_resolution_label(
+    mode: str, bucket_s: float | None, poll_interval_s: float
+) -> str:
+    """What one mark on the x axis IS — the axis must never imply 30s at 24h."""
+    if mode == "raw" or not bucket_s:
+        return f"{poll_interval_s:g}s samples"
+    if bucket_s < 60:
+        return f"{bucket_s:g}-second buckets"
+    return f"{bucket_s / 60:g}-minute buckets"
+
+
+def handle_ui_data(
+    store: StatusStore | None = None, target: str | None = None, **kwargs: Any
+) -> tuple[int, dict[str, Any]]:
+    """``(status, document)`` for ``GET /ui/data`` — the whole route, parsing included.
+
+    This is the entry point a server should call, because it is the only place
+    that can answer **400**: :func:`build_snapshot` takes an already-valid
+    :class:`ChartRequest` and has no opinion about query strings. ``target`` may
+    be the raw request target (``/ui/data?window_s=86400``) or ``None``, which is
+    the no-parameter request and returns the document it always did.
+    """
+    try:
+        chart = parse_chart_request(target, now=kwargs.get("now"))
+    except ChartParamError as exc:
+        return (400, exc.as_document())
+    return (200, build_snapshot(store, chart=chart, **kwargs))
 
 
 # -------------------------------------------------------- expected counts
@@ -412,6 +720,79 @@ def _row_to_sample(row: sqlite3.Row) -> _Sample:
         unit=row["unit"],
         value=float(row["value"]),
     )
+
+
+def _spool_extent(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Oldest and newest ``ts_utc`` in the spool — how far the chart can be panned.
+
+    Without this the page cannot tell "the collector was down" from "the spool
+    never held that far back", and a user panning past the beginning gets an empty
+    chart that looks exactly like an outage. Two single-row index seeks (see
+    :data:`_OLDEST_SQL`), so this stays cheap on a spool holding a day of rows.
+    """
+    oldest_row = conn.execute(_OLDEST_SQL).fetchone()
+    newest_row = conn.execute(_NEWEST_SQL).fetchone()
+    oldest = _parse_utc(oldest_row[0]) if oldest_row else None
+    newest = _parse_utc(newest_row[0]) if newest_row else None
+    return {
+        "oldest": _stamp(oldest),
+        "newest": _stamp(newest),
+        "span_s": (
+            round((newest - oldest).total_seconds(), 1)
+            if oldest is not None and newest is not None
+            else None
+        ),
+    }
+
+
+def _read_chart_window(
+    conn: sqlite3.Connection,
+    *,
+    start: datetime,
+    end: datetime,
+    metric: str = model.POWER_METRIC,
+    limit: int = 3,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str], list[_Sample]]]:
+    """``(ranked channels, samples for the top ``limit``)`` over the chart window.
+
+    Two statements on purpose. A 24h window is ~100k rows and the chart draws at
+    most three channels, so the ranking — the same "highest watts observed in the
+    window" rule the overlay has always used — is done as a GROUP BY in SQLite and
+    only the chosen channels' rows are materialised in Python. The upper bound is
+    ``end + 1s``, matching the live window query, so a sample landing exactly on
+    ``now`` is in the chart rather than one refresh late.
+    """
+    bounds = (
+        timeutil.format_utc(start),
+        timeutil.format_utc(end + timedelta(seconds=1)),
+        metric,
+    )
+    ranked: list[dict[str, Any]] = []
+    for row in conn.execute(_CHART_RANK_SQL, bounds):
+        key = (row["source"], row["device_id"], row["channel_id"])
+        ranked.append(
+            {
+                "key": key,
+                "key_str": "{}/{}/{}".format(*key),
+                "peak": float(row["peak"]),
+                "samples": int(row["samples"]),
+                "unit": row["unit"],
+            }
+        )
+    # Same ordering as the overlay has always used: peak descending, then key
+    # descending, so the selection is stable for a given window.
+    ranked.sort(key=lambda entry: (entry["peak"], entry["key_str"]), reverse=True)
+
+    chosen = ranked[:limit]
+    samples: dict[tuple[str, str, str], list[_Sample]] = {entry["key"]: [] for entry in chosen}
+    if chosen:
+        params: list[Any] = [*bounds]
+        for entry in chosen:
+            params.extend(entry["key"])
+        for row in conn.execute(_chart_points_sql(len(chosen)), params):
+            sample = _row_to_sample(row)
+            samples[sample.channel_key].append(sample)
+    return ranked, samples
 
 
 # ------------------------------------------------------------------ labels
@@ -705,6 +1086,171 @@ def _build_series(
         "note": (
             "observed samples only — no interpolation, no zero fill. Consecutive "
             f"points more than {gap_threshold_s}s apart are a gap in collection."
+        ),
+    }
+
+
+# ----------------------------------------------------------------- buckets
+
+
+def _align_to_bucket(ts: datetime, bucket_s: float) -> datetime:
+    """Floor an instant to a bucket boundary, **on ``ts_utc``** (CLAUDE.md rule 3).
+
+    Boundaries are epoch multiples of ``bucket_s``, so they do not move when the
+    window slides (a refresh only ever changes the last bucket) and they know
+    nothing about the local wall clock. That last part is the whole point: on the
+    DST fall-back day two different instants render as ``01:30`` local, and a
+    bucket keyed on that label would merge an hour of EDT with an hour of EST.
+    """
+    epoch = timeutil.ensure_utc(ts).timestamp()
+    return datetime.fromtimestamp(math.floor(epoch / bucket_s) * bucket_s, tz=timeutil.UTC)
+
+
+def _bucket_series(
+    samples: Sequence[_Sample],
+    *,
+    metric: str,
+    unit: str,
+    poll_interval_s: float,
+    window_start: datetime,
+    window_end: datetime,
+    bucket_s: float,
+) -> dict[str, Any]:
+    """Bucket one channel's samples into fixed spans — holes preserved as holes.
+
+    ``window_start`` must already be bucket-aligned (:func:`_align_to_bucket`).
+
+    Three invariants, each of which is a way this function could fabricate data
+    and does not:
+
+    * a bucket with **no** samples emits ``mean``/``min``/``max`` of ``None`` and
+      ``sample_count`` 0 — it is a hole, and the page breaks the line there. Not
+      0 W, not the previous bucket's value, not an interpolation;
+    * the mean is ``sum(values) / len(values)`` — the mean of the samples that
+      EXIST. Dividing by ``expected`` would drag every partial bucket toward zero,
+      which is exactly the error of extrapolating kWh across a gap (PLAN.md §2.5);
+    * ``sample_count`` and ``expected`` ride on every bucket, so a bucket built
+      from one sample out of five is visibly not the same fact as a full one.
+    """
+    start_epoch = timeutil.ensure_utc(window_start).timestamp()
+    end_epoch = timeutil.ensure_utc(window_end).timestamp()
+    count = max(1, math.ceil((end_epoch - start_epoch) / bucket_s))
+
+    grouped: list[list[float]] = [[] for _ in range(count)]
+    for sample in samples:
+        index = int((sample.ts_utc.timestamp() - start_epoch) // bucket_s)
+        if 0 <= index < count:
+            grouped[index].append(sample.value)
+
+    points: list[list[Any]] = []
+    holes: list[dict[str, Any]] = []
+    run_start: int | None = None
+    run_missing = 0
+    empty = partial = 0
+
+    def close_run(end_index: int) -> None:
+        nonlocal run_start, run_missing
+        if run_start is None:
+            return
+        first = datetime.fromtimestamp(start_epoch + run_start * bucket_s, tz=timeutil.UTC)
+        last = datetime.fromtimestamp(
+            min(start_epoch + end_index * bucket_s, end_epoch), tz=timeutil.UTC
+        )
+        holes.append(
+            {
+                "start": _stamp(first),
+                "end": _stamp(last),
+                "buckets": end_index - run_start,
+                "seconds": round((last - first).total_seconds(), 1),
+                "missing_samples": run_missing,
+            }
+        )
+        run_start, run_missing = None, 0
+
+    for index, values in enumerate(grouped):
+        bucket_start_epoch = start_epoch + index * bucket_s
+        bucket_start = datetime.fromtimestamp(bucket_start_epoch, tz=timeutil.UTC)
+        span_s = min(bucket_start_epoch + bucket_s, end_epoch) - bucket_start_epoch
+        expected = expected_samples(span_s, poll_interval_s)
+        observed = len(values)
+        if observed:
+            close_run(index)
+            if observed < expected:
+                partial += 1
+            points.append(
+                [
+                    timeutil.format_utc(bucket_start),
+                    timeutil.to_local_naive(bucket_start).isoformat(timespec="seconds"),
+                    sum(values) / observed,  # the mean of what EXISTS
+                    min(values),
+                    max(values),
+                    observed,
+                    expected,
+                ]
+            )
+        else:
+            empty += 1
+            if run_start is None:
+                run_start = index
+            run_missing += expected
+            points.append(
+                [
+                    timeutil.format_utc(bucket_start),
+                    timeutil.to_local_naive(bucket_start).isoformat(timespec="seconds"),
+                    None,  # an empty bucket is a HOLE, explicitly
+                    None,
+                    None,
+                    0,
+                    expected,
+                ]
+            )
+    close_run(count)
+
+    values_seen = [value for bucket in grouped for value in bucket]
+    expected_total = sum(point[6] for point in points)
+    observed_total = len(values_seen)
+    return {
+        "metric": metric,
+        "unit": unit,
+        "is_enum": metric in model.ENUM_METRICS,
+        "mode": "bucketed",
+        "points": points,
+        "point_format": [
+            "bucket_start_utc",
+            "bucket_start_local",
+            "mean",
+            "min",
+            "max",
+            "sample_count",
+            "expected",
+        ],
+        "bucket_s": bucket_s,
+        "bucket_count": count,
+        "empty_buckets": empty,
+        "partial_buckets": partial,
+        "holes": holes,
+        # The break rule in bucketed mode is `mean is null`, not a time delta; this
+        # travels anyway so a client that only knows the raw shape still breaks
+        # the line in the right places.
+        "gap_threshold_s": round(bucket_s * GAP_INTERVAL_FACTOR, 1),
+        "gaps": [],
+        "leading_gap": None,
+        "trailing_gap": None,
+        "window_start": _stamp(window_start),
+        "window_end": _stamp(window_end),
+        "sample_count": observed_total,
+        "expected_samples": expected_total,
+        "coverage_pct": (
+            round(100.0 * observed_total / expected_total, 1) if expected_total else None
+        ),
+        "zero_samples": sum(1 for value in values_seen if value == 0.0),
+        "min": min(values_seen) if values_seen else None,
+        "max": max(values_seen) if values_seen else None,
+        "note": (
+            f"{bucket_s:g}s buckets aligned on ts_utc. An empty bucket is a HOLE "
+            "(mean null, sample_count 0) — never a zero and never interpolated; a "
+            "partial bucket carries the mean of the samples that exist and its own "
+            "count, never a mean divided by the expected count."
         ),
     }
 
@@ -1169,6 +1715,7 @@ def build_snapshot(
     now: datetime | None = None,
     window_minutes: int = SERIES_WINDOW_MINUTES,
     hours: int = HOURLY_WINDOW_HOURS,
+    chart: ChartRequest | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Build the whole ``/ui/data`` document. Reads only; never raises for data.
@@ -1182,6 +1729,9 @@ def build_snapshot(
         now: injectable clock (tests).
         window_minutes: the "Live now" sparkline window.
         hours: how many local hours "The math" table covers.
+        chart: the overlay chart's window (:func:`parse_chart_request`). ``None``
+            is the default live window and produces the document this route
+            returned before the window was movable at all.
 
     Every failure mode below the top level is caught and appended to ``errors``:
     a dashboard that 500s tells the owner nothing, while a dashboard that says
@@ -1224,8 +1774,32 @@ def build_snapshot(
     buckets = hour_buckets(reference, hours)
     read_from = min(window_start, buckets[0].start_utc) if buckets else window_start
 
+    # ------------------------------------------------- the chart's own window
+    chart_request = chart if chart is not None else ChartRequest()
+    # A within-skew future `end` is honoured as "now": the chart must not open a
+    # strip of empty axis to the right that reads as an outage.
+    chart_end = (
+        min(timeutil.ensure_utc(chart_request.end), reference)
+        if chart_request.end
+        else reference
+    )
+    chart_mode = "raw" if chart_request.window_s <= CHART_RAW_MAX_WINDOW_S else "bucketed"
+    chart_bucket_s = (
+        None
+        if chart_mode == "raw"
+        else chart_bucket_width_s(chart_request.window_s, poll_interval_s)
+    )
+    chart_start = chart_end - timedelta(seconds=chart_request.window_s)
+    if chart_bucket_s:
+        # Widen to the bucket boundary below, so the first bucket is a whole one
+        # and boundaries stay put as the window slides.
+        chart_start = _align_to_bucket(chart_start, chart_bucket_s)
+
     latest_rows: list[sqlite3.Row] = []
     window_samples: list[_Sample] = []
+    chart_ranked: list[dict[str, Any]] = []
+    chart_by_key: dict[tuple[str, str, str], list[_Sample]] = {}
+    extent: dict[str, Any] = {"oldest": None, "newest": None, "span_s": None}
     spool_ok = False
     if spool_path is None:
         errors.append("no spool path configured")
@@ -1243,6 +1817,10 @@ def build_snapshot(
                         ),
                     )
                 ]
+                extent = _spool_extent(conn)
+                chart_ranked, chart_by_key = _read_chart_window(
+                    conn, start=chart_start, end=chart_end
+                )
             spool_ok = True
         except sqlite3.Error as exc:
             errors.append(
@@ -1388,7 +1966,18 @@ def build_snapshot(
         ),
     }
 
-    overlay = _overlay_block(channels, reference, window_start)
+    overlay = _overlay_block(
+        request=chart_request,
+        window_start=chart_start,
+        window_end=chart_end,
+        mode=chart_mode,
+        bucket_s=chart_bucket_s,
+        ranked=chart_ranked,
+        samples_by_key=chart_by_key,
+        labels=labels,
+        interval_for_source=interval_for_source,
+        poll_interval_s=poll_interval_s,
+    )
 
     return {
         "generated": _stamp(reference),
@@ -1406,6 +1995,11 @@ def build_snapshot(
             "mode": "read-only (mode=ro, query_only)",
             "channels": len(channels),
             "window_rows": len(window_samples),
+            "chart_rows": sum(len(rows) for rows in chart_by_key.values()),
+            # How far back the chart can be panned. The spool is not an archive:
+            # rows are purged once they are uploaded and past the retention floor,
+            # so this is "what is still here", not "what was ever collected".
+            "extent": extent,
         },
         "status_source": status_source,
         "process": _process_block(
@@ -1420,35 +2014,121 @@ def build_snapshot(
 
 
 def _overlay_block(
-    channels: Sequence[Mapping[str, Any]], now: datetime, window_start: datetime
+    *,
+    request: ChartRequest,
+    window_start: datetime,
+    window_end: datetime,
+    mode: str,
+    bucket_s: float | None,
+    ranked: Sequence[Mapping[str, Any]],
+    samples_by_key: Mapping[tuple[str, str, str], Sequence[_Sample]],
+    labels: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    interval_for_source: Mapping[str, int],
+    poll_interval_s: float,
 ) -> dict[str, Any]:
-    """The <=3 watt channels worth overlaying, most active first.
+    """The <=3 watt channels worth overlaying, most active first, over the chart window.
 
     Three is the whole categorical palette (slots 1-3); a fourth series is not
     allowed, so the rest are named in ``omitted`` rather than cycled into a
     repeated colour. The page assigns each *entity* a slot and keeps it, so a
-    channel that survives a change of selection never changes colour.
+    channel that survives a change of selection — including a change caused by
+    panning into a different stretch of the day — never changes colour.
+
+    The block carries its own ``series`` rather than pointing the page back at
+    ``channels[].series``: the chart's window is movable and the cards' window is
+    not, so the two are only the same document when the chart is live at its
+    default length (which is exactly when the two agree sample for sample).
     """
-    candidates = [
-        channel
-        for channel in channels
-        if channel.get("series")
-        and channel["series"]["metric"] == model.POWER_METRIC
-        and channel["series"]["points"]
-    ]
-    ranked = sorted(
-        candidates, key=lambda c: (c["series"]["max"] or 0.0, c["key"]), reverse=True
-    )
-    chosen = ranked[:3]
+    chosen = list(ranked[:3])
+    series: list[dict[str, Any]] = []
+    for entry in chosen:
+        key = entry["key"]
+        members = list(samples_by_key.get(key, ()))
+        interval = float(interval_for_source.get(key[0], poll_interval_s))
+        unit = entry.get("unit") or model.UNIT_WATTS
+        if mode == "bucketed" and bucket_s:
+            built = _bucket_series(
+                members,
+                metric=model.POWER_METRIC,
+                unit=unit,
+                poll_interval_s=interval,
+                window_start=window_start,
+                window_end=window_end,
+                bucket_s=bucket_s,
+            )
+        else:
+            built = _build_series(
+                members,
+                metric=model.POWER_METRIC,
+                unit=unit,
+                poll_interval_s=interval,
+                window_start=window_start,
+                now=window_end,
+            )
+            built["mode"] = "raw"
+        described = _describe_channel(key, labels)
+        built["key"] = entry["key_str"]
+        built["label"] = described["label"]
+        built["short_label"] = described["short_label"]
+        built["poll_interval_s"] = interval
+        series.append(built)
+
     return {
         "metric": model.POWER_METRIC,
         "unit": model.UNIT_WATTS,
         "window_start": _stamp(window_start),
-        "window_end": _stamp(now),
+        "window_end": _stamp(window_end),
         "selected_by": "highest watts observed in the window",
-        "keys": [channel["key"] for channel in chosen],
+        "keys": [entry["key_str"] for entry in chosen],
         "omitted": [
-            {"key": channel["key"], "label": channel["label"], "max": channel["series"]["max"]}
-            for channel in ranked[3:]
+            {
+                "key": entry["key_str"],
+                "label": _describe_channel(entry["key"], labels)["label"],
+                "max": entry["peak"],
+            }
+            for entry in ranked[3:]
         ],
+        # ------------------------------------------------ the movable window
+        "window_s": request.window_s,
+        "live": request.live,
+        "mode": mode,
+        "bucket_s": bucket_s,
+        # Independent of the series, so an empty window still labels its axis.
+        "bucket_count": (
+            max(
+                1,
+                math.ceil(
+                    (
+                        timeutil.ensure_utc(window_end) - timeutil.ensure_utc(window_start)
+                    ).total_seconds()
+                    / bucket_s
+                ),
+            )
+            if bucket_s
+            else None
+        ),
+        "expected_per_bucket": (
+            expected_samples(bucket_s, poll_interval_s) if bucket_s else None
+        ),
+        "resolution": chart_resolution_label(mode, bucket_s, poll_interval_s),
+        "raw_max_window_s": CHART_RAW_MAX_WINDOW_S,
+        "max_window_s": CHART_MAX_WINDOW_S,
+        "presets_s": list(CHART_PRESETS_S),
+        "request": {
+            "window_s": request.requested_window_s,
+            "end": _stamp(request.end),
+            "clamped": request.clamped,
+        },
+        "series": series,
+        "note": (
+            "The marks on this chart are "
+            + chart_resolution_label(mode, bucket_s, poll_interval_s)
+            + (
+                ". An empty bucket is a hole: mean null, sample_count 0 — the line "
+                "breaks there. A bucket with fewer samples than expected keeps the "
+                "mean of the samples it has, and says how many that was."
+                if mode == "bucketed"
+                else ". Raw observed samples — nothing is bucketed, averaged or filled."
+            )
+        ),
     }

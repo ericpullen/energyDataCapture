@@ -2653,6 +2653,107 @@ report `database disk image is malformed`, and can cause it. Read the spool from
 the container, or use `/ui/data`, which is served by the process that owns the file. The
 snapshot builder now says so in the error it puts on the page.
 
+## 165. `/ui/data` was a fixed 30-minute live window — the watts chart's window now moves, and long windows are bucketed on the server
+
+**The spec.** #164 introduced `/ui` and `/ui/data` with one hard-coded window: the last 30
+minutes, always live, always raw 30s samples. PLAN.md contemplates neither the route nor a
+window, so this is an extension of #164 rather than a divergence from §11.
+
+**What was asked for.** Verbatim: *"I want to be able to scroll back in time in the Watts
+graph you have running. Like, let me look back 24 hours at most (I know we don't have that
+much data yet, but just something to start with)."*
+
+**What was built.** Presets, panning, and a way back to live — and nothing else. No brush,
+no minimap, no zoom gesture, no date-picker: the owner has asked twice for restraint.
+
+- **Page.** `30m / 1h / 6h / 24h`; ◀ ▶ pan half a window; drag the plot; ← / → pan and
+  `Home` goes live (the pre-existing keyboard crosshair moved to `Shift` + ← / →, and the
+  hint line under the chart says so). Panning pins the right edge, which stops the chart
+  following *now* while the rest of the page keeps refreshing every 5s.
+- **Route.** `GET /ui/data` takes two optional parameters: `window_s` (integer seconds,
+  clamped to `[60, 86400]`, default 1800) and `end` (ISO-8601 instant at the right edge;
+  omitted **is** what live means). Unknown parameters are still ignored — `/ui/data?since=now`
+  has always been a 200 and stays one — but a malformed value is a **400** with the
+  parameter named, never a silent default: a chart quietly showing a different window than
+  the one asked for is a chart that lies about itself. `handle_ui_data(store, target)`
+  returns `(status, document)` and is the only thing that can answer 400; `build_snapshot`
+  still takes an already-validated request and has no opinion about query strings.
+- **`health.py` had to change**, in one place: `_respond_ui` called
+  `build_snapshot(self._store)` and threw the request target away, so no parameter could
+  ever arrive. It now calls `handle_ui_data(self._store, target)` and returns the status it
+  gets back. `_send_bytes` already knew `400 Bad Request`; every pre-existing health and UI
+  route test passes as written.
+
+**Where a chart fabricates data, and what happens instead.** 24h at 30s is ~2,880 points
+per channel, so the server buckets above an hour (`CHART_RAW_MAX_WINDOW_S = 3600` — the
+live view stays exactly as raw and as responsive as it was). Bucketing is the place
+CLAUDE.md rule 1 dies quietly, so:
+
+- **an empty bucket is an explicit hole** — `mean`/`min`/`max` `null`, `sample_count` 0.
+  Not 0 W, not the previous bucket's value, not an interpolation between neighbours. It
+  reaches the client as a `null` and the page breaks the line there into a **new SVG
+  subpath**, exactly as it already did for a raw gap. Verified on real data: a 6h window
+  over the container restart at 19:29–19:31 UTC leaves the 19:30 bucket empty, and each of
+  the three drawn paths comes out with two subpaths, not one;
+- **a partial bucket is not a full one.** Every bucket carries its own `sample_count`
+  *and* the `expected` count for its span, and the page draws it with a hollow mark in the
+  series colour (no new hue) saying "*n* of 5 samples";
+- **the mean is `sum(values) / len(values)`** — the mean of the samples that EXIST.
+  Dividing by `expected` would drag every partial bucket toward zero, which is
+  PLAN.md §2.5's "extrapolate across a gap" wearing a different hat. Hand-checked against
+  the raw rows: the last bucket of the live spool held 4 of 5 samples all reading
+  801.915 W and came back as 801.915, not 801.915 × 4/5 = 641.5;
+- **boundaries are computed on `ts_utc`** (CLAUDE.md rule 3) as epoch multiples of the
+  bucket width, so they do not move when the window slides — a refresh only ever changes
+  the last bucket — and the DST fall-back day's two 01:00 local hours land in *different*
+  buckets. Bucketing on the naive local label would merge an hour of EDT with an hour of
+  EST; a test walks both and asserts 24 repeated local labels as 24 pairs of distinct rows.
+
+The width is always a whole number of poll intervals and at least two of them, so
+"expected per bucket" is an exact integer and "partial" means something: 24h → 150s
+(2.5-minute buckets, 577 of them, 5 samples each), 6h → 60s. One bucket per poll interval
+would leave real buckets empty on ordinary jitter and draw holes that are not holes — the
+opposite failure to fabricating data, and just as much a lie.
+
+**The axis is drawn from the answer, never from the question.** Every label — window,
+resolution wording, bucket width, tick times — comes from the document the server returned.
+If it disagrees with what the page asked for, the range bar says *"Window not applied —
+this server answered with its own window"* instead of drawing the server's data under the
+page's labels. A 24h window can straddle a DST change, so each x-tick borrows the
+`utc`/`local` offset of the nearest point (which came from `timeutil`) rather than one
+page-wide offset.
+
+**Panning stops at the data, and says so.** `spool.extent` reports the oldest and newest
+`ts_utc` the spool still holds. The stretch a window covers that the spool never held is
+greyed with `--mark-muted` and named in words ("the spool holds nothing before 15:22
+local") — deliberately *not* washed like an outage, because a purged or never-collected
+stretch is not a collector failure. The spool is not an archive: rows are purged once
+uploaded, so 24h of window will usually be more window than data.
+
+**What it costs.**
+
+- **Zero new dependencies**; `pyproject.toml` and `uv.lock` untouched. Still three
+  categorical colour slots and no fourth series; no new CSS custom property; still no
+  external asset of any kind, so the page still renders with the network unplugged.
+- **No table scan.** The window is ranked with a `GROUP BY` in SQLite so only the three
+  drawn channels' rows reach Python. `EXPLAIN QUERY PLAN` against the live spool copy
+  reports `SEARCH observations USING INDEX ux_observations_dedupe (ts_utc>? AND ts_utc<?)`
+  for both the ranking and the point query — an index seek on the leading `ts_utc` column,
+  not a scan.
+- **Measured on the running container**: a 24h snapshot answers in ~110 ms and adds
+  ~130 kB to the document (~400 kB total); the no-parameter request is ~95 ms, unchanged.
+- **The no-parameter document is exactly what it was.** Diffed field by field against
+  `HEAD`'s `build_snapshot` output for the same clock and spool: the only differences are
+  *added* keys (`spool.chart_rows`, `spool.extent`, and the window fields under `overlay`).
+  Nothing pre-existing changed value or position.
+
+**One thing this deliberately does not do.** At 24h a sub-bucket outage — the 133-second
+gap in the live spool — does not break the line, because both buckets either side of it
+still hold real samples. It is reported as two *partial* buckets (4/5 and 3/5) with hollow
+marks and the counts in the tooltip. Widening a hole to cover any gap would be inventing an
+absence; narrowing the buckets to catch it would be the 6h view, which is one click away
+and does show it as a break.
+
 ---
 
 # Status — what is done, and what has never been executed
