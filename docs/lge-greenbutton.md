@@ -299,6 +299,35 @@ line; `tests/test_config.py` asserts that list covers every `SecretStr` field, t
 `.env.example` documents every setting, and that nothing credential-shaped in the committed
 example is a real value.
 
+### Verified live, 2026-08-18
+
+A read-only probe of all three credentials, before writing any client:
+
+| Probe | Result |
+|---|---|
+| `POST /OAuthServer/token`, `client_credentials`, HTTP Basic | **400 `invalid_scope`** — *not* `invalid_client`, so the id and secret authenticated |
+| Same, credentials in the form body instead | **401** with `WWW-Authenticate: Basic realm="OAuth"` — `client_secret_basic` is enforced, as registered |
+| `GET` the Registration Client URI with the registration token (RFC 7592) | **200**, full `ApplicationInformation` returned |
+| `GET /OAuthServer/authorize?client_id=…&redirect_uri=…` | **302 → the MyMeter login**, with our `client_id` and `redirect_uri` preserved intact |
+
+So all three credentials are good and the redirect URI is accepted as registered.
+
+**The `client_credentials` grant rejects every scope we can construct** — including the scope
+LG&E themselves stored (read back from `ApplicationInformation`, byte-identical to what was
+submitted), a bare `FB=1_3_4_5`, and no scope at all. This does **not** block anything: the
+data path is `authorization_code` → `refresh_token`, and the one thing an ESPI 3PV token is
+for — reading `ApplicationInformation` — already works through the registration access token.
+Worth one question to LG&E if a bulk fetch ever turns out to need it.
+
+Reading the registration back also settled three things:
+
+- `client_secret_expires_at = 0` — **no expiry**, confirming the blank field in the email.
+- **LG&E overwrote `software_id` and `software_version`** with their own platform's values
+  (`MyMeter`, `10.6.1.3`). The UUID generated in §3 was not kept, so it is not an identity
+  anything can rely on.
+- `token_endpoint_auth_method`, `grant_types`, `response_types`, `redirect_uri`, `scope` and
+  every URI came back exactly as submitted.
+
 Two details worth noting from the approval:
 
 - **`Client Secret Expires At` came back blank** — no stated rotation. Do not build anything
