@@ -12,7 +12,7 @@ path on the Mac; this file describes the cloud host.
 | Instance | `energycap`, `us-east-1a`, blueprint `ubuntu_24_04`, bundle `micro_3_0` |
 | Size | 1 GB RAM, 2 vCPU, 40 GB SSD, 2 TB transfer — **$7/month**, all in |
 | Static IP | `energycap-ip` → `13.219.164.226` (included in the bundle) |
-| Firewall | TCP 22 from `99.119.39.143/32` only. **8080 is not open.** |
+| Firewall | TCP 22 and 8080, both from `99.119.39.143/32` only |
 | Runtime | Docker 29.7.2 + Compose v5.5.0, `restart: unless-stopped` |
 | Repo | `git clone https://github.com/ericpullen/energyDataCapture` (public) |
 | Spool | Docker **named volume** `energycap-data`, not a bind mount |
@@ -34,39 +34,48 @@ docker compose exec energycap energycap <subcommand>
 
 ## Reaching the dashboard
 
-The health server binds `0.0.0.0` inside the container and has **no authentication**,
-so the compose override publishes it on `127.0.0.1` only and the Lightsail firewall
-leaves 8080 shut. Reach it with a tunnel:
+8080 is published on all interfaces and opened in the Lightsail firewall to the house
+IP only, so the dashboard is reachable directly:
+
+```bash
+open http://13.219.164.226:8080/ui
+```
+
+**The firewall rule is the only thing protecting it.** The health server binds `0.0.0.0`
+and has no authentication, so anything that reaches the port gets the full dashboard —
+live circuit-level load, which is a fairly direct occupancy signal. Chosen deliberately
+on 2026-08-19 for simplicity against a static home IP, and cheap to reverse: drop the
+8080 rule, put `ports: !override` / `- "127.0.0.1:8080:8080"` back in the compose
+override, and tunnel instead:
 
 ```bash
 ssh -f -N -i ~/.ssh/energycap-lightsail.pem -L 8090:127.0.0.1:8080 ubuntu@13.219.164.226
-open http://localhost:8090/ui
+open http://localhost:8090/ui     # 8090 because 8080 on the Mac is the local collector
 ```
 
-Port 8090 because 8080 on the Mac is the local collector. Close it with
-`pkill -f 'ssh -f -N.*13.219.164.226'`.
+Close a tunnel with `pkill -f 'ssh -f -N.*13.219.164.226'`.
 
 The private key is at `~/.ssh/energycap-lightsail.pem`, mode 600. It is **not** in this
 repo and must never be. Lightsail cannot re-issue it — if it is lost, create a new key
 pair and rebuild the instance.
 
-The firewall CIDR is a residential IP and **will drift**. When SSH starts timing out:
+The home IP is static, so the CIDR should hold. If it ever does change, both SSH and the
+dashboard stop answering at once — re-point both rules together, since
+`put-instance-public-ports` **replaces** the entire rule set rather than adding to it:
 
 ```bash
+HOME_IP=$(curl -s https://checkip.amazonaws.com)/32
 aws lightsail put-instance-public-ports --region us-east-1 --instance-name energycap \
-  --port-infos fromPort=22,toPort=22,protocol=TCP,cidrs=$(curl -s https://checkip.amazonaws.com)/32
+  --port-infos fromPort=22,toPort=22,protocol=TCP,cidrs=$HOME_IP \
+               fromPort=8080,toPort=8080,protocol=TCP,cidrs=$HOME_IP
 ```
 
 ## Host-specific configuration
 
 `docker-compose.override.yml` on the instance is deliberately **untracked** — it
-describes that host, not the project. Compose merges it automatically. It does three
-things: mounts the blackstart inventory, repoints `BLACKSTART_INVENTORY_PATH` at the
-mount, and replaces the port binding with a loopback one.
-
-Note the `!override` tag on `ports:`. Without it Compose *merges* port lists rather than
-replacing them, and you end up bound to `0.0.0.0:8080` **as well as** `127.0.0.1:8080`.
-Verify with `docker compose config | grep -A6 ports:` after any change.
+describes that host, not the project. Compose merges it automatically. It mounts the
+blackstart inventory and repoints `BLACKSTART_INVENTORY_PATH` at the mount; the port
+binding is left to the base compose file.
 
 ```yaml
 services:
@@ -75,9 +84,12 @@ services:
       - /home/ubuntu/inventory/montfort.json:/inventory/montfort.json:ro
     environment:
       BLACKSTART_INVENTORY_PATH: /inventory/montfort.json
-    ports: !override
-      - "127.0.0.1:8080:8080"
 ```
+
+If you ever put a `ports:` entry back, tag it `!override`. Compose *merges* port lists
+rather than replacing them, so a plain `- "127.0.0.1:8080:8080"` leaves you bound to
+`0.0.0.0:8080` **as well** — the opposite of what you asked for, and silently. Check with
+`docker compose config | grep -A6 ports:` after any change.
 
 The inventory mount is not optional cosmetics: the dashboard joins it at runtime, and
 without it every breaker shows as a bare `breaker_p19` instead of "Water heater".

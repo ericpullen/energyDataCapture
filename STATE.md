@@ -86,8 +86,7 @@ curl -s localhost:8080/healthz | jq       # health
 
 # the Lightsail host — see deploy/lightsail.md
 ssh -i ~/.ssh/energycap-lightsail.pem ubuntu@13.219.164.226
-ssh -f -N -i ~/.ssh/energycap-lightsail.pem -L 8090:127.0.0.1:8080 ubuntu@13.219.164.226
-open http://localhost:8090/ui             # 8090 because 8080 is the local collector
+open http://13.219.164.226:8080/ui        # firewalled to the house IP; no auth on it
 ```
 
 ### The one operational trap
@@ -170,8 +169,9 @@ as `data/spool.db.corrupt-<timestamp>` (gitignored).
 
 Deployed 2026-08-19. `deploy/lightsail.md` is the full record; the short version:
 `energycap`, `us-east-1a`, Ubuntu 24.04, `micro_3_0` (1 GB / 2 vCPU / 40 GB SSD / 2 TB
-transfer) at **$7/month all in**, static IP `13.219.164.226`, SSH open only from the house,
-8080 shut. It polls and spools exactly as the Mac does; **nothing touches S3 yet**, so
+transfer) at **$7/month all in**, static IP `13.219.164.226`, with SSH and 8080 both open
+only to the house IP. It polls and spools exactly as the Mac does; **nothing touches S3
+yet**, so
 `upload_hourly`, `rollup_hourly` and `daily_maintenance` fail cleanly as `job_failed`
 exactly as they did overnight at home.
 
