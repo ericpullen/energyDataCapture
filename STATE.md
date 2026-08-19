@@ -1,4 +1,4 @@
-# Where this project is — handoff, updated 2026-08-19
+# Where this project is — handoff, updated 2026-08-19 (afternoon)
 
 A snapshot for picking the work back up. `PLAN.md` is still the spec of record and
 `DEVIATIONS.md` (163+ entries) is still the record of every departure from it; this file
@@ -24,6 +24,7 @@ All seven build-order steps of `PLAN.md` §16, plus two things the spec did not 
 | Query surfaces | Glue tables with partition projection and real comments; README with executable DuckDB examples |
 | **Dashboard** (not in PLAN) | `GET /ui` — live values, sparklines, HVAC, hourly kWh math, 24h scrollback |
 | **Apple `container`** (not in PLAN) | `scripts/energycap-container.sh` + launchd, alongside Docker |
+| **Lightsail host** (not in PLAN) | `deploy/lightsail.md` + `deploy/lightsail-userdata.sh` — the collector's cloud home, $7/mo |
 | **`compare-meter`** (not in PLAN) | the utility meter against the summed feed CTs, hour by hour, with sample coverage |
 | **Public site** (not in PLAN) | `site/` → <https://energycap.ericpullen.com/>, the six URIs Green Button registration requires |
 
@@ -56,13 +57,14 @@ A ~19-hour continuous run in the container (2026-08-17 19:22Z → 2026-08-18 14:
 1. **Nothing has ever touched AWS.** No `S3_BUCKET` is set. `upload`, `compact-daily`,
    `rollup`, `build-dim`, `create-glue-tables` and `backfill` have never run against a real
    bucket, so `PLAN.md` §16's "full manual cycle" is outstanding, and the Athena side of the
-   README is desk-checked rather than executed. The EC2 move forces this one.
+   README is desk-checked rather than executed. Splitting the poller from the batch stages
+   forces this one, since S3 becomes the handoff between the two hosts.
    (LG&E is the exception: `fetch-greenbutton` and `compare-meter` are local-only by design
    and have both run against real data.)
 2. **The LaunchAgent has never been loaded** — KeepAlive, ThrottleInterval and reboot
    survival are untested. The container has only ever been started by hand.
-3. **`docker build` has never run** (no daemon on this machine). Docker is now the untested
-   path; Apple `container` is the proven one.
+3. ~~`docker build` has never run~~ — **resolved 2026-08-19**: it built clean on the
+   Lightsail host, first try, unmodified, on x86_64. Both runtimes now work.
 4. `sync_mode` is still `timeout` rather than `flood`. Everything works, but the bandwidth-1
    flood is not what is establishing the subscription set — `GET /apiversion` every 10s
    (DEVIATIONS #155) is the untried next lever if it ever matters.
@@ -76,11 +78,16 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # native
 uv run energycap run                      # Ctrl-C drains cleanly
-# container (preferred on this Mac; currently running)
+# container (Apple `container` on this Mac; currently running)
 ./scripts/energycap-container.sh run      # foreground; `stop` / `logs` / `status` too
 
 open http://localhost:8080/ui             # dashboard
 curl -s localhost:8080/healthz | jq       # health
+
+# the Lightsail host — see deploy/lightsail.md
+ssh -i ~/.ssh/energycap-lightsail.pem ubuntu@13.219.164.226
+ssh -f -N -i ~/.ssh/energycap-lightsail.pem -L 8090:127.0.0.1:8080 ubuntu@13.219.164.226
+open http://localhost:8090/ui             # 8090 because 8080 is the local collector
 ```
 
 ### The one operational trap
@@ -159,10 +166,81 @@ as `data/spool.db.corrupt-<timestamp>` (gitignored).
 
 ---
 
-## Next up: move the collector to EC2
+## The collector now runs on AWS Lightsail — phase 1 done
 
-Agreed 2026-08-18, **after the new breakers are installed and reporting**. The analysis behind
-it is worth not re-deriving:
+Deployed 2026-08-19. `deploy/lightsail.md` is the full record; the short version:
+`energycap`, `us-east-1a`, Ubuntu 24.04, `micro_3_0` (1 GB / 2 vCPU / 40 GB SSD / 2 TB
+transfer) at **$7/month all in**, static IP `13.219.164.226`, SSH open only from the house,
+8080 shut. It polls and spools exactly as the Mac does; **nothing touches S3 yet**, so
+`upload_hourly`, `rollup_hourly` and `daily_maintenance` fail cleanly as `job_failed`
+exactly as they did overnight at home.
+
+**Lightsail over EC2** because it is ~$4.40/month cheaper at the same RAM once EC2's
+public-IPv4 charge (~$3.65/mo) and EBS are counted, and it bundles a bigger disk. The
+cost is that Lightsail takes no IAM instance profile, so the S3 phase needs a scoped
+access key on the box rather than a role.
+
+**Two things got proven that had never run:**
+
+1. **`docker build` finally executed — and passed first try**, on x86_64, unmodified.
+   Both build-time assertions held: the tz database resolves inside `python:3.12-slim`
+   (so LOCAL-date partitioning is safe) and DuckDB httpfs 1.5.5 baked in. Docker is no
+   longer the untested path; only Apple `container` and Docker now both work.
+2. **Local-time scheduling on a UTC host.** Every job resolved to the right instant —
+   `upload_hourly` next at 16:05Z = 12:05 local. `timeutil` genuinely does not depend on
+   the process timezone.
+
+Measured: the whole process is **231 MB RSS** (pollers, WebSocket, scheduler, dashboard,
+pyarrow, DuckDB), which is what sized the 1 GB instance.
+
+**Both collectors are running in parallel right now.** Safe for the data — the spools are
+separate and nothing merges them — but the *upstream* is shared, so treat it as a soak,
+not a steady state. The Leviton hub now gets `bandwidth: 1` from two processes (never
+`bandwidth: 0`, so it should be benign, but it is unproven), and each host holds its own
+Carrier refresh chain. The token caches were deliberately **not** copied: Okta rotates the
+Carrier refresh token on every refresh (`carrier_auth.py:1291`), so a shared chain would
+have the two hosts invalidating each other. LG&E stays on the Mac for the same reason, so
+`greenbutton_daily` fails nightly on the instance by design.
+
+The cutover procedure — and why the soak rows must be discarded rather than merged — is in
+`deploy/lightsail.md`.
+
+## Still ahead: split the poller from the batch stages
+
+Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep
+the cheap always-on box doing only what must be live — Leviton poll + keepalive, Carrier
+status, `bryant_daily_energy`, `upload_hourly`, the spool purge, the health/UI server —
+and move `rollup_hourly`, compaction, `greenbutton_daily`, `build-dim`,
+`create-glue-tables` and `backfill` to the Mac Mini, which is already paid for.
+
+**Split by credential locality, not just by CPU.** That is the non-obvious part: two of
+the five jobs are pinned by which token cache they need, not by how heavy they are.
+`bryant_daily_energy` stays with the poller despite being daily batch, because Carrier's
+rotating refresh token should live on exactly one host; `greenbutton_daily` moves to the
+Mac for the mirror-image reason.
+
+**The real justification is durability, not money** — the spread between bundles is only
+~$7/month. In the split, S3 becomes the archive within an hour of collection and the Mac
+becomes *disposable*: if it is down for a week you lose nothing, you re-run the rollups
+over the missed range afterwards. That is what idempotent-over-a-date-range was for. It
+also shrinks the always-on box's AWS permissions to `PutObject` on one prefix.
+
+**What it costs to build:** `default_jobs()` (`runtime.py:557`) returns a hardcoded
+5-tuple with no filtering, so it needs a config knob selecting which jobs a process runs.
+The fiddly part is `daily_maintenance`, which bundles four steps that now belong on
+opposite sides — upload catch-up and the spool purge stay with the spool, compaction and
+the re-roll move to the Mac. Clean to separate (the purge only reads the spool's own
+`uploaded_at`), but it is a genuine change to the one component that is currently proven.
+
+**It cannot be step one:** S3 *is* the handoff between the halves, so PLAN.md §16's manual
+cycle has to come first. Good news is it changes nothing about what is deployed today.
+
+---
+
+## The EC2 analysis that led here
+
+Kept because the reasoning is worth not re-deriving, even though the answer became
+Lightsail:
 
 **Redundant collectors were considered and rejected.** Running two collectors and merging in S3
 looks attractive, and most of the design supports it — every stage is idempotent on the dedupe
@@ -182,28 +260,33 @@ faster than every 30 minutes.
 
 **So: one collector, somewhere reliable.** It fits well because this is a *cloud-to-cloud*
 poller — Leviton and Carrier are internet APIs, so the collector has no reason to be on the
-home LAN. Practicalities already established:
+home LAN. The spool already absorbs S3/network outages — it purges only rows that are both
+uploaded **and** aged — so the only gap redundancy would have covered is the process itself
+being down.
 
-- The image is **arm64**, so a **t4g.nano/micro** (Graviton) runs it unchanged, ~$3–8/month.
-- An **instance role instead of AWS keys on disk** — a real improvement over the Mac.
-- Storage is trivial: the spool grows ~35 MB/day at 7-day retention, so 8 GB is plenty.
-- Two loose ends: the blackstart inventory is a local file
-  (`~/code/blackstart/data/montfort.json`) that must be copied or baked in, and the dashboard
-  needs a reachability plan (Tailscale, or a security group locked to one IP).
-- The spool already absorbs S3/network outages — it purges only rows that are both uploaded
-  **and** aged — so the only gap redundancy would have covered is the process being down.
+Two things from that analysis turned out differently in practice, both recorded above: the
+image did **not** have to be arm64 (Lightsail is x86 and the Dockerfile is arch-agnostic by
+design), and the instance role is **not** available on Lightsail, which was the one real
+concession made for the price. **Lightsail Container Service was evaluated and rejected
+outright**: it has no persistent storage — the deployment spec has no volume parameter at
+all — so every deploy would drop the spool and the token caches, manufacturing exactly the
+gaps cardinal rule 1 exists to prevent.
 
-**Cheaper experiment worth doing first:** the launchd `KeepAlive` path has still never been
-loaded or tested. If the real enemy is the host rather than home internet, that fixes it for
-nothing.
+The launchd `KeepAlive` experiment was overtaken by events — the Mac is no longer intended
+to be the always-on host, so it stays untested and no longer matters much.
 
 ---
 
 ## Also open
 
-- **Nothing has ever touched AWS.** This is now the biggest gap, and the EC2 move forces it:
-  `upload`, `compact-daily`, `rollup`, `build-dim`, `create-glue-tables` and `backfill` have
-  never run against a real bucket. `PLAN.md` §16's "full manual cycle" is outstanding.
+- **Nothing has ever written to S3.** Still the biggest gap and now the blocker for the job
+  split above: `upload`, `compact-daily`, `rollup`, `build-dim`, `create-glue-tables` and
+  `backfill` have never run against a real bucket. `PLAN.md` §16's "full manual cycle" is
+  the next piece of work. (The account is `603071433332`; credentials via
+  `source ~/code/bryantDeployerRole.sh`, IAM user `bryantDataCollectorDeployer`, whose
+  Lightsail permissions are confirmed but whose S3/Glue permissions are not yet.)
+- **Cut the Mac over.** Both collectors are running; the handoff procedure is in
+  `deploy/lightsail.md`. Until then the Mac's spool is still the only copy of the history.
 - **New Leviton breakers** arriving ~2026-08-21. `energycap discover` prints a
   `channel_map.json` skeleton for anything unmapped; `channel_id` is `breaker_p{position}`,
   never the API's breaker id. Priority circuits, from the first real load analysis: **A-1-3
