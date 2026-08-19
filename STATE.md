@@ -1,4 +1,4 @@
-# Where this project is — handoff, 2026-08-18
+# Where this project is — handoff, updated 2026-08-19
 
 A snapshot for picking the work back up. `PLAN.md` is still the spec of record and
 `DEVIATIONS.md` (163+ entries) is still the record of every departure from it; this file
@@ -6,7 +6,7 @@ just says what is done, what is proven, and what is next.
 
 **Branch:** merged to `main` via [PR #1](https://github.com/ericpullen/energyDataCapture/pull/1)
 on 2026-08-18. `energycap-implementation` is merged and kept, not deleted.
-**Tests:** 1583 passing, 0 skipped, entirely offline (an autouse guard in
+**Tests:** 1595 passing, 0 skipped, entirely offline (an autouse guard in
 `tests/conftest.py` refuses any non-loopback socket).
 **Public site:** <https://energycap.ericpullen.com/> is live — see `docs/lge-greenbutton.md` §3a.
 
@@ -56,7 +56,9 @@ A ~19-hour continuous run in the container (2026-08-17 19:22Z → 2026-08-18 14:
 1. **Nothing has ever touched AWS.** No `S3_BUCKET` is set. `upload`, `compact-daily`,
    `rollup`, `build-dim`, `create-glue-tables` and `backfill` have never run against a real
    bucket, so `PLAN.md` §16's "full manual cycle" is outstanding, and the Athena side of the
-   README is desk-checked rather than executed.
+   README is desk-checked rather than executed. The EC2 move forces this one.
+   (LG&E is the exception: `fetch-greenbutton` and `compare-meter` are local-only by design
+   and have both run against real data.)
 2. **The LaunchAgent has never been loaded** — KeepAlive, ThrottleInterval and reboot
    survival are untested. The container has only ever been started by hand.
 3. **`docker build` has never run** (no daemon on this machine). Docker is now the untested
@@ -99,92 +101,115 @@ so no data is at risk, but watch the disk on a long capture.
 
 ---
 
-## Next up: LG&E Green Button Connect
+## LG&E Green Button — DONE
 
-The goal is automated meter data from LG&E's **MyMeter** site via **Green Button Connect My
-Data** — the OAuth'd ESPI API — rather than the manual "Download My Data" export.
+Registered, approved, authorised and fetching, all on 2026-08-18. `docs/lge-greenbutton.md` is
+the full record (registration, the live credential probe, and what the real API turned out to
+do); `DEVIATIONS.md` #166–#170 is the reasoning.
 
-`PLAN.md` §13 designed for this and deliberately stopped short of building it, so the
-groundwork is already in place and should not be redesigned:
+| | |
+|---|---|
+| `energycap greenbutton-authorize` | one browser round trip; tokens at `{SPOOL_DIR}/tokens/lge.json`, mode 600 |
+| `energycap fetch-greenbutton` | the Connect API → `energy/meter`, scheduled daily 09:15 local |
+| `energycap import-greenbutton` | a downloaded file → the **same** parser and writer |
+| `energycap compare-meter` | meter vs. summed feed CTs, hour by hour, with coverage |
+| `/ui` meter card | house, barn, freshness, and panels-vs-meter for the last complete day |
 
-- `source='lge'` is already in the source vocabulary (`model.SOURCES`), not a two-source enum.
-- `model.METER_SCHEMA` already exists: the canonical schema **plus `interval_s` (int32)**,
-  because meter data is *interval* data — `ts_utc` is the interval START, not an instant.
-  `MeterObservation` is its row type. This variant was built deliberately non-hacky.
-- `aws/s3io.py` already has `meter_key` → `energy/meter/year=YYYY/{source}-{YYYYMM}.parquet`
-  (filename convention invented in DEVIATIONS #3 — change it there if the real data wants
-  something else).
-- `config/channel_map.json` now maps **both real meters** — `1308468` (house) and `1326254`
-  (barn) — plus the two retired house ids the download republishes. **No placeholders remain**;
-  `build-dim` reports 26 channels across all three sources.
-- `energycap import-greenbutton` (a downloaded file) and `energycap fetch-greenbutton` (the
-  Connect API) both land through the same parser and writer.
+**Three things the live API did that no document predicted** (#169). `published-min` wants
+**ISO-8601 with a `Z`**, not the spec's epoch seconds — and camelCase `publishedMin` returns
+**200 while ignoring the filter**, handing back 49 MB instead of 415 KB. Every UsagePoint
+publishes the same energy as **both a 900s and a 3600s series**, which the canonical dedupe key
+silently collapsed until `model.METER_DEDUPE_KEY` gained `interval_s`; nothing may ever sum two
+interval series. And Connect exposes a meter the download does not.
 
-What §13 specifies for the mapping, once real data is in hand: ESPI `UsagePoint` →
-`device_id` (meter id); `MeterReading/ReadingType` → `metric` + `unit` (`kwh_interval`/`kWh`,
-`ccf_interval`/`CCF`); `IntervalBlock/IntervalReading` → rows, with the ESPI
-`powerOfTenMultiplier` applied. Glue table `energy_meter` with the same partition-projection
-treatment. Idempotent on the standard dedupe key.
+**Two meters, and they must never be summed.** `1308468` is the house (74–99 kWh/day);
+`1326254` is the **barn** — a separate service that is ~100% EV charging (Ford Charge Station
+Pro + Tesla Universal), ~150 W baseline with one large load late afternoon into evening peaking
+at 14.7 kW, 3.6–40 kWh/day. `channel_map.json` marks the house `primary: true`, which is how
+`compare-meter` and the meter card know which to compare; without it they refuse rather than
+guess. The download also republishes the house under two retired ids (944006, 944401) which are
+mapped and collapsed on sight.
 
-**Researched 2026-08-18 — see `docs/lge-greenbutton.md`**, which answers §13's "verify
-Connect availability when building" and drafts the registration form field by field. In short:
+**Result: the feed CTs read ~3.4% high against the meter** over fully covered hours. That is
+within the combined tolerance of the clamps and the meter, and it is the first evidence the
+sub-metering is trustworthy.
 
-- **Connect exists** and is real OAuth2/ESPI. §13's "assume manual import first" hedge is
-  resolved in Connect's favour.
-- **Registration is a one-shot, human-reviewed form** on the MyMeter site — one per vendor,
-  ever, covering all customers. There is **no developer portal and no published API base
-  URI**: the OAuth endpoints and the 3PV credentials arrive in the approval email. So no
-  client code should be written until it lands.
-- Granularity is **900 or 3600 seconds only**; a **daily subscription** is available, so the
-  fetch cadence can mirror the Bryant daily-energy stage.
-- **Connect is electric-only.** §13 assumed gas would come along; it does not, so
-  `import-greenbutton` becomes the permanent gas and bulk-history path rather than a stopgap
-  (DEVIATIONS #166).
+---
 
-**The registration was APPROVED on 2026-08-18**, the same day it was submitted, and **the
-Connect client is built** (`docs/lge-greenbutton.md` §4): OAuth2 with refresh renewal, a token
-cache at `{SPOOL_DIR}/tokens/lge.json` mode 600, `energycap greenbutton-authorize`,
-`energycap fetch-greenbutton`, `GET /greenbutton/callback` on the health port, and a
-`greenbutton_daily` job at 09:15 local that skips silently until someone authorises.
+## The spool was corrupted a second time — read this before touching it
 
-**Authorised and fetching, 2026-08-18.** Tokens are cached at `data/tokens/lge.json` (mode 600,
-on the bind mount, so the container sees them), and `fetch-greenbutton` pulls real intervals.
+**2026-08-18: I corrupted the spool by running `dashboard.build_snapshot(spool_path=…)` from
+the host** while the container was writing. Same signature as 2026-08-17
+(`Tree 2 page 2: btreeInitPage() returns error code 11`). The rule in "Operating it" above is
+not about the `sqlite3` shell — **any SQLite open from the host counts**, including a read-only
+one, because it still creates and mutates the `-shm` file. Read-only is not an exemption.
 
-The first live fetch found two silent corruptions and one surprise, all in `DEVIATIONS.md` #169:
-LG&E's `published-min` wants **ISO-8601 with a `Z`**, not the spec's epoch seconds — and
-camelCase `publishedMin` succeeds while ignoring the filter, returning 49 MB instead of 415 KB;
-every UsagePoint publishes the same energy as **both a 900s and a 3600s series**, which the
-canonical dedupe key silently collapsed until `METER_DEDUPE_KEY` gained `interval_s`; and
-Connect exposes a **second meter the download does not**.
+Fully recovered, and the procedure works:
 
-That second meter is the **barn** (`1326254`) — a separate service, confirmed by the owner.
-~150 W baseline around the clock with a single large load running late afternoon into evening
-at up to **14.7 kW**, 3.6–40 kWh/day. Nothing sub-meters it, so the meter row is the only
-visibility out there. Both meters are now in `channel_map.json` with the two retired house ids,
-and **the map has no placeholders left** — 26 real channels across all three sources.
+```bash
+./scripts/energycap-container.sh stop                     # clean, checkpoints the WAL
+sqlite3 spool.db ".recover" | sqlite3 spool.recovered.db  # rows land in lost_and_found
+# lost_and_found: `id` is the rowid, c1..c11 are ts_utc … uploaded_at
+# then INSERT them into a database created by open_spool(), so the real schema and
+# indexes are rebuilt; verify integrity_check, row count and span before swapping in.
+```
 
-**Meter data did not wait for it.** Download My Data needs no OAuth, so
-`energycap import-greenbutton` is built and has been run against a real 10-day export, and
-`energycap compare-meter` puts it beside the panels. Both are local-only — no S3 needed.
+94,637 of ~94,670 rows recovered — about one 30-second cycle lost. The corrupt file is kept
+as `data/spool.db.corrupt-<timestamp>` (gitignored).
 
-> **First measured result** (unchanged after every fix since): over the 13 hours with full
-> sample coverage,
-> meter **46.295 kWh** against summed feed CTs **47.878 kWh** — the panels read
-> **3.4% high**. Within the combined tolerance of the clamps and the meter, and the first
-> evidence that the sub-metering is trustworthy.
+---
 
-Three things the real export taught us, all in `DEVIATIONS.md` #167–#168: it is **15-minute**
-data; LG&E links **ReadingType → MeterReading** rather than the reverse, so the obvious parser
-finds nothing; and it carries **three UsagePoint ids with an identical series**, which would
-treble the meter reading if summed.
+## Next up: move the collector to EC2
 
-Still unknown, and to be asked in the approval correspondence: the endpoints and any sandbox,
-the maximum accepted `HistoryLength` (the draft guesses 730 days), token lifetimes and
-re-consent schedule, publication lag and whether readings get revised, and whether raw and
-VEE readings arrive as separate `MeterReading`s — if so they need distinct `metric` values
-rather than colliding on the dedupe key.
+Agreed 2026-08-18, **after the new breakers are installed and reporting**. The analysis behind
+it is worth not re-deriving:
 
-Worth knowing that the old collector's frontend already parsed LG&E exports client-side:
-`~/code/bryantDataCollector/frontend/index.html` handles an uploaded `Usage.csv` **and**
-Green Button ESPI XML. That parsing is a useful reference for the real shape of LG&E's
-export, even though the new pipeline will not reuse the code.
+**Redundant collectors were considered and rejected.** Running two collectors and merging in S3
+looks attractive, and most of the design supports it — every stage is idempotent on the dedupe
+key. But `new_cycle(ts_utc=now_utc())` stamps each cycle with *that collector's* clock, so two
+collectors produce different `ts_utc` for the same reading, the dedupe key does not collapse
+them, `sample_count` doubles and **every kWh figure doubles, silently**. Fixing that needs
+either timestamp quantisation to the poll grid (which redefines `ts_utc`) or hour-granularity
+failover with a collector id (never stitch *within* an hour — that is where `sample_count` goes
+wrong). Part filenames are deterministic, so they would also collide until the key carries a
+collector id.
+
+**And it would not buy much.** Both collectors poll the same two clouds, so a Leviton or
+Carrier outage takes out all of them; redundancy only covers local failure. Meanwhile it
+doubles load on the fragile part — two poll loops, two WebSockets, two keepalive loops sending
+`bandwidth: 1` to the same hub every 50s — and nothing else in the ecosystem polls Carrier
+faster than every 30 minutes.
+
+**So: one collector, somewhere reliable.** It fits well because this is a *cloud-to-cloud*
+poller — Leviton and Carrier are internet APIs, so the collector has no reason to be on the
+home LAN. Practicalities already established:
+
+- The image is **arm64**, so a **t4g.nano/micro** (Graviton) runs it unchanged, ~$3–8/month.
+- An **instance role instead of AWS keys on disk** — a real improvement over the Mac.
+- Storage is trivial: the spool grows ~35 MB/day at 7-day retention, so 8 GB is plenty.
+- Two loose ends: the blackstart inventory is a local file
+  (`~/code/blackstart/data/montfort.json`) that must be copied or baked in, and the dashboard
+  needs a reachability plan (Tailscale, or a security group locked to one IP).
+- The spool already absorbs S3/network outages — it purges only rows that are both uploaded
+  **and** aged — so the only gap redundancy would have covered is the process being down.
+
+**Cheaper experiment worth doing first:** the launchd `KeepAlive` path has still never been
+loaded or tested. If the real enemy is the host rather than home internet, that fixes it for
+nothing.
+
+---
+
+## Also open
+
+- **Nothing has ever touched AWS.** This is now the biggest gap, and the EC2 move forces it:
+  `upload`, `compact-daily`, `rollup`, `build-dim`, `create-glue-tables` and `backfill` have
+  never run against a real bucket. `PLAN.md` §16's "full manual cycle" is outstanding.
+- **New Leviton breakers** arriving ~2026-08-21. `energycap discover` prints a
+  `channel_map.json` skeleton for anything unmapped; `channel_id` is `breaker_p{position}`,
+  never the API's breaker id. Priority circuits, from the first real load analysis: **A-1-3
+  (dryer)** — a noon spike of ~5.4 kW cycling on a thermostat was identified as the dryer purely
+  from the feed legs, because it was balanced across both — then **A-10-12** (kitchen
+  counter/dishwasher MWBC), which straddles both legs and will otherwise keep masquerading as a
+  240 V load.
+- The chart shows at most three series, so a derived "Panel A total (A+B)" series was offered
+  and not yet built. Leg-level series read as though a 2-pole load exceeds its own panel feed.
