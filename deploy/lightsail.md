@@ -155,33 +155,51 @@ git pull && docker compose build && docker compose up -d   # deploy a new revisi
 
 Logs are capped by compose at 10 MB × 5 files, and journald at 500 MB.
 
-## Cutting over from the Mac
+## The cutover from the Mac — done 2026-08-19
 
-Both collectors currently run in parallel. That is safe for the *data* — the spools are
-separate and nothing merges them — but the upstream is shared, so it is a soak test, not
-a steady state. Two things to watch: the Leviton hub now receives `bandwidth: 1` from two
-processes (never `bandwidth: 0`, so it should be benign but is unproven), and each host
-holds an independent Carrier refresh chain.
+The Mac's whole history moved to the instance and the Mac collector was stopped. Final
+state: **181,371 rows** spanning `2026-08-17T19:22:55Z .. 2026-08-19T15:55:06Z`,
+14 channels, `integrity_check` ok. There is one collector again.
 
-When ready to hand off:
+The two collectors had overlapped for ~25 minutes, which is the part that needed care.
+**The overlap was dropped, not merged.** Both were sampling the same readings on
+different clocks, so a union would have given each channel ~240 samples in that hour
+instead of ~120 — and since `kwh = mean_watts * sample_count * poll_interval_s / 3.6e6`,
+that doubles every kWh figure for the overlap. The dedupe key cannot save you here:
+`ts_utc` differs, so the rows are not duplicates by the key even though they are
+duplicates in fact.
+
+What *was* carried across is the instance's rows strictly **after** the Mac's last
+timestamp — 102 of them, covering a window the Mac never saw. That gives no double count
+and no hole: the boundary went `15:53:43.475Z -> 15:54:05.761Z`, a 22-second step, under
+one poll interval.
+
+The procedure, if it is ever needed again:
 
 ```bash
-# on the Mac — clean stop checkpoints the WAL
+# on the Mac -- a clean stop checkpoints the WAL, after which spool.db is
+# self-contained and the -wal/-shm are gone. Verify BEFORE copying.
 ./scripts/energycap-container.sh stop
+sqlite3 data/spool.db "PRAGMA integrity_check;"
+scp -i ~/.ssh/energycap-lightsail.pem data/spool.db ubuntu@<ip>:/tmp/mac-spool.db
 
-# copy all three files; spool.db alone is ~4 KB and the data is in the -wal
-scp -i ~/.ssh/energycap-lightsail.pem data/spool.db* ubuntu@13.219.164.226:/tmp/
-
-# on the instance: stop, replace the volume contents, restart
+# on the instance -- stop first; the volume must not be written while spliced
 docker compose stop
-docker run --rm -v energycap-data:/data -v /tmp:/in alpine \
-  sh -c 'cp /in/spool.db* /data/ && chown 10001:10001 /data/spool.db*'
+sudo python3 /tmp/splice.py        # see the docstring; drops overlap, keeps the tail
+VOL=/var/lib/docker/volumes/energycap-data/_data
+sudo cp $VOL/spool.db /tmp/instance-soak-spool.db.bak
+sudo rm -f $VOL/spool.db-wal $VOL/spool.db-shm      # stale WAL against a new file
+sudo cp /tmp/merged-spool.db $VOL/spool.db
+sudo chown 10001:10001 $VOL/spool.db                # container runs non-root
 docker compose up -d
 ```
 
-Discard whatever the instance spooled during the soak rather than merging it — those
-rows are duplicate readings of what the Mac already captured, stamped with a different
-`ts_utc`, and merging them would inflate `sample_count` and therefore every kWh figure.
+Leave `tokens/` and `status.json` in the volume alone — only `spool.db` is replaced.
+Deleting the stale `-wal`/`-shm` matters: SQLite would otherwise try to apply a WAL
+belonging to the file you just overwrote.
+
+The Mac's `data/spool.db` is untouched on that machine and is the pre-migration backup.
+Keep it until the instance has a few days of clean running behind it.
 
 ## Cost
 

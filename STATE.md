@@ -193,17 +193,26 @@ access key on the box rather than a role.
 Measured: the whole process is **231 MB RSS** (pollers, WebSocket, scheduler, dashboard,
 pyarrow, DuckDB), which is what sized the 1 GB instance.
 
-**Both collectors are running in parallel right now.** Safe for the data — the spools are
-separate and nothing merges them — but the *upstream* is shared, so treat it as a soak,
-not a steady state. The Leviton hub now gets `bandwidth: 1` from two processes (never
-`bandwidth: 0`, so it should be benign, but it is unproven), and each host holds its own
-Carrier refresh chain. The token caches were deliberately **not** copied: Okta rotates the
-Carrier refresh token on every refresh (`carrier_auth.py:1291`), so a shared chain would
-have the two hosts invalidating each other. LG&E stays on the Mac for the same reason, so
-`greenbutton_daily` fails nightly on the instance by design.
+**The cutover is done — the Mac collector is stopped and there is one collector again.**
+The full history moved across: **181,371 rows**, `2026-08-17T19:22:55Z .. 15:55:06Z`,
+14 channels, `integrity_check` ok, and the instance has been polling on top of it since.
 
-The cutover procedure — and why the soak rows must be discarded rather than merged — is in
-`deploy/lightsail.md`.
+The ~25 minutes where both collectors ran needed care, and the rule is worth remembering:
+**the overlap was dropped, not merged.** Both hosts sampled the same readings on different
+clocks, so a union would have given each channel ~240 samples in that hour instead of
+~120, doubling every kWh figure. The dedupe key does not protect you — `ts_utc` differs,
+so the rows are not duplicates *by the key* even though they are duplicates *in fact*.
+Only the instance's 102 rows strictly after the Mac's last timestamp were carried over;
+the boundary step was 22 seconds, under one poll interval, so there is no gap either.
+`deploy/spool-splice.py` and `deploy/lightsail.md` have the procedure.
+
+The Mac's `data/spool.db` is untouched and is the pre-migration backup — keep it until the
+instance has a few clean days behind it.
+
+The token caches were deliberately **not** copied: Okta rotates the Carrier refresh token
+on every refresh (`carrier_auth.py:1291`), so a shared chain would have the two hosts
+invalidating each other. LG&E stays on the Mac for the same reason, so `greenbutton_daily`
+fails nightly on the instance by design.
 
 ## Still ahead: split the poller from the batch stages
 
@@ -285,8 +294,10 @@ to be the always-on host, so it stays untested and no longer matters much.
   the next piece of work. (The account is `603071433332`; credentials via
   `source ~/code/bryantDeployerRole.sh`, IAM user `bryantDataCollectorDeployer`, whose
   Lightsail permissions are confirmed but whose S3/Glue permissions are not yet.)
-- **Cut the Mac over.** Both collectors are running; the handoff procedure is in
-  `deploy/lightsail.md`. Until then the Mac's spool is still the only copy of the history.
+- **The Lightsail spool is now the only live copy of the history** (the Mac's stopped
+  `data/spool.db` is a static backup as of 2026-08-19 15:55Z). Nothing is uploaded, so
+  nothing purges and it just grows — ~35 MB/day against 40 GB. Getting S3 working is what
+  turns this from "one disk" into a real archive.
 - **New Leviton breakers** arriving ~2026-08-21. `energycap discover` prints a
   `channel_map.json` skeleton for anything unmapped; `channel_id` is `breaker_p{position}`,
   never the API's breaker id. Priority circuits, from the first real load analysis: **A-1-3
