@@ -99,12 +99,13 @@ without it every breaker shows as a bare `breaker_p19` instead of "Water heater"
 - **`data/tokens/*.json`.** Okta rotates the Carrier refresh token on every refresh
   (`sources/carrier_auth.py:1291`), so two hosts sharing one cached chain take turns
   invalidating each other. Each host bootstraps its own from `.env`. The same reasoning
-  applies to `tokens/lge.json`.
+  applies to `tokens/lge.json`, which is why LG&E was re-authorised here from scratch
+  (`energycap greenbutton-authorize`) rather than copied — see below.
 - **`S3_BUCKET`.** Present in `.env` but empty, so `upload_hourly`, `rollup_hourly` and
   `daily_maintenance` fail cleanly as `job_failed` and the poll loops are untouched.
   That is the intended phase-1 behaviour, not a defect.
-- **`greenbutton_daily`** will fail nightly at 09:15 for want of a token cache. Expected;
-  LG&E stays on the Mac.
+- ~~`greenbutton_daily` will fail for want of a token cache~~ — **resolved 2026-08-19**,
+  see below. LG&E now lives here, not on the Mac.
 - **The spool.** The instance started empty on purpose — see the handoff below.
 
 ## Recreating it from scratch
@@ -200,6 +201,36 @@ belonging to the file you just overwrote.
 
 The Mac's `data/spool.db` is untouched on that machine and is the pre-migration backup.
 Keep it until the instance has a few days of clean running behind it.
+
+## LG&E Green Button on this host
+
+Authorised here 2026-08-19, so `greenbutton_daily` (09:15 local) runs on the instance and
+`{SPOOL_DIR}/tokens/lge.json` is the live copy of a **rotating** refresh token. That
+reverses the earlier plan to keep LG&E on the Mac: whichever host holds this file is the
+one that can refresh it, and there must only ever be one.
+
+Re-authorising is a two-step human round trip, because someone has to consent in MyMeter:
+
+```bash
+docker compose exec energycap energycap greenbutton-authorize
+# open the printed URL, sign in with the LOCAL MyMeter account (not My Account),
+# then take the code off https://energycap.ericpullen.com/greenbutton/callback/
+docker compose exec energycap energycap greenbutton-authorize --code "<code>" --state "<state>"
+docker compose exec energycap energycap fetch-greenbutton --start 2026-08-01 --end 2026-08-19
+```
+
+The `state` is persisted to the token cache by step one, so the two `exec` calls do not
+have to share a process. **The code expires in minutes** — do it in one sitting.
+
+The callback page's "hand off to the collector" button points at `http://localhost:8080`,
+which only works when a collector is running on the machine holding the browser. From a
+laptop against this instance it will not — use the code the page prints underneath it.
+
+First fetch here returned 4,398 rows over 2026-08-01..19: both meters (`1308468` house,
+`1326254` barn), both interval series (3,519 at 900s, 879 at 3600s), 4,198 reverse-flow
+readings skipped. Note Connect does **not** serve the two retired house ids (944006,
+944401) that the Download export republishes — consistent with the two APIs disagreeing
+about which meters exist.
 
 ## Cost
 

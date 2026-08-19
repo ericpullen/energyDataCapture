@@ -211,22 +211,36 @@ instance has a few clean days behind it.
 
 The token caches were deliberately **not** copied: Okta rotates the Carrier refresh token
 on every refresh (`carrier_auth.py:1291`), so a shared chain would have the two hosts
-invalidating each other. LG&E stays on the Mac for the same reason, so `greenbutton_daily`
-fails nightly on the instance by design.
+invalidating each other. Each host bootstraps its own.
+
+**LG&E was re-authorised on the instance** rather than copied, for the same reason, and
+that reverses the earlier plan to keep Green Button on the Mac: `tokens/lge.json` holds a
+rotating refresh token, so whichever host has the file is the only one that can refresh
+it. When the job split happens, `greenbutton_daily` should stay **wherever that token
+lives** — which is now the instance — not move to the Mac.
+
+First fetch there returned 4,398 rows over 2026-08-01..19: both meters, both interval
+series (3,519 at 900s, 879 at 3600s), 4,198 reverse-flow readings skipped. Connect still
+does not serve the two retired house ids the Download export republishes.
+
+**The migration validated itself.** With the spool history in place the meter card ran a
+full-day comparison on **24 of 24 hours with zero exclusions** — meter 77.614 kWh vs
+panels 75.186, **−3.1%**, consistent with the ~3.4% measured on the Mac. Nothing was lost
+in the move.
 
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep
 the cheap always-on box doing only what must be live — Leviton poll + keepalive, Carrier
 status, `bryant_daily_energy`, `upload_hourly`, the spool purge, the health/UI server —
-and move `rollup_hourly`, compaction, `greenbutton_daily`, `build-dim`,
-`create-glue-tables` and `backfill` to the Mac Mini, which is already paid for.
+and move `rollup_hourly`, compaction, `build-dim`, `create-glue-tables` and `backfill` to
+the Mac Mini, which is already paid for.
 
 **Split by credential locality, not just by CPU.** That is the non-obvious part: two of
-the five jobs are pinned by which token cache they need, not by how heavy they are.
-`bryant_daily_energy` stays with the poller despite being daily batch, because Carrier's
-rotating refresh token should live on exactly one host; `greenbutton_daily` moves to the
-Mac for the mirror-image reason.
+the five jobs are pinned by which token cache they need, not by how heavy they are. Both
+`bryant_daily_energy` and `greenbutton_daily` stay on the instance despite being daily
+batch, because Carrier's and LG&E's refresh tokens both rotate and each must live on
+exactly one host — and as of 2026-08-19 that host is the instance for both.
 
 **The real justification is durability, not money** — the spread between bundles is only
 ~$7/month. In the split, S3 becomes the archive within an hour of collection and the Mac
