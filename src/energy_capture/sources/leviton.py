@@ -154,6 +154,7 @@ __all__ = [
     "LevitonSource",
     "LevitonTokenCache",
     "breaker_channel_id",
+    "MIN_BREAKER_POSITION",
     "ct_channel_id",
     "panel_leg_channel_id",
 ]
@@ -185,6 +186,18 @@ RETRY_WAITS_S: Final[tuple[float, ...]] = (2.0, 5.0)
 #: ``model`` values that mark a dumb-breaker placeholder object, not a meter
 #: (PLAN.md §6.3). They report no power and are skipped entirely.
 PLACEHOLDER_BREAKER_MODELS: Final[frozenset[str]] = frozenset({"NONE", "NONE-1", "NONE-2"})
+
+#: The lowest physical breaker position a Leviton load center has. Slot numbering
+#: starts at 1, so anything below this is not a slot — it is the absence of one.
+#:
+#: Leviton omits ``position`` while a breaker is enrolled but not yet located
+#: ("Un-Positioned Breaker" in the app, cleared with the positioning wizard), and
+#: ``aioleviton`` substitutes ``0`` for the missing key
+#: (``position=data.get("position", 0)`` against an ``int``-typed field). That
+#: default is a fiction this pipeline must not launder into an identity: rows
+#: under ``breaker_p0`` claim a slot the panel does not have, and cardinal rule 1
+#: says an unknown stays unknown rather than becoming a plausible-looking value.
+MIN_BREAKER_POSITION: Final[int] = 1
 
 #: ``IotCt.usageType`` marking a clamp that is not installed on anything (§6.3).
 CT_USAGE_NOT_USED: Final[str] = "NOT_USED"
@@ -389,6 +402,24 @@ class BreakerReading:
     def is_placeholder(self) -> bool:
         """True for the ``NONE``/``NONE-1``/``NONE-2`` dumb-breaker stand-ins."""
         return self.model.strip().upper() in PLACEHOLDER_BREAKER_MODELS
+
+    @property
+    def is_unpositioned(self) -> bool:
+        """True when the cloud has not told us which slot this breaker is in.
+
+        A newly enrolled smart breaker reports its electrical data before the
+        installer has run the positioning wizard, so it arrives with no
+        ``position`` — which reaches us as :data:`MIN_BREAKER_POSITION` minus
+        one or lower (``aioleviton`` defaults the missing key to ``0``). It is a
+        transient state, minutes to hours wide, and it resolves itself the
+        moment the breaker is located in the app.
+
+        Such a breaker is skipped exactly like a placeholder: ``channel_id`` is
+        ``breaker_p{position}`` and position IS the identity (§6.5), so there is
+        no honest channel to write to. Recording it as ``breaker_p0`` would
+        invent a slot; guessing the real one would be worse.
+        """
+        return self.position < MIN_BREAKER_POSITION
 
     @property
     def is_multi_pole(self) -> bool:
@@ -1060,6 +1091,11 @@ class LevitonSource(BaseSource):
         self._last_withheld_reason: str | None = None
         self._reconciles = 0
         self._last_reconcile_drift: dict[str, int] | None = None
+        #: ``(device_id, api_id)`` of every un-positioned breaker already WARNed
+        #: about. The condition persists until somebody runs the positioning
+        #: wizard, and a 30s loop would otherwise write the same line 2,880
+        #: times a day; the distinct count stays visible in ``status.json``.
+        self._warned_unpositioned: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------- accessors
     @property
@@ -1514,6 +1550,10 @@ class LevitonSource(BaseSource):
                 else None
             ),
             "last_reconcile_drift": self._last_reconcile_drift,
+            # Distinct breakers currently producing no rows because the cloud
+            # has not told us their slot. Non-zero means somebody owes the
+            # Leviton app a trip through the positioning wizard.
+            "unpositioned_breakers": len(self._warned_unpositioned),
         }
 
     # -------------------------------------------------------- REST reconcile
@@ -1645,6 +1685,11 @@ class LevitonSource(BaseSource):
             if breaker.is_placeholder:
                 # A dumb-breaker placeholder: no meter, nothing to record.
                 continue
+            if breaker.is_unpositioned:
+                # Enrolled but not yet located, so there is no slot to name it
+                # after. No rows — the same treatment an unrecognised enum gets.
+                self._warn_unpositioned_once(device_id, breaker)
+                continue
             cycle.add_metrics(device_id, breaker.channel_id, breaker.metrics())
 
         for ct in snapshot.cts:
@@ -1654,6 +1699,36 @@ class LevitonSource(BaseSource):
                 # A single-leg CT reports nulls for leg B; add() drops them, so
                 # leg B contributes no rows at all rather than zeros.
                 cycle.add_metrics(device_id, ct_channel_id(ct.channel, leg), ct.leg_metrics(leg))
+
+    def _warn_unpositioned_once(self, device_id: str, breaker: BreakerReading) -> None:
+        """WARN the first time each un-positioned breaker is seen this process.
+
+        Loud once rather than silent, because the operator is the only one who
+        can fix it: the remedy is the positioning wizard in the Leviton app, and
+        until it runs, a live circuit is producing no rows at all. Naming the
+        breaker (its cloud id, its user-entered name, its model) is what makes
+        it findable in an app that identifies breakers by slot.
+        """
+        key = (device_id, breaker.api_id or breaker.serial_number or "")
+        if key in self._warned_unpositioned:
+            return
+        self._warned_unpositioned.add(key)
+        self._log.warning(
+            "leviton_breaker_unpositioned",
+            device_id=device_id,
+            api_id=breaker.api_id,
+            name=breaker.name,
+            model=breaker.model,
+            poles=breaker.poles,
+            position=breaker.position,
+            rows=0,
+            detail=(
+                "the cloud reports no position for this breaker, so it has no "
+                "channel_id (channel_id is breaker_p{position}); it produces no "
+                "rows until somebody resolves the 'Un-Positioned Breaker' "
+                "prompt in the Leviton app with the positioning wizard"
+            ),
+        )
 
     # ------------------------------------------------------------- keepalive
     async def keepalive_round(self) -> None:

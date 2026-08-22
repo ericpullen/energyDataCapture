@@ -347,6 +347,47 @@ def test_placeholder_breakers_and_unused_cts_are_shown_but_marked_skipped(
     assert "breaker_p11" not in skipped
 
 
+def test_an_unpositioned_breaker_is_shown_as_skipped_not_hidden(
+    capsys: pytest.CaptureFixture[str],
+    map_path: Path,
+    leviton_client: FakeLevitonClient,
+    leviton_source: LevitonSource,
+) -> None:
+    """The table is where an operator finds out why a live circuit has no rows.
+
+    A breaker enrolled but not yet located reports watts and no position, so the
+    collector cannot name it and writes nothing. Hiding it would leave a real
+    circuit missing from the data with nothing anywhere to explain it; offering
+    it for mapping would invite a channel_map entry for `breaker_p0`, a slot no
+    panel has. So it is listed, marked SKIP, and never mappable.
+    """
+    leviton_client.breakers[HUB_A].extend(leviton_fixture("breakers_unpositioned"))
+
+    discover(map_path=map_path, leviton_source=leviton_source, sources=(SOURCE_LEVITON,))
+    out = capsys.readouterr().out
+
+    assert "SKIP: no position from the cloud" in out
+    assert "positioning wizard" in out
+    # Named by something an operator can act on, since the slot is exactly what
+    # is missing.
+    assert "Guest bath" in out and "Well pump" in out
+
+    document = live_channels(map_path)
+    live = {c["channel_id"] for c in document["channels"]}
+    skipped = {c["channel_id"]: c for c in document["skipped_channels"]}
+
+    assert "breaker_p0" not in live
+    assert skipped["breaker_p0"]["mappable"] is False
+    assert "positioning wizard" in skipped["breaker_p0"]["skip_reason"]
+
+    # No skeleton entry either: build-dim must not be told to label a fiction.
+    skeleton = json.dumps(live_channels(map_path)["skeleton"])
+    assert "breaker_p0" not in skeleton
+
+    # ... and the positioned breakers are not collateral damage.
+    assert "breaker_p11" in live
+
+
 def test_an_lsbma_accessory_is_labelled_rather_than_hidden(
     capsys: pytest.CaptureFixture[str],
     map_path: Path,

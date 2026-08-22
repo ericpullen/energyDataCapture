@@ -161,6 +161,10 @@ PLACEHOLDER_TOKEN: Final[str] = "PLACEHOLDER"
 _SKIP_PLACEHOLDER: Final[str] = "SKIP: placeholder model (dumb breaker, no meter)"
 _SKIP_CT_UNUSED: Final[str] = "SKIP: usageType=NOT_USED (clamp on nothing)"
 _SKIP_ZONE_DISABLED: Final[str] = "SKIP: enabled!=on (phantom zone, not installed)"
+_SKIP_UNPOSITIONED: Final[str] = (
+    "SKIP: no position from the cloud (un-positioned breaker — run the "
+    "positioning wizard in the Leviton app)"
+)
 _NOTE_ACCESSORY: Final[str] = "LSBMA accessory — metered, mapped like a breaker"
 _NOTE_SINGLE_LEG: Final[str] = "single-leg CT — leg B reported nothing this cycle"
 
@@ -637,6 +641,11 @@ async def _collect_leviton(
             for breaker in snapshot.breakers:
                 model_name = (breaker.model or "").strip().upper()
                 placeholder = breaker.is_placeholder
+                # Shown, never hidden: an un-positioned breaker is a live
+                # circuit producing no rows, and this table is where an operator
+                # would look to find out why. Its channel_id is displayed as the
+                # fiction it is, marked SKIP.
+                unpositioned = breaker.is_unpositioned
                 channel_id = breaker_channel_id(breaker.position)
                 note = _NOTE_ACCESSORY if model_name in ACCESSORY_BREAKER_MODELS else None
                 channels.append(
@@ -656,8 +665,14 @@ async def _collect_leviton(
                             "connected": breaker.connected,
                             "watts": breaker.metrics().get("watts"),
                         },
-                        mappable=not placeholder,
-                        skip_reason=_SKIP_PLACEHOLDER if placeholder else None,
+                        mappable=not placeholder and not unpositioned,
+                        skip_reason=(
+                            _SKIP_PLACEHOLDER
+                            if placeholder
+                            else _SKIP_UNPOSITIONED
+                            if unpositioned
+                            else None
+                        ),
                         note=note,
                     )
                 )

@@ -320,9 +320,39 @@ A third, happier corroboration stands unchanged: Leviton's own label for Panel B
 **"Heat Strip Subpanel"** — independent confirmation of the feed-through finding and of
 what `ct_2_a`/`ct_2_b` are clamped on.
 
+### The install also exposed a real bug: `breaker_p0`
+
+Both hubs briefly produced a channel that does not exist. `breaker_p0` carried genuine
+readings (10 W, 0.174 A) and went silent at 16:47Z — the 37 minutes between plugging the
+breakers in and finishing the positioning wizard in the Leviton app.
+
+Cause, in three steps: Leviton omits `position` while a breaker is enrolled but **not yet
+located** ("Un-Positioned Breaker" in its UI, a normal part of every install);
+`aioleviton` defaults the missing key to `0` (`position=data.get("position", 0)` against an
+`int` field); and §6.5's `breaker_p{position}` turns that default into an identity. Real
+watts from a real circuit, filed under a slot no Leviton panel has — they number from 1.
+
+Fixed: `BreakerReading.is_unpositioned` is checked in `_map_snapshot`, which is the
+package's only mapper, so one guard covers REST and WebSocket both. Such a breaker produces
+no rows and is WARNed once per process (`leviton_breaker_unpositioned`), with the count on
+`/healthz` as `leviton_ingest.unpositioned_breakers`; `discover` lists it marked SKIP and
+non-mappable so nobody is invited to map a fiction. Same treatment §7.3 gives an
+unrecognised enum string. DEVIATIONS #171 has the reasoning.
+
+**Left alone deliberately:** the ~74 rows already written under `breaker_p0` stay (rule 2 —
+they are what the API said, they are flagged unmapped by `build-dim` and `/ui`, and nothing
+sums by breaker yet), and `aioleviton` is not patched or vendored — the guard is correct
+either way, and `from_model`'s `or 0` catches a future upstream `None` too.
+
+Worth knowing: **neither public integration handles this.** `rwoldberg/ldata-ha` (66★)
+filters the same placeholder models, then trusts `position` verbatim — an un-positioned
+breaker falls through its `_LEG1_POSITIONS` check and is silently attributed to leg 2, and
+its panel card renders from position 1 up, so the entity exists but never appears.
+`gtxaspec/leviton-load-center` calls it "Breaker 0". There was no prior art to copy.
+
 ### Tests
 
-`uv run pytest` — 1592 passing. `tests/fixtures/blackstart/montfort_trimmed.json` was
+`uv run pytest` — 1599 passing (7 new: the un-positioned guard, both payload spellings, the once-only WARN, the upstream coercion it defends against, and the discover SKIP row). `tests/fixtures/blackstart/montfort_trimmed.json` was
 regenerated as a faithful trim of the corrected inventory (11 devices → 24). **3
 pre-existing failures** are environmental, not code: real `LGE_*` credentials are exported
 in the shell, so the three tests asserting that no LG&E credential has a default value

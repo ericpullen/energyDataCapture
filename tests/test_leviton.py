@@ -62,6 +62,7 @@ from energy_capture.sources.leviton import (
     KEEPALIVE_INTERVAL_S,
     LOGIN_FAILURE_BACKOFF_S,
     LOGIN_MIN_INTERVAL_S,
+    MIN_BREAKER_POSITION,
     STATUS_SECTION_INGEST,
     VALUE_SOURCE_REST,
     VALUE_SOURCE_REST_FALLBACK,
@@ -417,6 +418,114 @@ def test_every_placeholder_model_spelling_is_recognised(model: str) -> None:
 
 def test_a_real_breaker_model_is_not_a_placeholder() -> None:
     assert not BreakerReading(position=1, poles=1, model="LB230-2P").is_placeholder
+
+
+# ------------------------------------------------- un-positioned breakers
+# Observed on both live hubs on 2026-08-22, in the 37 minutes between plugging
+# in 20 smart breakers and finishing the positioning wizard. Leviton omits
+# `position` while a breaker is enrolled but not yet located, `aioleviton`
+# defaults the missing key to 0, and `breaker_p{position}` turned that default
+# into rows on a slot no panel has.
+
+
+async def test_an_unpositioned_breaker_produces_no_rows(
+    started_source: LevitonSource,
+    client: FakeLevitonClient,
+) -> None:
+    """No position means no channel_id, so it means no rows (cardinal rule 1).
+
+    ``breaker_p0`` is not a slot — Leviton panels number from 1. Writing to it
+    would attribute a real circuit's watts to a fiction, and a downstream reader
+    cannot tell an invented slot from a real one.
+    """
+    client.breakers[HUB_A].extend(load_fixture("breakers_unpositioned"))
+    await started_source.discover(force=True)
+
+    rows = await started_source.poll()
+    channel_ids = {row.channel_id for row in rows}
+
+    assert "breaker_p0" not in channel_ids
+    # Both spellings of the state are in the fixture and both are caught: the
+    # key absent, and the key present but explicitly null.
+    assert len([b for b in client.breakers[HUB_A] if not b.get("position")]) == 2
+    assert not any(cid.startswith("breaker_p0") for cid in channel_ids)
+
+    # ...and the guard is narrow: every positioned breaker still reports.
+    assert {"breaker_p11", "breaker_p3", "breaker_p9", "breaker_p13"} <= channel_ids
+
+
+async def test_the_unpositioned_warning_is_logged_once_per_breaker(
+    started_source: LevitonSource,
+    client: FakeLevitonClient,
+) -> None:
+    """Loud once, not 2,880 times a day.
+
+    Only the operator can fix this — the remedy is the positioning wizard in the
+    Leviton app — so silence would be wrong. But the condition persists until
+    somebody walks to the panel, and a 30s loop must not turn one fixable
+    problem into a log flood. The distinct count stays in ``status.json``.
+    """
+    client.breakers[HUB_A].extend(load_fixture("breakers_unpositioned"))
+    await started_source.discover(force=True)
+
+    stream = io.StringIO()
+    ec_logging.configure_logging("DEBUG", stream=stream, force=True)
+    try:
+        for _ in range(3):
+            await started_source.poll()
+    finally:
+        ec_logging.configure_logging("INFO", force=True)
+
+    warnings = [
+        json.loads(line)
+        for line in stream.getvalue().splitlines()
+        if line.strip() and json.loads(line).get("event") == "leviton_breaker_unpositioned"
+    ]
+    # Two breakers, three cycles, two lines.
+    assert len(warnings) == 2
+    assert {w["api_id"] for w in warnings} == {
+        "4C4556527612_A65E",
+        "4C4556527613_A65E",
+    }
+    for warning in warnings:
+        assert warning["level"] == "WARNING"
+        assert warning["rows"] == 0
+        # The app identifies breakers by slot, which is the one thing this
+        # breaker has not got — so the line must name it some other way.
+        assert warning["name"] in {"Guest bath", "Well pump"}
+        assert "positioning wizard" in warning["detail"]
+
+    assert started_source.ingest_status()["unpositioned_breakers"] == 2
+
+
+def test_position_zero_is_not_a_slot() -> None:
+    assert BreakerReading(position=0, poles=1, model="LB120-0ST").is_unpositioned
+    assert BreakerReading(position=-1, poles=1, model="LB120-0ST").is_unpositioned
+    assert not BreakerReading(
+        position=MIN_BREAKER_POSITION, poles=1, model="LB120-0ST"
+    ).is_unpositioned
+    assert MIN_BREAKER_POSITION == 1
+
+
+@pytest.mark.parametrize("payload", [{}, {"position": None}, {"position": 0}])
+def test_the_zero_position_comes_from_the_client_library(payload: dict[str, Any]) -> None:
+    """Pins the root cause, so a future upstream fix cannot pass unnoticed.
+
+    ``aioleviton``'s ``models.py`` does ``position=data.get("position", 0)``
+    against an ``int``-typed field, so a missing position arrives as a valid
+    -looking slot number rather than as ``None``. This project cannot rely on
+    that being fixed, and if it ever is — ``None`` instead of ``0`` — the
+    ``or 0`` in :meth:`BreakerReading.from_model` keeps the guard working.
+    """
+    breaker = types.SimpleNamespace(
+        position=payload.get("position", 0),
+        poles=1,
+        model="LB120-0ST",
+        id="4C4556527612_A65E",
+        name="Guest bath",
+    )
+    assert BreakerReading.from_model(breaker).position == 0
+    assert BreakerReading.from_model(breaker).is_unpositioned
 
 
 async def test_not_used_cts_are_skipped(started_source: LevitonSource) -> None:

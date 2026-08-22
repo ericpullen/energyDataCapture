@@ -2946,6 +2946,51 @@ The message was the other half of the defect and is fixed too — it now names *
 is missing and where settings were read from (`config.describe_env_source()`). "Not
 configured" with no location gave an operator nothing to act on.
 
+## 171. PLAN.md §6.3's skip list is one item short — an un-positioned breaker is not a channel
+
+§6.3 lists exactly one reason to skip a breaker: the `NONE`/`NONE-1`/`NONE-2` placeholder
+models that stand in for dumb breakers. Live installation on 2026-08-22 produced a second
+reason, and it wrote rows before it was noticed.
+
+A smart breaker that has been enrolled with the hub but **not yet located in the app**
+reports full electrical data with no `position`. Leviton's own UI calls this an
+"Un-Positioned Breaker" and clears it with the positioning wizard; it is a normal, transient
+part of every installation. `aioleviton` then defaults the missing key —
+`position=data.get("position", 0)` against an `int`-typed field — so it reaches this pipeline
+as slot **0**, and §6.5's `breaker_p{position}` turns that default into an identity.
+
+The result: for the 37 minutes between plugging in 20 breakers and finishing the wizard,
+both hubs produced rows under `breaker_p0`, a slot no Leviton panel has (they number from
+1). Real watts from a real circuit, attributed to a fiction. Nothing downstream can tell an
+invented slot from a surveyed one, which is precisely the confusion the `channel_id`
+convention exists to prevent.
+
+`BreakerReading.is_unpositioned` (`position < MIN_BREAKER_POSITION`) is now checked in
+`_map_snapshot` — the package's only mapper, so it covers the REST and WebSocket paths at
+once — and such a breaker produces **no rows**, WARNed once per breaker per process
+(`leviton_breaker_unpositioned`) with the count exposed as
+`leviton_ingest.unpositioned_breakers`. `discover` lists it marked SKIP and non-mappable, so
+nobody is invited to write a `channel_map` entry for `breaker_p0`.
+
+This is the treatment §7.3 already prescribes for an unrecognised enum string — WARN, emit
+no row — applied to an unrecognised *position*, and it is what cardinal rule 1 requires: an
+unknown stays unknown rather than becoming a plausible-looking value. Once-per-process,
+because only an operator can fix it and a 30s loop would otherwise write the same line 2,880
+times a day.
+
+**Two things deliberately not done.** The ~74 rows already written under `breaker_p0` are
+left in place: rule 2 says record what the API said, they are honestly flagged as unmapped
+by `build-dim` and `/ui`, and nothing sums by breaker yet. And the `aioleviton` default is
+not patched or vendored — the guard at our own boundary is correct whether or not upstream
+ever changes, and `from_model`'s `or 0` means a future upstream `None` lands on the same
+skip.
+
+Worth knowing for context: neither public integration handles this. `rwoldberg/ldata-ha`
+filters the same placeholder models, then trusts `position` verbatim — an un-positioned
+breaker falls through `if breaker["position"] in _LEG1_POSITIONS` and is silently attributed
+to leg 2, while its panel card renders from position 1 upward so the entity never appears.
+`gtxaspec/leviton-load-center` names it `Breaker 0`. There was no prior art to copy.
+
 ---
 
 # Status — what is done, and what has never been executed

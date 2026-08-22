@@ -1,0 +1,43 @@
+[
+  {
+    "_comment": "REAL SHAPE, observed 2026-08-22 on both live hubs. A smart breaker that has been enrolled with the hub but not yet located in the app ('Un-Positioned Breaker' in the Leviton UI, cleared with the positioning wizard) reports full electrical data with NO position key at all. aioleviton then substitutes 0 (models.py: position=data.get('position', 0)), which is how rows under the fiction 'breaker_p0' appeared for the 37 minutes between installing 20 breakers and finishing the wizard.",
+    "id": "4C4556527612_A65E",
+    "name": "Guest bath",
+    "model": "LB120-0ST",
+    "branchType": "Outlets",
+    "poles": 1,
+    "currentRating": 20,
+    "currentState": "ManualON",
+    "currentState2": "",
+    "connected": true,
+    "power": 21,
+    "power2": 0,
+    "rmsCurrent": 0.174,
+    "rmsCurrent2": 0,
+    "rmsVoltage": 120,
+    "rmsVoltage2": null,
+    "serialNumber": "SB-0000-9001",
+    "iotWhemId": "1000_AAAA_1111"
+  },
+  {
+    "_comment": "The other spelling of the same state: the key IS present and explicitly null. dict.get returns None for this one rather than the 0 default, and BreakerReading.from_model's `or 0` lands on the same value — so both spellings must be caught by one guard.",
+    "id": "4C4556527613_A65E",
+    "name": "Well pump",
+    "model": "LB240-0ST",
+    "branchType": "Pump",
+    "position": null,
+    "poles": 2,
+    "currentRating": 40,
+    "currentState": "ManualON",
+    "currentState2": "ManualON",
+    "connected": true,
+    "power": 900,
+    "power2": 880,
+    "rmsCurrent": 7.5,
+    "rmsCurrent2": 7.4,
+    "rmsVoltage": 120,
+    "rmsVoltage2": 121,
+    "serialNumber": "SB-0000-9002",
+    "iotWhemId": "1000_AAAA_1111"
+  }
+]
