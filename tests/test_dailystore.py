@@ -195,6 +195,43 @@ def test_an_unreadable_month_raises_instead_of_silently_rewriting_it(
         dailystore.existing_rows(destination)
 
 
+def test_a_failed_write_leaves_the_previous_month_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug that ate a month, pinned.
+
+    Writing Parquet straight to the destination removes the old file before
+    opening the new one, so a failed write leaves NOTHING — and the next run
+    then merges over an empty month and writes a fraction of the history in its
+    place. Observed for real on 2026-08-22. The write must be atomic: either the
+    old month survives or the new one replaces it whole.
+    """
+    destination = dailystore.MonthDestination(MONTH, out_dir=tmp_path, bucket=None)
+    good = [observation(date(2026, 8, d), channel_id="cooling", value=float(d)) for d in range(1, 22)]
+    dailystore.write_month_table(dailystore.build_month_table(good), destination)
+    before = destination.path.read_bytes()
+    assert len(rows_of(destination.path)) == 21
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(dailystore.pq, "write_table", explode)
+    with pytest.raises(PermissionError):
+        dailystore.write_month_table(
+            dailystore.build_month_table(
+                [observation(date(2026, 8, 22), channel_id="cooling", value=99.0)]
+            ),
+            destination,
+        )
+
+    # The month is still there, unchanged, and readable.
+    assert destination.path.exists(), "a failed write deleted the month"
+    assert destination.path.read_bytes() == before
+    assert len(rows_of(destination.path)) == 21
+    # ...and no half-written temp file was left behind.
+    assert [p.name for p in destination.path.parent.glob("*.tmp")] == []
+
+
 # ------------------------------------------------------- the bucket accessor
 
 

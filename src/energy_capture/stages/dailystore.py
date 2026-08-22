@@ -46,6 +46,8 @@ keeps the first occurrence of each :data:`~energy_capture.model.DEDUPE_KEY`, so:
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -68,6 +70,7 @@ __all__ = [
     "local_month_path",
     "month_start_of",
     "write_month_table",
+    "write_table_atomic",
 ]
 
 log = get_logger("dailystore")
@@ -174,6 +177,39 @@ def build_month_table(
     )
 
 
+def write_table_atomic(table: pa.Table, path: Path) -> None:
+    """Write ``table`` to ``path`` so that a failure cannot destroy what is there.
+
+    **This is not a nicety.** ``pyarrow.parquet.write_table`` straight to the
+    destination removes the existing file before it opens the new one, so a write
+    that then fails — a permission error, a full disk — leaves **no file at all**.
+    Observed on 2026-08-22: a month whose 336 rows had just been read successfully
+    was deleted by the failed write, and the next run merged over nothing and
+    wrote 28 rows in its place. Silent history loss, from a stage whose entire
+    contract is "merge over what the month already held".
+
+    So: a temp file in the same directory (same filesystem, so the rename is
+    atomic), fsync, then :func:`os.replace`. Either the old month survives intact
+    or the new one replaces it whole — never neither. This is the same guarantee
+    ``aws/s3io.write_table_atomic`` gives the mirror, which is where the idea
+    came from.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.stem}-", suffix=".parquet.tmp"
+    )
+    os.close(handle)
+    temp_path = Path(temp_name)
+    try:
+        pq.write_table(table, temp_path)
+        with open(temp_path, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def write_month_table(
     table: pa.Table, destination: MonthDestination, *, dry_run: bool = False
 ) -> dict[str, Any]:
@@ -193,8 +229,7 @@ def write_month_table(
         written["s3"] = "dry run"
         return written
 
-    destination.path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, destination.path)
+    write_table_atomic(table, destination.path)
     written["written"] = True
     log.info("dailystore_wrote", rows=table.num_rows, path=str(destination.path))
 
