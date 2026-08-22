@@ -512,7 +512,31 @@ def rollup_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
 
 
 @app.command("fetch-daily")
-def fetch_daily_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
+def fetch_daily_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--out-dir",
+            metavar="DIR",
+            help=(
+                "Local destination for the day-grain monthly Parquet. Default: "
+                "{SPOOL_DIR}/daily. This dataset never enters the spool (rule 6)."
+            ),
+        ),
+    ] = None,
+    bucket: Annotated[
+        str | None,
+        typer.Option(
+            "--bucket",
+            help=(
+                "Also mirror each month to this S3 bucket. Defaults to S3_BUCKET "
+                "when one is configured, and to local-only when it is not."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Fetch Bryant daily energy from the Carrier cloud into energy/daily.
 
     Day-grain rows (kwh_day, cost_day_usd per component) stamped at LOCAL
@@ -528,11 +552,37 @@ def fetch_daily_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
     start_date, end_date = _resolve_range(
         start, end, default_start=_days_ago(2), default_end=_days_ago(1)
     )
-    _run_stage("fetch-daily", start=start_date, end=end_date)
+    _run_stage(
+        "fetch-daily", start=start_date, end=end_date, out_dir=out_dir, bucket=bucket
+    )
 
 
 @app.command("backfill")
-def backfill_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
+def backfill_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--out-dir",
+            metavar="DIR",
+            help=(
+                "Local destination for the day-grain monthly Parquet. Default: "
+                "{SPOOL_DIR}/daily. This dataset never enters the spool (rule 6)."
+            ),
+        ),
+    ] = None,
+    bucket: Annotated[
+        str | None,
+        typer.Option(
+            "--bucket",
+            help=(
+                "Also mirror each month to this S3 bucket. Defaults to S3_BUCKET "
+                "when one is configured, and to local-only when it is not."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Backfill historical Bryant daily energy into energy/daily.
 
     Reads the legacy DynamoDB table (read-only Scan) and the old collector's
@@ -547,7 +597,9 @@ def backfill_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
     start_date, end_date = _resolve_range(
         start, end, default_start=_days_ago(2), default_end=_days_ago(1)
     )
-    _run_stage("backfill", start=start_date, end=end_date)
+    _run_stage(
+        "backfill", start=start_date, end=end_date, out_dir=out_dir, bucket=bucket
+    )
 
 
 @app.command("discover")

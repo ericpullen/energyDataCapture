@@ -101,6 +101,7 @@ from botocore.client import BaseClient
 
 from energy_capture import model, timeutil
 from energy_capture.aws import s3io
+from energy_capture.stages import dailystore
 from energy_capture.config import get_settings
 from energy_capture.health import StatusStore, get_status_store
 from energy_capture.logging import get_logger
@@ -821,7 +822,11 @@ class MonthResult:
     """Outcome of regenerating one monthly ``energy/daily`` object."""
 
     month_start: date
+    #: The S3 key this month occupies when a bucket is configured, and the one it
+    #: WOULD occupy otherwise.
     key: str
+    #: The local Parquet file, which is always written.
+    path: str
     #: Rows in the object that was written (or would have been, on a dry run).
     rows: int
     #: Distinct LOCAL days the backfill sources contributed.
@@ -834,13 +839,10 @@ class MonthResult:
 
 
 def _existing_rows(
-    bucket: str, key: str, *, client: BaseClient | None
+    destination: dailystore.MonthDestination,
 ) -> list[model.Observation]:
-    """Rows already in the monthly object, or ``[]`` when it does not exist yet."""
-    if not s3io.key_exists(bucket, key, client=client):
-        return []
-    table = s3io.read_table(bucket, key, client=client)
-    return model.table_to_observations(table, dataset=model.Dataset.DAILY)
+    """Rows the month already holds, from every configured destination."""
+    return dailystore.existing_rows(destination)
 
 
 def build_month_table(
@@ -876,6 +878,7 @@ def run(
     start: date,
     end: date,
     bucket: str | None = None,
+    out_dir: Path | str | None = None,
     client: BaseClient | None = None,
     dynamodb_client: BaseClient | None = None,
     table: str | None = None,
@@ -898,7 +901,8 @@ def run(
     is raised at the end if any did, so the CLI exits non-zero and the failure
     reaches ``status.json``.
     """
-    target_bucket = bucket or s3io.default_bucket()
+    # Local always, S3 as a mirror when one is configured (dailystore).
+    target_bucket = bucket if bucket is not None else s3io.configured_bucket()
     status = store if store is not None else get_status_store()
 
     log.info(
@@ -937,6 +941,7 @@ def run(
                     month_start,
                     month_records,
                     bucket=target_bucket,
+                    out_dir=out_dir,
                     client=client,
                     dry_run=dry_run,
                 )
@@ -1000,21 +1005,23 @@ def _backfill_month(
     month_start: date,
     records: Sequence[DailyRecord],
     *,
-    bucket: str,
+    bucket: str | None,
+    out_dir: Path | str | None,
     client: BaseClient | None,
     dry_run: bool,
 ) -> MonthResult:
-    """Regenerate one monthly object. Raises on any failure."""
-    key = s3io.daily_key(month_start, source=model.SOURCE_BRYANT)
-    existing = _existing_rows(bucket, key, client=client)
+    """Regenerate one month, to every destination. Raises on any failure."""
+    destination = dailystore.MonthDestination(
+        month_start, out_dir=out_dir, bucket=bucket, client=client
+    )
+    existing = _existing_rows(destination)
     table, counts = build_month_table(records, existing)
-
-    if not dry_run:
-        s3io.write_table_atomic(table, bucket, key, client=client)
+    outcome = dailystore.write_month_table(table, destination, dry_run=dry_run)
 
     result = MonthResult(
         month_start=month_start,
-        key=key,
+        key=destination.key,
+        path=str(destination.path),
         rows=table.num_rows,
         days=len({r.local_day for r in records}),
         rows_by_origin=counts,
@@ -1024,7 +1031,9 @@ def _backfill_month(
     log.info(
         "backfill_month_ok",
         month=f"{month_start:%Y-%m}",
-        key=key,
+        key=destination.key,
+        path=str(destination.path),
+        s3=outcome.get("s3"),
         rows=result.rows,
         days=result.days,
         existing_rows=result.existing_rows,

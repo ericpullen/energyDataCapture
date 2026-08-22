@@ -111,6 +111,7 @@ from botocore.client import BaseClient
 
 from energy_capture import model, timeutil
 from energy_capture.aws import s3io
+from energy_capture.stages import dailystore
 from energy_capture.config import Settings, get_settings
 from energy_capture.health import StatusStore, get_status_store
 from energy_capture.logging import get_logger
@@ -688,14 +689,9 @@ def _month_start(local_day: date) -> date:
     return local_day.replace(day=1)
 
 
-def _existing_rows(
-    bucket: str, key: str, *, client: BaseClient | None
-) -> list[model.Observation]:
-    """Rows already in the monthly object, or ``[]`` when it does not exist."""
-    if not s3io.key_exists(bucket, key, client=client):
-        return []
-    table = s3io.read_table(bucket, key, client=client)
-    return model.table_to_observations(table, dataset=model.Dataset.DAILY)
+def _existing_rows(destination: dailystore.MonthDestination) -> list[model.Observation]:
+    """Rows the month already holds, from every configured destination."""
+    return dailystore.existing_rows(destination)
 
 
 def build_month_table(
@@ -725,7 +721,12 @@ class MonthResult:
     """Outcome of regenerating one monthly ``energy/daily`` object."""
 
     month_start: date
+    #: The S3 key this month occupies when a bucket is configured, and the key it
+    #: WOULD occupy otherwise — the dataset's identity does not depend on whether
+    #: a mirror exists yet.
     key: str
+    #: The local Parquet file, which is always written.
+    path: str
     #: Rows in the object that was written (or would have been, on a dry run).
     rows: int
     #: Rows this fetch contributed (before dedupe against the existing object).
@@ -742,21 +743,23 @@ def _write_month(
     fetched: Sequence[model.Observation],
     days: Sequence[date],
     *,
-    bucket: str,
+    bucket: str | None,
+    out_dir: str | Path | None,
     client: BaseClient | None,
     dry_run: bool,
 ) -> MonthResult:
-    """Regenerate one monthly object whole. Raises on any failure."""
-    key = s3io.daily_key(month_start, source=model.SOURCE_BRYANT)
-    existing = _existing_rows(bucket, key, client=client)
-    table = build_month_table(fetched, existing)
-
-    if not dry_run:
-        s3io.write_table_atomic(table, bucket, key, client=client)
+    """Regenerate one month whole, to every destination. Raises on any failure."""
+    destination = dailystore.MonthDestination(
+        month_start, out_dir=out_dir, bucket=bucket, client=client
+    )
+    existing = _existing_rows(destination)
+    table = dailystore.build_month_table(fetched, existing)
+    outcome = dailystore.write_month_table(table, destination, dry_run=dry_run)
 
     result = MonthResult(
         month_start=month_start,
-        key=key,
+        key=destination.key,
+        path=str(destination.path),
         rows=table.num_rows,
         fetched_rows=len(fetched),
         existing_rows=len(existing),
@@ -766,7 +769,9 @@ def _write_month(
     log.info(
         "daily_month_ok",
         month=f"{month_start:%Y-%m}",
-        key=key,
+        key=destination.key,
+        path=str(destination.path),
+        s3=outcome.get("s3"),
         rows=result.rows,
         fetched_rows=result.fetched_rows,
         existing_rows=result.existing_rows,
@@ -784,6 +789,7 @@ def run(
     start: date,
     end: date,
     bucket: str | None = None,
+    out_dir: str | Path | None = None,
     client: BaseClient | None = None,
     serial: str | None = None,
     now: datetime | None = None,
@@ -802,7 +808,10 @@ def run(
     Args:
         start: first LOCAL date to keep, inclusive.
         end: last LOCAL date to keep, inclusive.
-        bucket: destination bucket; defaults to ``S3_BUCKET``.
+        bucket: S3 bucket to MIRROR to; defaults to ``S3_BUCKET`` when one is
+            configured and to no mirror at all when it is not. The local
+            Parquet month is written either way (``stages/dailystore``).
+        out_dir: local destination; defaults to ``{SPOOL_DIR}/daily``.
         client: boto3 S3 client; defaults to the cached one.
         serial: Bryant system serial; defaults to ``CARRIER_SERIAL``.
         now: reference instant for dating ``day1``/``day2`` (tests).
@@ -824,7 +833,9 @@ def run(
         raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
 
     resolved = settings if settings is not None else get_settings()
-    target_bucket = bucket if bucket is not None else s3io.default_bucket()
+    # No bucket is not an error any more: the local month is the destination
+    # that always exists, and S3 is a mirror when there is one to mirror to.
+    target_bucket = bucket if bucket is not None else s3io.configured_bucket()
     device_id = serial if serial is not None else resolved.require("carrier_serial")
     store = status if status is not None else get_status_store()
     reference = timeutil.ensure_utc(now) if now is not None else timeutil.now_utc()
@@ -894,6 +905,7 @@ def run(
                     fetched,
                     [day.local_day for day in group],
                     bucket=target_bucket,
+                    out_dir=out_dir,
                     client=client,
                     dry_run=dry_run,
                 )
@@ -919,6 +931,8 @@ def run(
         "months": len(results),
         "months_failed": len(failures),
         "keys": [r.key for r in results],
+        "paths": [r.path for r in results],
+        "mirrored_to_s3": target_bucket is not None,
         "dates_unavailable": [d.isoformat() for d in unavailable],
         "dry_run": dry_run,
     }

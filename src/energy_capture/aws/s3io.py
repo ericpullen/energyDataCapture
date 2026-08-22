@@ -96,6 +96,7 @@ __all__ = [
     "copy_key",
     "daily_key",
     "daily_year_prefix",
+    "configured_bucket",
     "default_bucket",
     "delete_key",
     "dim_channel_key",
@@ -331,6 +332,19 @@ def temp_key(final_key: str) -> str:
 def default_bucket() -> str:
     """``S3_BUCKET`` from settings, raising a named error when unset."""
     return get_settings().require("s3_bucket")
+
+
+def configured_bucket() -> str | None:
+    """``S3_BUCKET``, or ``None`` when there is not one.
+
+    The counterpart to :func:`default_bucket` for stages where S3 is a *mirror*
+    rather than the destination: ``fetch-daily`` and ``backfill`` write a local
+    Parquet month whether or not a bucket exists (``stages/dailystore``), so for
+    them an unset bucket is a configuration state, not an error.
+    """
+    value = getattr(get_settings(), "s3_bucket", None)
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 # ------------------------------------------------------------ client plumbing
