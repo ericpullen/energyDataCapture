@@ -180,6 +180,7 @@ def block(spool: SpoolDB, channel_map: Path, **kwargs: Any) -> dict[str, Any]:
     status, document = dashboard.handle_ui_hvac(
         None,
         kwargs.pop("target", None),
+        energy_out_dir=kwargs.pop("energy_out_dir", None),
         spool_path=spool.path,
         channel_map_path=channel_map,
         inventory_path=None,
@@ -399,21 +400,103 @@ def test_energy_is_observed_time_only_so_a_gap_shrinks_it(
     assert halved["equipment"]["observed_s"] <= full["equipment"]["observed_s"]
 
 
-def test_bryant_energy_is_declared_unavailable_with_the_reason(
-    spool: SpoolDB, channel_map: Path, make_obs
+def test_bryant_energy_says_what_to_run_when_the_dataset_is_absent(
+    spool: SpoolDB, channel_map: Path, make_obs, tmp_path: Path
 ) -> None:
-    """The comparison the owner actually asked for cannot be made yet; say so.
-
-    ``fetch-daily`` writes day-grain rows to ``energy/daily`` in S3 and never to
-    the spool, and no bucket is configured — so there is nothing to compare. An
-    empty chart would imply zero. This says why instead.
-    """
+    """An empty chart would read as zero. A reason names the command to run."""
     seed(spool, make_obs, start=NOW - timedelta(minutes=30), count=60)
-    hvac = block(spool, channel_map)
+    hvac = block(spool, channel_map, energy_out_dir=tmp_path / "no-such-dir")
     assert hvac["bryant_energy"]["available"] is False
-    reason = hvac["bryant_energy"]["reason"]
-    assert "S3" in reason and "energy/daily" in reason
-    assert "poison the hourly rollup" in reason
+    assert "fetch-daily" in hvac["bryant_energy"]["reason"]
+
+
+def test_bryant_components_are_reported_per_day_with_the_panel_beside_them(
+    spool: SpoolDB, channel_map: Path, make_obs, tmp_path: Path
+) -> None:
+    """The whole reason to keep reading Bryant now that the breaker exists.
+
+    ``ct_2_a``/``ct_2_b`` are one clamp pair on the HVAC subpanel feeder, so the
+    blower and the electric strips are the same conductor and cannot be split
+    from the panel side. Bryant reports them separately, which is the one thing
+    this dataset adds — so the payload must carry the components, not just a
+    total.
+    """
+    from energy_capture.stages import dailystore
+
+    day = (NOW - timedelta(days=1)).date()
+    rows = []
+    for channel_id, kwh in (("cooling", 12.0), ("fan", 3.0), ("eheat", 4.0)):
+        ts = timeutil.local_midnight_utc(day)
+        rows.append(
+            model.Observation(
+                ts_utc=ts,
+                ts_local=timeutil.to_local_naive(ts),
+                source=model.SOURCE_BRYANT,
+                device_id=SERIAL,
+                channel_id=channel_id,
+                metric="kwh_day",
+                value=kwh,
+                unit="kWh",
+            )
+        )
+    out_dir = tmp_path / "daily"
+    destination = dailystore.MonthDestination(
+        dailystore.month_start_of(day), out_dir=out_dir, bucket=None
+    )
+    dailystore.write_month_table(dailystore.build_month_table(rows), destination)
+
+    seed(spool, make_obs, start=NOW - timedelta(minutes=30), count=60)
+    energy = block(spool, channel_map, energy_out_dir=out_dir)["bryant_energy"]
+
+    assert energy["available"] is True
+    assert energy["totals"] == {"cooling": 12.0, "fan": 3.0, "eheat": 4.0}
+    (entry,) = [d for d in energy["days"] if d["local_day"] == day.isoformat()]
+    assert entry["components"]["eheat"] == 4.0
+    assert entry["components"]["looppump"] is None, "a disabled component is absent, not 0"
+    assert entry["bryant_total_kwh"] == 19.0
+
+    # The split is only meaningful if the page can say which side of the panel
+    # each component lands on.
+    assert energy["panel_side"]["eheat"] == "feeder"
+    assert energy["panel_side"]["fan"] == "feeder"
+    assert energy["panel_side"]["cooling"] == "equipment"
+
+
+def test_a_partly_covered_day_is_not_offered_as_a_comparison(
+    spool: SpoolDB, channel_map: Path, make_obs, tmp_path: Path
+) -> None:
+    """A delta over 30 minutes of samples measures coverage, not agreement."""
+    from energy_capture.stages import dailystore
+
+    day = NOW.date()
+    ts = timeutil.local_midnight_utc(day)
+    out_dir = tmp_path / "daily"
+    dailystore.write_month_table(
+        dailystore.build_month_table(
+            [
+                model.Observation(
+                    ts_utc=ts,
+                    ts_local=timeutil.to_local_naive(ts),
+                    source=model.SOURCE_BRYANT,
+                    device_id=SERIAL,
+                    channel_id="cooling",
+                    metric="kwh_day",
+                    value=20.0,
+                    unit="kWh",
+                )
+            ]
+        ),
+        dailystore.MonthDestination(
+            dailystore.month_start_of(day), out_dir=out_dir, bucket=None
+        ),
+    )
+    seed(spool, make_obs, start=NOW - timedelta(minutes=30), count=60)
+    energy = block(spool, channel_map, energy_out_dir=out_dir)["bryant_energy"]
+
+    (entry,) = [d for d in energy["days"] if d["local_day"] == day.isoformat()]
+    assert entry["panel"] is not None and entry["panel"]["coverage_pct"] < 95.0
+    assert entry["delta_kwh"] is None
+    assert "coverage" in entry["delta_reason"]
 
 
 # ----------------------------------------------------------------- the route

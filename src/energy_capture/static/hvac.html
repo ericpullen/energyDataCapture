@@ -19,9 +19,13 @@
       old, not weeks, and the page says so rather than implying a long baseline.
     * The two sources never share a ts_utc, so every comparison here is
       bucket-aligned. The bucket width is printed next to the numbers.
-    * Bryant's own kWh is NOT shown, because it does not exist yet: fetch-daily
-      writes day-grain energy to S3 and no bucket is configured. The page says
-      that in words instead of drawing an empty chart.
+    * Bryant's own kWh is a TABLE, not a chart, because Bryant serves energy at
+      day grain only (energyPeriods: day1/day2, nothing finer exists). Its value
+      is the component split: `fan` and `eheat` are the same conductor as far as
+      the CT pair is concerned, so only Bryant can separate the blower from the
+      electric strips. A per-day delta against the panel is offered only for
+      days with >=95% panel coverage — below that it would measure our coverage
+      rather than the agreement.
 
   Colour: --s1 is the panel (watts, the measured thing), --s2 is Bryant (the
   reported thing), --s3 is the feeder. Assigned by ROLE and never cycled.
@@ -365,8 +369,67 @@ function energyCard(hv) {
       num(e.coverage_pct, 1) + "% sample coverage") +
     "</div>" +
     '<p class="note">' + esc(e.note || "") + "</p>" +
-    '<div class="note warn"><strong>Bryant’s own kWh is not here.</strong> ' +
-    esc((hv.bryant_energy || {}).reason || "") + "</div>";
+    '<p class="note">' + esc((hv.bryant_energy || {}).note || "") + "</p>";
+}
+
+/* --------------------------------------------------- Bryant day-grain energy
+   Bryant serves energy at DAY grain only (energyPeriods: day1, day2 — nothing
+   finer exists), so this is a table and not a chart. Its value is the column
+   split: the CT pair is one clamp pair on the HVAC subpanel feeder, so `fan`
+   and `eheat` are the SAME conductor as far as the panel is concerned and only
+   Bryant can separate them. The panel column is shown beside it, and a delta is
+   offered only for days the panel actually covered. */
+function bryantEnergy(hv) {
+  var be = hv.bryant_energy || {};
+  if (!be.available) {
+    return '<h2>Bryant’s own kWh</h2><div class="note warn">' +
+      esc(be.reason || "not available") + "</div>";
+  }
+  var order = be.component_order || [];
+  var side = be.panel_side || {};
+  var head = "<tr><th>local day</th>";
+  order.forEach(function (c) {
+    if (be.totals[c] === undefined) return;           // never reported: no column
+    head += '<th title="' + esc(side[c] || "not on a metered circuit") + '">' +
+      esc(c) + "</th>";
+  });
+  head += "<th>Bryant total</th><th>panel total</th><th>delta</th></tr>";
+
+  var rows = (be.days || []).map(function (d) {
+    var cells = "<tr><td>" + esc(d.local_day) + "</td>";
+    order.forEach(function (c) {
+      if (be.totals[c] === undefined) return;
+      var v = d.components[c];
+      // null is "structurally absent", which is not zero.
+      cells += "<td>" + (v === null || v === undefined ? "—" : num(v, 1)) + "</td>";
+    });
+    cells += "<td><strong>" + num(d.bryant_total_kwh, 1) + "</strong></td>";
+    cells += "<td>" + (d.panel ? num(d.panel.total_kwh, 1) +
+      ' <span class="n">' + num(d.panel.coverage_pct, 0) + "%</span>" : "—") + "</td>";
+    cells += "<td>" + (d.delta_pct === null || d.delta_pct === undefined
+      ? '<span class="n">' + esc(d.delta_reason || "—") + "</span>"
+      : (d.delta_pct > 0 ? "+" : "") + num(d.delta_pct, 1) + "%") + "</td>";
+    return cells + "</tr>";
+  }).join("");
+
+  var totals = order.filter(function (c) { return be.totals[c] !== undefined; })
+    .map(function (c) {
+      return '<span><i style="background:' +
+        (side[c] === "equipment" ? "var(--s1)" : side[c] === "feeder" ? "var(--s3)"
+          : "var(--mark-muted)") + '"></i>' + esc(c) + " " +
+        num(be.totals[c], 0) + " kWh</span>";
+    }).join("");
+
+  return "<h2>Bryant’s own kWh <span class=\"n\">day grain — " +
+    esc((be.span || {}).first || "") + " to " + esc((be.span || {}).last || "") +
+    ", " + num(be.total_days) + " days</span></h2>" +
+    '<p class="legend">' + totals + "</p>" +
+    '<div style="overflow-x:auto"><table>' + head + rows + "</table></div>" +
+    '<p class="note">' + esc(be.note || "") + " Blue components are on the " +
+    "compressor’s own breaker; green ones share the HVAC subpanel feeder, where " +
+    "the panel cannot tell them apart. A delta is shown only for days with 95% " +
+    "or better panel coverage — below that it would measure our coverage, not " +
+    "the agreement.</p>";
 }
 
 function channelsCard(hv) {
@@ -400,6 +463,7 @@ function render() {
       '<div class="card">' + bandsTable(hv.agreement) + "</div>" +
       '<div class="card">' + feederTable(hv.feeder_profile) + "</div>" +
       '<div class="card">' + energyCard(hv) + "</div>" +
+      '<div class="card">' + bryantEnergy(hv) + "</div>" +
       '<div class="card">' + channelsCard(hv) + "</div>";
   }
   var errs = (payload && payload.errors) || [];

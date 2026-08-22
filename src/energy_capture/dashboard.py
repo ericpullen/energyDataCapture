@@ -420,6 +420,7 @@ def handle_ui_hvac(
     spool_path: Path | str | None = None,
     channel_map_path: Path | str | None = None,
     inventory_path: Path | str | None = None,
+    energy_out_dir: Path | str | None = None,
     now: datetime | None = None,
     settings: Settings | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -431,6 +432,7 @@ def handle_ui_hvac(
     ``errors`` the way ``/ui/data``'s do.
     """
     from energy_capture import hvacview
+    from energy_capture.stages import dailystore
 
     errors: list[str] = []
     reference = timeutil.ensure_utc(now) if now is not None else timeutil.now_utc()
@@ -452,6 +454,12 @@ def handle_ui_hvac(
         inventory_path = getattr(resolved, "blackstart_inventory_path", None)
 
     window_s, clamped = hvacview.parse_window_s(_query_value(target, "window_s"))
+    # The day-grain dataset lives beside the spool, not in it (rule 6).
+    if energy_out_dir is not None:
+        daily_dir: Path | None = Path(energy_out_dir)
+    else:
+        spool_dir = getattr(resolved, "spool_dir", None)
+        daily_dir = Path(spool_dir) / dailystore.LOCAL_SUBDIR if spool_dir else None
     labels = _labels(channel_map_path, inventory_path, errors)
     poll_interval_s = int(getattr(resolved, "poll_interval_s", 30) or 30)
     bryant_interval_s = int(getattr(resolved, "bryant_poll_interval_s", 30) or 30)
@@ -473,6 +481,7 @@ def handle_ui_hvac(
                     clamped=clamped,
                     poll_interval_s=poll_interval_s,
                     bryant_interval_s=bryant_interval_s,
+                    out_dir=daily_dir,
                     errors=errors,
                 )
         except Exception as exc:

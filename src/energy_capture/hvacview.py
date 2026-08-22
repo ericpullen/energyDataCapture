@@ -31,14 +31,23 @@ installing a second HVAC circuit means editing the map, not this file. Within
 that set, ``breaker_*`` channels are equipment circuits and ``ct_*`` channels are
 feeders (PLAN.md §6.5's naming), which is the only split this module infers.
 
-What it deliberately does NOT show
----------------------------------
-**Bryant's own kWh.** ``fetch-daily`` writes day-grain energy to
-``energy/daily`` in S3, never to the spool (rule 6 — day-grain rows would poison
-the hourly rollup), and no bucket is configured yet, so **not one Bryant energy
-row exists anywhere**. Rather than draw an empty chart, the payload carries an
-explicit ``bryant_energy.available = false`` with the reason, because "we cannot
-compare kWh yet, and here is exactly why" is the honest answer.
+Bryant's own kWh, and what it is for
+------------------------------------
+Day-grain energy is a *different dataset*, not another metric: it lives in
+``{SPOOL_DIR}/daily/bryant-YYYYMM.parquet`` (``stages/dailystore``) because
+day-grain rows would poison the hourly rollup if they entered the spool — rule 6.
+So this module reads it separately and reports it per local day.
+
+It is worth the second read path for one reason the panel cannot cover: the CT
+pair is on the whole HVAC **subpanel feeder**, so the blower, the electric strips
+and any reheat share one conductor and cannot be told apart from the panel side.
+Bryant reports them as separate components. Over 2026-01-02..08-21 that split is
+2,954 kWh heat pump, 2,445 cooling, 1,722 blower and 1,277 electric strips — and
+the last two are the same wire as far as ``ct_2_a``/``ct_2_b`` are concerned.
+
+The comparison is per **local day** and only for days where both sides have data,
+with the panel's sample coverage attached: a partly-covered day is not a
+comparison, and it says so instead of reading as a discrepancy.
 
 Nothing here raises. Every failure returns a block carrying ``error``.
 """
@@ -50,6 +59,7 @@ import sqlite3
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Final
 
 from energy_capture import model, timeutil
@@ -106,6 +116,30 @@ _ALIGNMENT_NOTE: Final[str] = (
     "nothing here is key-joined: both sides are averaged into the same time "
     "bucket and compared bucket by bucket."
 )
+
+#: Bryant day-grain components, in the order the screen lists them: the two the
+#: compressor breaker sees, then the two that share the feeder, then the rest.
+ENERGY_COMPONENT_ORDER: Final[tuple[str, ...]] = (
+    "cooling",
+    "hpheat",
+    "fan",
+    "eheat",
+    "reheat",
+    "fangas",
+    "gas",
+    "looppump",
+)
+
+#: Which side of the panel each component appears on, which is the whole point of
+#: showing them: two are the compressor's own breaker, two are on the shared
+#: feeder, and the rest are structurally absent on this system.
+COMPONENT_PANEL_SIDE: Final[dict[str, str]] = {
+    "cooling": "equipment",
+    "hpheat": "equipment",
+    "fan": "feeder",
+    "eheat": "feeder",
+    "reheat": "feeder",
+}
 
 #: Rows for one window. Both predicates are indexed by ts_utc (fixed-width ISO
 #: text, so string order IS chronological order).
@@ -226,6 +260,195 @@ def _hvac_channels(
     return equipment, feeders
 
 
+# ------------------------------------------------------- bryant day-grain energy
+
+
+#: Panel-side kWh per LOCAL day, observed-time (rule 5). Bucketing on ts_local's
+#: date is correct here and not a shortcut: the dataset it is compared against is
+#: stamped at LOCAL midnight and partitioned on the LOCAL date (rule 4), so the
+#: two sides must agree on which day a sample belongs to.
+_PANEL_DAILY_SQL: Final[str] = """
+SELECT substr(ts_local, 1, 10) AS local_day,
+       device_id, channel_id, COUNT(*) AS samples, AVG(value) AS mean_w
+FROM observations
+WHERE source = ? AND metric = 'watts' AND ts_local >= ?
+GROUP BY local_day, device_id, channel_id
+"""
+
+
+def _read_bryant_days(out_dir: Path) -> tuple[dict[str, dict[str, float]], list[str]]:
+    """``({local_day: {component: kwh}}, files)`` from the day-grain dataset.
+
+    Reads every monthly Parquet rather than the newest, because a comparison
+    spanning a month boundary needs both — and there are eight small files, not
+    eight thousand.
+    """
+    import pyarrow.parquet as pq
+
+    days: dict[str, dict[str, float]] = {}
+    files: list[str] = []
+    for path in sorted(out_dir.glob(f"{model.SOURCE_BRYANT}-*.parquet")):
+        files.append(path.name)
+        table = pq.read_table(path, columns=["ts_local", "channel_id", "metric", "value"])
+        for row in table.to_pylist():
+            if row["metric"] != "kwh_day" or row["value"] is None:
+                continue
+            local_day = str(row["ts_local"])[:10]
+            days.setdefault(local_day, {})[row["channel_id"]] = float(row["value"])
+    return days, files
+
+
+def _panel_daily_kwh(
+    conn: sqlite3.Connection,
+    equipment: Sequence[Mapping[str, Any]],
+    feeders: Sequence[Mapping[str, Any]],
+    *,
+    since_local_day: str,
+    poll_interval_s: int,
+) -> dict[str, dict[str, Any]]:
+    """Panel-side kWh per local day for the two groups, with sample coverage."""
+    equipment_keys = {(e["device_id"], e["channel_id"]) for e in equipment}
+    feeder_keys = {(f["device_id"], f["channel_id"]) for f in feeders}
+    per_day: dict[str, dict[str, Any]] = {}
+    rows = conn.execute(
+        _PANEL_DAILY_SQL, (model.SOURCE_LEVITON, f"{since_local_day}T00:00:00")
+    ).fetchall()
+    for local_day, device_id, channel_id, samples, mean_w in rows:
+        key = (device_id, channel_id)
+        if key in equipment_keys:
+            group = "equipment"
+        elif key in feeder_keys:
+            group = "feeder"
+        else:
+            continue
+        bucket = per_day.setdefault(
+            local_day,
+            {"equipment_kwh": 0.0, "feeder_kwh": 0.0, "samples": 0, "channels": 0},
+        )
+        kwh = float(mean_w or 0.0) * samples * poll_interval_s / 3.6e6
+        bucket[f"{group}_kwh"] += kwh
+        bucket["samples"] = max(bucket["samples"], int(samples))
+        bucket["channels"] += 1
+    expected = 86400 // max(1, poll_interval_s)
+    for bucket in per_day.values():
+        bucket["equipment_kwh"] = round(bucket["equipment_kwh"], 4)
+        bucket["feeder_kwh"] = round(bucket["feeder_kwh"], 4)
+        bucket["total_kwh"] = round(bucket["equipment_kwh"] + bucket["feeder_kwh"], 4)
+        bucket["coverage_pct"] = round(100.0 * bucket["samples"] / expected, 1)
+    return per_day
+
+
+def bryant_energy_block(
+    conn: sqlite3.Connection | None,
+    equipment: Sequence[Mapping[str, Any]],
+    feeders: Sequence[Mapping[str, Any]],
+    *,
+    out_dir: Path | str | None = None,
+    days: int = 14,
+    poll_interval_s: int = 30,
+    errors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Bryant's per-component kWh/day, and the panel's total for the same days.
+
+    Returns ``available: False`` with a reason when the dataset is not there —
+    which is what the screen showed for its first hours of life, and is the right
+    answer whenever ``fetch-daily`` has not run.
+    """
+    problems = errors if errors is not None else []
+    directory = Path(out_dir) if out_dir is not None else None
+    if directory is None:
+        from energy_capture.stages import dailystore
+
+        directory = dailystore.default_out_dir()
+
+    block: dict[str, Any] = {
+        "available": False,
+        "reason": None,
+        "dataset": str(directory),
+        "days": [],
+        "totals": {},
+        "component_order": list(ENERGY_COMPONENT_ORDER),
+        "panel_side": dict(COMPONENT_PANEL_SIDE),
+        "note": (
+            "Bryant reports energy at DAY grain only — energyPeriods serves day1 "
+            "and day2, nothing finer — so this is a per-local-day comparison, not "
+            "a time series. Its value is the component split: the CT pair cannot "
+            "separate the blower from the electric strips, because they share one "
+            "feeder."
+        ),
+    }
+    if not directory.exists():
+        block["reason"] = (
+            f"no day-grain dataset at {directory} — run `energycap fetch-daily` "
+            "(and `energycap backfill` for history)"
+        )
+        return block
+
+    try:
+        by_day, files = _read_bryant_days(directory)
+    except Exception as exc:
+        problems.append(f"bryant day-grain read failed: {type(exc).__name__}: {exc}")
+        block["reason"] = "the day-grain dataset could not be read"
+        return block
+    if not by_day:
+        block["reason"] = f"the day-grain dataset at {directory} holds no kwh_day rows"
+        return block
+
+    block["available"] = True
+    block["files"] = files
+    totals: dict[str, float] = {}
+    for components in by_day.values():
+        for component, kwh in components.items():
+            totals[component] = round(totals.get(component, 0.0) + kwh, 3)
+    block["totals"] = totals
+    block["span"] = {"first": min(by_day), "last": max(by_day)}
+    block["total_days"] = len(by_day)
+
+    recent = sorted(by_day)[-days:]
+    panel = {}
+    if conn is not None and recent:
+        try:
+            panel = _panel_daily_kwh(
+                conn,
+                equipment,
+                feeders,
+                since_local_day=recent[0],
+                poll_interval_s=poll_interval_s,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            problems.append(f"panel daily kwh failed: {type(exc).__name__}: {exc}")
+
+    for local_day in recent:
+        components = by_day[local_day]
+        bryant_total = round(sum(components.values()), 3)
+        measured = panel.get(local_day)
+        row: dict[str, Any] = {
+            "local_day": local_day,
+            "components": {
+                name: components.get(name) for name in ENERGY_COMPONENT_ORDER
+            },
+            "bryant_total_kwh": bryant_total,
+            "panel": measured,
+        }
+        # A comparison is only offered when the panel actually covered the day.
+        # Otherwise the delta is a measure of our coverage, not of agreement.
+        if measured and measured["coverage_pct"] >= 95.0 and bryant_total > 0:
+            row["delta_kwh"] = round(measured["total_kwh"] - bryant_total, 3)
+            row["delta_pct"] = round(
+                100.0 * (measured["total_kwh"] - bryant_total) / bryant_total, 1
+            )
+        else:
+            row["delta_kwh"] = None
+            row["delta_pct"] = None
+            row["delta_reason"] = (
+                "panel coverage below 95% for this day"
+                if measured
+                else "no panel samples for this day"
+            )
+        block["days"].append(row)
+    return block
+
+
 # ------------------------------------------------------------------ the block
 
 
@@ -238,6 +461,7 @@ def hvac_comparison(
     clamped: bool = False,
     poll_interval_s: int = 30,
     bryant_interval_s: int = 30,
+    out_dir: Path | str | None = None,
     errors: list[str] | None = None,
 ) -> dict[str, Any]:
     """The whole ``/ui/hvac/data`` payload. Reads only; never raises for data."""
@@ -268,6 +492,7 @@ def hvac_comparison(
         "feeder_profile": None,
         "energy": None,
         "bryant_energy": {"available": False, "reason": BRYANT_ENERGY_UNAVAILABLE},
+        "energy_out_dir": str(out_dir) if out_dir is not None else None,
         "present": False,
         "reason": None,
     }
@@ -393,6 +618,14 @@ def hvac_comparison(
     block["off_state"] = _off_state(series)
     block["feeder_profile"] = _feeder_profile(series)
     block["energy"] = _energy(series, bucket_s, poll_interval_s)
+    block["bryant_energy"] = bryant_energy_block(
+        conn,
+        equipment,
+        feeders,
+        out_dir=out_dir,
+        poll_interval_s=poll_interval_s,
+        errors=problems,
+    )
     block["latest"] = series[-1]
     return block
 
