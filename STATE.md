@@ -419,6 +419,83 @@ Selection is by `category == "hvac"` in `channel_map.json` (the compressor's ent
 explicit override), so a future HVAC circuit joins the screen by being mapped, not by a code
 change. DEVIATIONS #172 has the reasoning.
 
+---
+
+## Bryant energy is recorded at last — and the Carrier API audit
+
+### The blocker was not subtle
+
+`fetch-daily` and `backfill` were S3-only. No bucket, so `bryant_daily_energy` had failed
+**every night since the instance was built** and zero Bryant energy rows existed anywhere.
+`stages/dailystore` now owns the destination for both: local
+`{SPOOL_DIR}/daily/bryant-YYYYMM.parquet` always, S3 as a mirror when a bucket appears. Rule 6
+holds — day-grain rows still never touch the spool; this is a sibling dataset to `meter/`,
+exactly the `fetch-greenbutton` precedent.
+
+**Backfill result: 3,712 rows, 232 consecutive days, 2026-01-02..08-21**, every day the old
+collector's Lambda ever wrote, no gaps. The component split over that span is why it was worth
+doing:
+
+| component | kWh | panel side |
+|---|---|---|
+| hpheat | 2,954 | compressor breaker |
+| cooling | 2,445 | compressor breaker |
+| fan | 1,722 | **shares the feeder** |
+| eheat (strips) | 1,277 | **shares the feeder** |
+
+`fan` and `eheat` are one conductor as far as `ct_2_a`/`ct_2_b` are concerned. **Bryant is the
+only source that can separate the blower from the strips**, which is the whole case for keeping
+a day-grain number now that the compressor has its own 30s channel. 1,277 kWh of strip heat is
+not a rounding error, and it is entirely invisible on the panel side.
+
+### Two bugs this shook out, both about silent loss
+
+1. **A failed local Parquet write was deleting the month.** `pq.write_table` unlinks the target
+   before opening it, so a write that then fails leaves *nothing* — 336 rows read fine, the
+   write hit EACCES, the file vanished, and the next run merged over an empty month and wrote
+   28 rows looking perfectly healthy. Now temp-file + fsync + `os.replace`, the same guarantee
+   `s3io.write_table_atomic` always gave the mirror.
+2. **A blended coverage number turned a missing channel into a -99% disagreement.** For
+   2026-08-18..21 the feeder covered 100% while the compressor breaker did not yet exist, so
+   the panel total was feeder-only against Bryant's whole-system total. Coverage is now per
+   group, the worse of the two governs, and every mapped channel must have reported before any
+   delta is shown. DEVIATIONS #173a/b.
+
+The first genuinely comparable day will be **2026-08-23**, which Bryant reports on the 24th.
+
+### The Carrier API audit — what we request and do not map
+
+This had already been done and written down: `sources/bryant.py`'s docstring says the query
+asks for everything and maps only what a *real captured response* had verified, listing
+`damperposition`, `occupancy`, `zones[].name`, `oprstsmsg`, `odu.opmode` and "the `odu`
+compressor telemetry" as requested-but-unmapped. **What has changed is that the live capture it
+was waiting for has happened** (2026-08-17 dump) and every one of those fields came back
+populated. Nobody has acted on it since.
+
+Highest value first, given we now measure compressor watts:
+
+| field | live value | why it matters now |
+|---|---|---|
+| `odu.comprpm` | `1190` | **The best one.** Compressor RPM is continuous where `opstat` is quantised to 45/60/75/85, so it is a far better x-axis for the watts calibration — and watts rising against flat RPM is how a failing compressor shows up. |
+| `odu.oducoiltmp` | `74` | With `oat`, the condenser approach temperature — the standard charge/fouling indicator, and it pairs with watts to catch degradation. |
+| `idu.statpress` | `0.14` | Static pressure. Now that the feeder is known to track blower power, rising static at constant CFM is a clogged filter, cross-confirmed from two sources. |
+| `odu.iducfm` / `idu.iducfm` | `1166` / `513` | Three airflow numbers exist (`idu.cfm` 500, `idu.iducfm` 513, `odu.iducfm` 1166) and we record one. Worth knowing which is which before trusting CFM. |
+| `filtrlvl` | `10` | Consumable *used* percent, correctly not a metric — but actionable maintenance, so a `status.json` field rather than a row. |
+| `oprstsmsg`, `odu.opmode`, `idu.opstat` | `idle`, `cooling`, `off` | Per-unit state strings; we take only `odu.opstat`. Would need enum tables (append-only, never renumbered). |
+| zone `zoneconditioning`, `damperposition`, `hold`, `occupancy` | `active_cool`, `15`, `on`, `unoccupied` | Real state, low value here: one zone is enabled. |
+
+Not available at any grain: **energy finer than a day**. `energyPeriods` serves `day1`, `day2`,
+`month1`, `year1` — the 30s status feed carries no energy field at all. So daily is the floor,
+and the panel is the only source of sub-day HVAC energy.
+
+Deliberately not done: **synthesising 30s Bryant power from `capacity% x 29.9 W`**. The
+calibration exists now, which makes it tempting, but it is a model and not a measurement —
+rules 1 and 2. Fine as a derived comparison on a screen; never a stored row.
+
+Beyond `getInfinityStatus` and `getInfinityEnergy`, what else the endpoint offers is unknown:
+PLAN.md documents only those two, and a schema introspection would be a new outbound call
+pattern against Carrier — the kind of thing #155 says needs sign-off first.
+
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep

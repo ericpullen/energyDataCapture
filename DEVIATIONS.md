@@ -3039,6 +3039,62 @@ And `breaker_*` vs `ct_*` is the only thing the module infers, because §6.5 alr
 that distinction mean "equipment circuit" vs "clamp on a feeder", which is exactly the
 difference between measuring the compressor and measuring whatever else shares its subpanel.
 
+## 173. `fetch-daily` and `backfill` were S3-only, so Bryant's energy was never recorded
+
+PLAN.md §4 puts Bryant day-grain energy in `s3://.../energy/daily/`, and both stages that
+write it were built to do exactly that and nothing else. No bucket has ever been configured,
+so the effect was not a degraded feature but an absent one: `bryant_daily_energy` failed every
+night since the instance was built, and **not one Bryant energy row existed anywhere**. It
+took building `/ui/hvac` to notice, because that screen wanted to compare kWh and found none.
+
+New `stages/dailystore` owns the destination for both stages: the local month
+`{SPOOL_DIR}/daily/bryant-YYYYMM.parquet` always, and the S3 key §4 specifies as a **mirror**
+when a bucket exists. Rule 6 is untouched — day-grain rows still never enter the spool or
+`raw_30s`; `{SPOOL_DIR}` is simply the writable volume, and `daily/` is its own dataset the
+way `meter/` already is. The precedent is exact: `stages/greenbutton.py` has defaulted to
+`{SPOOL_DIR}/meter` with S3 opt-in since #167, for the same reason and with the same comment.
+The one deliberate difference is that a *scheduled* stage mirrors automatically when a bucket
+exists, where a manual import should not fan out by surprise.
+
+**Result, the same evening:** `fetch-daily` wrote its first 28 rows, and `backfill` pulled
+**3,712 rows over 232 consecutive days (2026-01-02..08-21)** out of the legacy DynamoDB table
+— every day the old collector's Lambda has ever recorded, with no gaps. The component split
+over that history is the thing worth having: 2,954 kWh heat pump, 2,445 cooling, 1,722 blower,
+**1,277 electric strips**. The blower and the strips are the same conductor as far as
+`ct_2_a`/`ct_2_b` are concerned, so Bryant is the only source that can separate them — which
+is the whole argument for continuing to collect a day-grain number now that the compressor has
+its own 30s breaker channel.
+
+### 173a. And a failed local write was deleting the month
+
+Found by losing August for real, minutes after the above went in.
+`pyarrow.parquet.write_table` straight to the destination removes the existing file before it
+opens the new one. So: 336 backfilled rows were read successfully, the write failed with
+EACCES (the file had arrived via `docker compose cp` owned by uid 1000, not the container's
+10001), **the file was gone afterwards**, and the next run reported `existing_rows: 0` and
+wrote 28 rows over the empty month. Nothing errored on that second run — it looked healthy.
+
+`dailystore.write_table_atomic` now writes a temp file in the same directory, fsyncs, and
+`os.replace`s it. Either the old month survives intact or the new one replaces it whole, never
+neither — the guarantee `aws/s3io.write_table_atomic` already gave the mirror, which is
+precisely why only the local path had the hole. The existing "an unreadable month raises
+rather than being treated as empty" test could not have caught this: there the *read* fails,
+here the read succeeded and the write did the damage.
+
+### 173b. A blended coverage number turned a missing channel into a -99% disagreement
+
+The first live render of the kWh comparison reported -99% for 2026-08-18..21. Those were not
+disagreements: the compressor breaker did not exist on those days, so the panel total was
+feeder-only against a Bryant total containing 21 kWh of cooling that nothing on the panel was
+measuring. One coverage figure across both channel groups called the days 100% covered,
+because the feeder genuinely had covered them.
+
+Coverage is now per group, the comparable figure is the **worse** of the two, and every mapped
+channel must actually have reported before a delta is offered at all. When one is withheld the
+payload names which reason applied. This is the same discipline `sample_count` exists for,
+applied one level up: a partial *channel set* is as misleading as a partial hour, and it does
+not announce itself.
+
 ---
 
 # Status — what is done, and what has never been executed
