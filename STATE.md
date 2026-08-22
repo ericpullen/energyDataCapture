@@ -363,6 +363,62 @@ blackstart: `npm test` — 107 + 105 checks pass, 0 errors, and `sw.js` `CACHE` 
 — they hold the monitor breaker — so a future edit that "fixes" the count by declaring them
 empty again fails the test.
 
+---
+
+## The HVAC cross-check — `/ui/hvac`, and what it found
+
+Asked on 2026-08-22: does the Bryant data match what the breakers see? The answer is in
+three parts, and the screen at **`http://13.219.164.226:8080/ui/hvac`** shows all of them.
+
+**1. The kWh comparison is impossible today, and not for a subtle reason.** `fetch-daily`
+writes Bryant's day-grain energy to `energy/daily` in **S3**, never to the spool (rule 6),
+and no bucket is configured — so `bryant_daily.last_success_utc` has been `null` since the
+instance was built and **zero Bryant energy rows exist anywhere**. This is the S3 gap again,
+now with a user-visible cost. The screen states it instead of drawing an empty chart.
+
+**2. What can be compared — Bryant's 30s state against the panel's 30s watts — agrees, well.**
+
+| | |
+|---|---|
+| capacity % vs compressor watts | **r = 0.976** (1-min buckets, n=289) |
+| slope | **29.9 W per capacity point**, sd 1.4 (4.7%) |
+| implied full-load draw | **2.99 kW** — sane for a 5-ton variable-speed unit |
+| Bryant says off (no `stage_pct`) | breaker reads **exactly 0.0 W**, 72 of 72 buckets |
+| Bryant reports a capacity | breaker never below **1,175 W**, 289 of 289 |
+| disagreements | **0** |
+
+Two clouds that share no identifier, describing one machine, and they agree to within a few
+percent. That is the first independent confirmation that the HVAC side of this data is
+trustworthy.
+
+**3. `ct_2_a`/`ct_2_b` are not (mostly) the strip heat.** Over the full five-day Bryant
+overlap the feeder's watts correlate **r = 0.959 with blower RPM cubed** — the fan affinity
+law — versus **0.73 with compressor capacity**, running 0 W at 400 rpm to 822 W at 1,200 rpm.
+The clamps are on the whole HVAC subpanel feeder, and in cooling season what flows through
+them is the **air handler blower**. The earlier "flat 0 W through 17 minutes of cooling"
+reading is not contradicted — it was taken at low blower speed, where the feeder still reads
+0.0 W today. This is also partial evidence for blackstart's `hvac-blower-circuit`: the blower
+is behind the feed-through lug, which is what that safety note assumed.
+
+### The trap the screen is built around
+
+**Bryant and Leviton never share a `ts_utc`.** Each source stamps its own cycle, so joining
+on the canonical dedupe key returns **0 rows of 722** — not few, zero. Every comparison on
+this screen is bucket-aligned, and the bucket width is printed next to every number. Same
+lesson as the two-collector overlap: `ts_utc` identifies a cycle, not an instant two pollers
+agree on.
+
+### Caveats the screen keeps visible
+
+The compressor breaker went in at **16:59Z on 2026-08-22**, so its baseline is *hours*, all
+in cooling, capacity 45–85%, one outdoor-temperature band. Sample counts and coverage are on
+every figure for that reason — a 24h window currently reports ~26% coverage, which is the
+honest number. Heating season, defrost and the strips are all unobserved.
+
+Selection is by `category == "hvac"` in `channel_map.json` (the compressor's entry gained an
+explicit override), so a future HVAC circuit joins the screen by being mapped, not by a code
+change. DEVIATIONS #172 has the reasoning.
+
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep

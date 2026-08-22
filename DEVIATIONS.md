@@ -2991,6 +2991,54 @@ breaker falls through `if breaker["position"] in _LEG1_POSITIONS` and is silentl
 to leg 2, while its panel card renders from position 1 upward so the entity never appears.
 `gtxaspec/leviton-load-center` names it `Breaker 0`. There was no prior art to copy.
 
+## 172. `/ui/hvac` is new, and the comparison it was built for turned out to be impossible
+
+PLAN.md has no HVAC cross-check screen, the same way it had no dashboard (#164).
+This one was asked for as "does the Bryant data match what the breakers see", and answering
+it turned up three things worth recording.
+
+**The comparison as posed cannot be made.** Bryant's own energy is day-grain and
+`fetch-daily` writes it to `energy/daily` in **S3** — never to the spool, because rule 6
+forbids day-grain rows there. No bucket is configured, so `bryant_daily.last_success_utc`
+has been `null` since the instance was built and **not one Bryant energy row exists
+anywhere**. Comparing Bryant kWh against breaker kWh is therefore blocked by the same S3
+gap as everything else, and the screen says so in words (`bryant_energy.available: false`)
+rather than drawing an empty chart that would read as zero.
+
+**What can be compared is better anyway**, and it validated: Bryant's 30s *state* against
+the panel's 30s *watts*. Measured over the first six hours of the compressor breaker's
+life, `stage_pct` (the outdoor unit's capacity percentage) and `breaker_p10`'s watts track
+at **r = 0.976 on 1-minute buckets, 29.9 W per capacity point (sd 1.4), implying 2.99 kW at
+100%** — a sane figure for a 5-ton variable-speed unit, from two clouds that share no
+identifier. And the on/off test is perfect: in 72 buckets where Bryant omitted `stage_pct`
+the breaker read **exactly 0.0 W**, and in 289 where it reported a capacity the breaker
+never dropped below 1,175 W. Zero disagreements either way.
+
+**The two sources never share a `ts_utc`,** and this is the trap the screen is built around.
+Each source stamps its own cycle (`new_cycle(ts_utc=now_utc())`), so a join on the canonical
+key returns **nothing** — measured, 0 rows of 722, not a small number but zero. Every
+comparison here is bucket-aligned and the bucket width is reported with the numbers. It is
+the same lesson as the two-collector overlap (`deploy/spool-splice.py`): `ts_utc` identifies
+a *cycle*, not an instant two pollers agree on.
+
+**A fourth finding revises an earlier inference.** `channel_map.json`'s `ct_2_a`/`ct_2_b`
+notes record `ct_2_a`/`ct_2_b` as the electric strip heat, on the strength of a flat 0 W across 17
+minutes of cooling. Over five days of Bryant status the feeder's watts correlate **r = 0.959
+with blower RPM *cubed*** — the fan affinity law — against **0.73 with compressor capacity**,
+and its rpm bands run 0 W at 400 rpm to 822 W at 1,200 rpm. So the clamps are on the whole
+subpanel feeder and what they mostly carry in cooling season is the **air handler blower**,
+not the strips. The earlier 17-minute observation is not contradicted, it was taken at low
+blower speed (400 rpm bands still mean 0.0 W today). The screen reports those four
+correlations side by side precisely so the question stays open to evidence rather than being
+settled by a label.
+
+Two design choices worth defending. The panel side is selected by `category == "hvac"` in
+`channel_map.json`, not by hub id in code, so a second HVAC circuit reaches the screen by
+being mapped — and the compressor's entry gains an explicit `category` override for it.
+And `breaker_*` vs `ct_*` is the only thing the module infers, because §6.5 already makes
+that distinction mean "equipment circuit" vs "clamp on a feeder", which is exactly the
+difference between measuring the compressor and measuring whatever else shares its subpanel.
+
 ---
 
 # Status — what is done, and what has never been executed
