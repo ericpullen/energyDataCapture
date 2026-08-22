@@ -717,13 +717,27 @@ class HealthServer:
                 return (200, dashboard.render_page().encode("utf-8"), dashboard.PAGE_CONTENT_TYPE)
             except Exception as exc:
                 return self._ui_error("dashboard page could not be read", exc)
-        if path == dashboard.UI_DATA_PATH:
+        if path == dashboard.UI_HVAC_PAGE_PATH:
             try:
-                status, snapshot = await asyncio.to_thread(
-                    dashboard.handle_ui_data, self._store, target
+                return (
+                    200,
+                    dashboard.render_hvac_page().encode("utf-8"),
+                    dashboard.PAGE_CONTENT_TYPE,
                 )
             except Exception as exc:
-                return self._ui_error("dashboard snapshot failed", exc)
+                return self._ui_error("hvac page could not be read", exc)
+        for route, handler in (
+            (dashboard.UI_DATA_PATH, dashboard.handle_ui_data),
+            (dashboard.UI_HVAC_DATA_PATH, dashboard.handle_ui_hvac),
+        ):
+            if path != route:
+                continue
+            try:
+                # Both read the spool and both are called from the loop that also
+                # runs the poll loops, so neither may block it.
+                status, snapshot = await asyncio.to_thread(handler, self._store, target)
+            except Exception as exc:
+                return self._ui_error(f"{route} failed", exc)
             payload = (
                 json.dumps(snapshot, ensure_ascii=False, default=_jsonable) + "\n"
             ).encode("utf-8")

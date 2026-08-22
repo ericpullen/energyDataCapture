@@ -1,0 +1,417 @@
+<!doctype html>
+<!--
+  energycap — the HVAC cross-check, served at GET /ui/hvac by energy_capture.health.
+
+  One question: two clouds describe one heat pump, do they agree? Bryant reports
+  the system's state every 30s (mode, compressor capacity %, blower RPM, CFM);
+  Leviton reports the electricity every 30s from the panel (the compressor's own
+  breaker, and the CT pair on the HVAC subpanel feeder). This page puts them on
+  one axis and states how well they track.
+
+  Same rules as /ui, and they matter more here, not less:
+
+    * Lines BREAK on a gap. Nothing is zero-filled, ever.
+    * An ABSENT capacity reading is not a gap and not a zero — Bryant omits the
+      field while the compressor is off, so absence is the cloud SAYING "off".
+      It is drawn as its own band, labelled, and it is the cleanest agreement
+      test on the page: capacity absent should mean the breaker reads ~0 W.
+    * Every aggregate carries its sample count. The compressor breaker is days
+      old, not weeks, and the page says so rather than implying a long baseline.
+    * The two sources never share a ts_utc, so every comparison here is
+      bucket-aligned. The bucket width is printed next to the numbers.
+    * Bryant's own kWh is NOT shown, because it does not exist yet: fetch-daily
+      writes day-grain energy to S3 and no bucket is configured. The page says
+      that in words instead of drawing an empty chart.
+
+  Colour: --s1 is the panel (watts, the measured thing), --s2 is Bryant (the
+  reported thing), --s3 is the feeder. Assigned by ROLE and never cycled.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>energycap — HVAC cross-check</title>
+<style>
+:root {
+  --surface:#fcfcfb; --card:#ffffff; --text-1:#0b0b0b; --text-2:#52514e;
+  --line:#e5e4e0; --line-strong:#d3d2cd;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  --mark-muted:#8d8c85;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    --surface:#1a1a19; --card:#222221; --text-1:#ffffff; --text-2:#c3c2b7;
+    --line:#33322f; --line-strong:#454440;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+    --mark-muted:#8b8a82; --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --surface:#1a1a19; --card:#222221; --text-1:#ffffff; --text-2:#c3c2b7;
+  --line:#33322f; --line-strong:#454440;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --mark-muted:#8b8a82; --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--surface); color:var(--text-1);
+  font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+main { max-width:1100px; margin:0 auto; padding:18px 16px 60px; }
+h1 { font-size:19px; margin:0 0 2px; letter-spacing:-.01em; }
+h2 { font-size:14px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.06em;
+     color:var(--text-2); font-weight:600; }
+a { color:var(--s1); }
+.sub { color:var(--text-2); font-size:12.5px; margin:0 0 16px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+        padding:14px 16px; margin-bottom:14px; box-shadow:var(--shadow); }
+.row { display:flex; flex-wrap:wrap; gap:14px; }
+.row > .card { flex:1 1 300px; margin-bottom:0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
+.stat .k { font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-2); }
+.stat .v { font-size:22px; font-variant-numeric:tabular-nums; line-height:1.15; }
+.stat .n { font-size:11.5px; color:var(--text-2); }
+.panel .v { color:var(--s1); }
+.bryant .v { color:var(--s2); }
+.feeder .v { color:var(--s3); }
+table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+th, td { text-align:right; padding:5px 7px; border-bottom:1px solid var(--line); font-size:12.5px; }
+th:first-child, td:first-child { text-align:left; }
+th { color:var(--text-2); font-weight:600; text-transform:uppercase; font-size:11px;
+     letter-spacing:.04em; }
+figure { margin:0; }
+figure svg { display:block; width:100%; height:auto; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--text-2);
+          margin:8px 0 0; }
+.legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px;
+            vertical-align:-1px; }
+.note { font-size:12px; color:var(--text-2); margin:10px 0 0; }
+.warn { border-left:3px solid var(--warning); padding-left:10px; }
+.verdict { font-size:15px; margin:0 0 6px; }
+.mono { font-variant-numeric:tabular-nums; }
+button {
+  font:inherit; font-size:12.5px; padding:4px 10px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--line-strong); background:var(--card); color:var(--text-1);
+}
+button[aria-pressed="true"] { background:var(--s1); border-color:var(--s1); color:#fff; }
+.controls { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+.pill { font-size:11.5px; padding:2px 8px; border-radius:999px; border:1px solid var(--line-strong);
+        color:var(--text-2); }
+.err { color:var(--critical); font-size:12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HVAC cross-check</h1>
+  <p class="sub">
+    What the Bryant cloud says the system is doing, against what the panel measures.
+    <a href="/ui">&larr; full dashboard</a>
+  </p>
+  <div class="controls" id="controls"></div>
+  <div id="root">
+    <div class="card">Loading&hellip;</div>
+  </div>
+  <p class="note" id="footer"></p>
+</main>
+<script>
+"use strict";
+var WINDOW_S = null;          // null = use the server's default
+var timer = null;
+var payload = null;
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+function num(v, digits) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toLocaleString(undefined, {
+    minimumFractionDigits: digits || 0, maximumFractionDigits: digits || 0
+  });
+}
+function dur(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 5400) return Math.round(s / 60) + " min";
+  if (s < 172800) return (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h";
+  return (s / 86400).toFixed(1) + " days";
+}
+function hhmm(iso) { return iso ? String(iso).slice(11, 16) : "—"; }
+
+async function refresh() {
+  var url = "/ui/hvac/data" + (WINDOW_S ? "?window_s=" + WINDOW_S : "");
+  try {
+    var res = await fetch(url, {cache: "no-store"});
+    payload = await res.json();
+    render();
+  } catch (e) {
+    document.getElementById("root").innerHTML =
+      '<div class="card err">Could not reach ' + esc(url) + ": " + esc(e.message) + "</div>";
+  }
+  clearTimeout(timer);
+  timer = setTimeout(refresh, ((payload && payload.refresh_s) || 15) * 1000);
+}
+
+/* ---------------------------------------------------------------- controls */
+function renderControls(hv) {
+  var presets = (hv && hv.window && hv.window.presets_s) || [3600, 21600, 86400];
+  var active = hv && hv.window ? hv.window.window_s : null;
+  var html = '<span class="pill">window</span>';
+  presets.forEach(function (s) {
+    html += '<button data-window="' + s + '" aria-pressed="' + (s === active) + '">' +
+      esc(dur(s)) + "</button>";
+  });
+  if (hv && hv.window) {
+    html += '<span class="pill">' + esc(dur(hv.window.bucket_s)) + " buckets</span>";
+    if (hv.window.clamped) html += '<span class="pill">window clamped</span>';
+  }
+  var el = document.getElementById("controls");
+  el.innerHTML = html;
+  Array.prototype.forEach.call(el.querySelectorAll("button[data-window]"), function (b) {
+    b.addEventListener("click", function () {
+      WINDOW_S = Number(b.getAttribute("data-window"));
+      refresh();
+    });
+  });
+}
+
+/* ------------------------------------------------------------------- chart
+   Two y-axes on purpose: watts on the left (what the panel measured) and
+   capacity % on the right (what Bryant reported). The whole point of the page
+   is whether the two lines have the same shape, which a single normalised axis
+   would hide. Absent-capacity spans get a background band, because "Bryant says
+   off" is a state and not a missing value. */
+function chart(hv) {
+  var buckets = hv.buckets || [];
+  if (!buckets.length) return '<p class="note">No samples in this window.</p>';
+  var W = 1000, H = 260, L = 52, R = 48, T = 12, B = 26;
+  var iw = W - L - R, ih = H - T - B;
+  var t0 = Date.parse(hv.window.start.utc), t1 = Date.parse(hv.window.end.utc);
+  var maxW = 0;
+  buckets.forEach(function (b) {
+    maxW = Math.max(maxW, b.equipment_w || 0, b.feeder_w || 0);
+  });
+  maxW = Math.max(100, Math.ceil(maxW / 500) * 500);
+  var X = function (iso) { return L + iw * (Date.parse(iso) - t0) / Math.max(1, t1 - t0); };
+  var YW = function (w) { return T + ih * (1 - w / maxW); };
+  var YP = function (p) { return T + ih * (1 - p / 100); };
+
+  /* Absent-capacity bands: contiguous runs where Bryant omitted the field. */
+  var bands = "", runStart = null;
+  buckets.forEach(function (b, i) {
+    var off = !b.capacity_present;
+    if (off && runStart === null) runStart = b.at.utc;
+    if ((!off || i === buckets.length - 1) && runStart !== null) {
+      var x0 = X(runStart), x1 = X(b.at.utc);
+      bands += '<rect x="' + x0.toFixed(1) + '" y="' + T + '" width="' +
+        Math.max(1, x1 - x0).toFixed(1) + '" height="' + ih +
+        '" fill="var(--mark-muted)" opacity=".1"></rect>';
+      runStart = null;
+    }
+  });
+
+  /* Lines break at any bucket with no value — a gap stays a gap. */
+  function path(field, scale) {
+    var out = "", pen = false;
+    buckets.forEach(function (b) {
+      var v = b[field];
+      if (v === null || v === undefined) { pen = false; return; }
+      out += (pen ? "L" : "M") + X(b.at.utc).toFixed(1) + " " + scale(v).toFixed(1) + " ";
+      pen = true;
+    });
+    return out.trim();
+  }
+  function line(field, scale, color, width) {
+    var d = path(field, scale);
+    if (!d) return "";
+    return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="' +
+      (width || 1.8) + '" stroke-linejoin="round"></path>';
+  }
+
+  var ticks = "";
+  for (var g = 0; g <= 4; g++) {
+    var y = T + ih * g / 4;
+    ticks += '<line x1="' + L + '" y1="' + y.toFixed(1) + '" x2="' + (W - R) +
+      '" y2="' + y.toFixed(1) + '" stroke="var(--line)" stroke-width="1"></line>' +
+      '<text x="' + (L - 7) + '" y="' + (y + 4).toFixed(1) +
+      '" text-anchor="end" font-size="10" fill="var(--text-2)">' +
+      num(maxW * (1 - g / 4)) + '</text>' +
+      '<text x="' + (W - R + 7) + '" y="' + (y + 4).toFixed(1) +
+      '" font-size="10" fill="var(--s2)">' + num(100 * (1 - g / 4)) + '%</text>';
+  }
+  var xlabels = "";
+  [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+    var ms = t0 + (t1 - t0) * f;
+    xlabels += '<text x="' + (L + iw * f).toFixed(1) + '" y="' + (H - 8) +
+      '" text-anchor="' + (f === 0 ? "start" : f === 1 ? "end" : "middle") +
+      '" font-size="10" fill="var(--text-2)">' +
+      esc(new Date(ms).toISOString().slice(11, 16)) + "Z</text>";
+  });
+
+  return '<figure><svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' +
+    'compressor watts, HVAC feeder watts and Bryant capacity percent over time">' +
+    bands + ticks +
+    line("feeder_w", YW, "var(--s3)", 1.4) +
+    line("equipment_w", YW, "var(--s1)") +
+    line("capacity_pct", YP, "var(--s2)", 1.6) +
+    xlabels + "</svg></figure>" +
+    '<p class="legend">' +
+    '<span><i style="background:var(--s1)"></i>compressor breaker (W, left)</span>' +
+    '<span><i style="background:var(--s3)"></i>HVAC subpanel feeder (W, left)</span>' +
+    '<span><i style="background:var(--s2)"></i>Bryant capacity (%, right)</span>' +
+    '<span><i style="background:var(--mark-muted);opacity:.35"></i>' +
+    'Bryant reported no capacity &mdash; compressor off</span></p>';
+}
+
+/* ----------------------------------------------------------------- verdict */
+function verdict(hv) {
+  var a = hv.agreement || {}, off = hv.off_state || {};
+  var lines = [];
+  if (a.n >= 3 && a.r !== null && a.r !== undefined) {
+    var word = a.r >= 0.95 ? "tracks closely" : a.r >= 0.8 ? "tracks" : "tracks loosely";
+    lines.push("Measured compressor power <strong>" + word + "</strong> Bryant's reported " +
+      "capacity: r = <span class=\"mono\">" + num(a.r, 3) + "</span> over " +
+      num(a.n) + " buckets, at <span class=\"mono\">" + num(a.watts_per_point, 1) +
+      " W</span> per capacity point (&plusmn;" + num(a.watts_per_point_sd, 1) +
+      "), implying <span class=\"mono\">" + num((a.implied_full_load_w || 0) / 1000, 2) +
+      " kW</span> at 100%.");
+  } else {
+    lines.push("Not enough overlapping samples yet to correlate capacity against watts (" +
+      num(a.n || 0) + " buckets).");
+  }
+  if (off.absent_buckets || off.present_buckets) {
+    lines.push("When Bryant reports <em>no</em> capacity the breaker reads at most " +
+      "<span class=\"mono\">" + num(off.absent_max_w, 1) + " W</span> (" +
+      num(off.absent_buckets) + " buckets); when it reports capacity the breaker never " +
+      "drops below <span class=\"mono\">" + num(off.present_min_w, 0) + " W</span> (" +
+      num(off.present_buckets) + " buckets). <strong>" +
+      (off.disagreements === 0 ? "No disagreements." :
+        num(off.disagreements) + " bucket(s) disagree.") + "</strong>");
+  }
+  return lines.map(function (l) { return '<p class="verdict">' + l + "</p>"; }).join("");
+}
+
+function bandsTable(a) {
+  if (!a || !a.bands || !a.bands.length) return "";
+  var rows = a.bands.map(function (b) {
+    return "<tr><td>" + num(b.capacity_pct) + "%</td><td>" + num(b.n) + "</td><td>" +
+      num(b.mean_w) + "</td><td>" + num(b.min_w) + "</td><td>" + num(b.max_w) +
+      "</td><td>" + num(b.capacity_pct ? b.mean_w / b.capacity_pct : null, 1) + "</td></tr>";
+  }).join("");
+  return '<h2>Calibration &mdash; watts at each reported capacity</h2><table>' +
+    "<tr><th>capacity</th><th>buckets</th><th>mean W</th><th>min</th><th>max</th>" +
+    "<th>W / point</th></tr>" + rows + "</table>" +
+    '<p class="note">A variable-speed compressor should draw very nearly in ' +
+    'proportion to the capacity the control reports. A flat right-hand column is ' +
+    'the two clouds agreeing about one machine.</p>';
+}
+
+function feederTable(f) {
+  if (!f || !f.n) return "";
+  var rows = (f.bands || []).map(function (b) {
+    return "<tr><td>" + num(b.blower_rpm) + "</td><td>" + num(b.n) + "</td><td>" +
+      num(b.mean_w, 1) + "</td><td>" + num(b.max_w, 1) + "</td></tr>";
+  }).join("");
+  var strongest = [["blower RPM", f.r_vs_blower_rpm], ["RPM cubed", f.r_vs_rpm_cubed],
+    ["CFM", f.r_vs_cfm], ["compressor capacity", f.r_vs_capacity_pct]]
+    .filter(function (p) { return p[1] !== null && p[1] !== undefined; })
+    .sort(function (x, y) { return Math.abs(y[1]) - Math.abs(x[1]); })[0];
+  return '<h2>What the HVAC subpanel feeder is actually carrying</h2>' +
+    '<div class="grid">' +
+    stat("feeder", "r vs blower RPM", num(f.r_vs_blower_rpm, 3), "") +
+    stat("feeder", "r vs RPM&sup3;", num(f.r_vs_rpm_cubed, 3), "fan affinity law") +
+    stat("feeder", "r vs CFM", num(f.r_vs_cfm, 3), "") +
+    stat("feeder", "r vs capacity %", num(f.r_vs_capacity_pct, 3), "the compressor test") +
+    "</div>" +
+    (strongest ? '<p class="note">Strongest association: <strong>' + esc(strongest[0]) +
+      "</strong> (r = " + num(strongest[1], 3) + "). Fan power rises with the cube of " +
+      "speed, so RPM&sup3; leading is the fingerprint of a blower rather than a " +
+      "resistive element; the compressor column is the control.</p>" : "") +
+    (rows ? "<table><tr><th>blower RPM</th><th>buckets</th><th>mean W</th><th>max W</th></tr>" +
+      rows + "</table>" : "");
+}
+
+function stat(cls, k, v, n) {
+  return '<div class="stat ' + cls + '"><div class="k">' + k + '</div><div class="v">' +
+    v + '</div><div class="n">' + (n || "") + "</div></div>";
+}
+
+function nowCards(hv) {
+  var b = hv.latest || {};
+  return '<h2>Right now</h2><div class="grid">' +
+    stat("panel", "compressor", num(b.equipment_w, 0) + " W",
+      num(b.equipment_samples) + " samples this bucket") +
+    stat("feeder", "HVAC feeder", num(b.feeder_w, 0) + " W", "CT pair, both legs summed") +
+    stat("bryant", "Bryant capacity",
+      b.capacity_present ? num(b.capacity_pct, 0) + "%" : "off",
+      b.capacity_present ? "reported" : "field absent = compressor off") +
+    stat("bryant", "blower", num(b.blower_rpm, 0) + " rpm", num(b.cfm, 0) + " CFM") +
+    stat("bryant", "outdoor", num(b.outdoor_temp_f, 0) + "°F",
+      "indoor " + num(b.indoor_temp_f, 0) + "°F") +
+    "</div>";
+}
+
+function energyCard(hv) {
+  var e = hv.energy || {}, eq = e.equipment || {}, fd = e.feeder || {};
+  return '<h2>Energy over this window</h2><div class="grid">' +
+    stat("panel", "compressor", num(eq.kwh, 3) + " kWh",
+      num(eq.mean_w, 0) + " W mean over " + dur(eq.observed_s) + " observed") +
+    stat("feeder", "HVAC feeder", num(fd.kwh, 3) + " kWh",
+      num(fd.mean_w, 0) + " W mean over " + dur(fd.observed_s) + " observed") +
+    stat("panel", "HVAC total", num(e.total_kwh, 3) + " kWh",
+      num(e.coverage_pct, 1) + "% sample coverage") +
+    "</div>" +
+    '<p class="note">' + esc(e.note || "") + "</p>" +
+    '<div class="note warn"><strong>Bryant’s own kWh is not here.</strong> ' +
+    esc((hv.bryant_energy || {}).reason || "") + "</div>";
+}
+
+function channelsCard(hv) {
+  var rows = (hv.equipment || []).concat(hv.feeders || []).map(function (c) {
+    return "<tr><td>" + esc(c.label) + "</td><td>" + esc(c.channel_id) + "</td><td>" +
+      esc(c.device_id) + "</td><td>" +
+      esc(c.blackstart_device_id || "—") + "</td></tr>";
+  }).join("");
+  if (!rows) return "";
+  return '<h2>Channels compared</h2><table>' +
+    "<tr><th>label</th><th>channel_id</th><th>hub (device_id)</th><th>blackstart</th></tr>" +
+    rows + "</table>" +
+    '<p class="note">Selected by <code>category: "hvac"</code> in ' +
+    "channel_map.json &mdash; a new HVAC circuit joins this screen by being mapped, " +
+    "not by a code change. channel_id repeats across hubs, so device_id is part of " +
+    "the identity.</p>";
+}
+
+function render() {
+  var hv = (payload && payload.hvac) || {};
+  renderControls(hv);
+  var root = document.getElementById("root");
+  if (!hv.present) {
+    root.innerHTML = '<div class="card warn">' +
+      esc(hv.reason || "No HVAC comparison available.") + "</div>";
+  } else {
+    root.innerHTML =
+      '<div class="card">' + nowCards(hv) + "</div>" +
+      '<div class="card">' + verdict(hv) +
+      '<p class="note">' + esc(hv.alignment_note || "") + "</p>" + chart(hv) + "</div>" +
+      '<div class="card">' + bandsTable(hv.agreement) + "</div>" +
+      '<div class="card">' + feederTable(hv.feeder_profile) + "</div>" +
+      '<div class="card">' + energyCard(hv) + "</div>" +
+      '<div class="card">' + channelsCard(hv) + "</div>";
+  }
+  var errs = (payload && payload.errors) || [];
+  document.getElementById("footer").innerHTML =
+    "Generated " + esc(hhmm(payload.generated && payload.generated.local)) + " local (" +
+    esc(payload.tz || "") + "), window " +
+    esc(hv.window ? dur(hv.window.window_s) : "—") + ", " +
+    esc(hv.window ? dur(hv.window.bucket_s) : "—") + " buckets." +
+    (errs.length ? ' <span class="err">' + esc(errs.join("; ")) + "</span>" : "");
+}
+
+refresh();
+</script>
+</body>
+</html>

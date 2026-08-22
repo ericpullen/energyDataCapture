@@ -144,6 +144,10 @@ __all__ = [
     "GAP_INTERVAL_FACTOR",
     "HOURLY_WINDOW_HOURS",
     "KWH_FORMULA",
+    "UI_HVAC_PAGE_PATH",
+    "UI_HVAC_DATA_PATH",
+    "handle_ui_hvac",
+    "render_hvac_page",
     "PAGE_CONTENT_TYPE",
     "SERIES_WINDOW_MINUTES",
     "UI_DATA_PATH",
@@ -172,7 +176,14 @@ log = get_logger("dashboard")
 #: nothing else, so the existing ``DEFAULT_HEALTH_PATHS`` keep their behaviour.
 UI_PAGE_PATH: str = "/ui"
 UI_DATA_PATH: str = "/ui/data"
-UI_PATHS: frozenset[str] = frozenset({UI_PAGE_PATH, UI_DATA_PATH})
+#: The HVAC cross-check screen: Bryant's account of the system against the
+#: panel's. Its own page and payload rather than another card on ``/ui``, because
+#: it answers one question and wants the whole width to do it (``hvacview``).
+UI_HVAC_PAGE_PATH: str = "/ui/hvac"
+UI_HVAC_DATA_PATH: str = "/ui/hvac/data"
+UI_PATHS: frozenset[str] = frozenset(
+    {UI_PAGE_PATH, UI_DATA_PATH, UI_HVAC_PAGE_PATH, UI_HVAC_DATA_PATH}
+)
 
 PAGE_CONTENT_TYPE: str = "text/html; charset=utf-8"
 
@@ -182,6 +193,7 @@ PAGE_CONTENT_TYPE: str = "text/html; charset=utf-8"
 #: in the wheel the container installs — the same way ``stages/rollup.sql`` does.
 _PAGE_PACKAGE: str = "energy_capture"
 _PAGE_RESOURCE: str = "static/dashboard.html"
+_HVAC_PAGE_RESOURCE: str = "static/hvac.html"
 
 #: How far apart two consecutive samples may be before the line BREAKS. 1.5x the
 #: poll interval: one missed cycle is already a gap, and half an interval of
@@ -358,6 +370,7 @@ def _chart_points_sql(channels: int) -> str:
 
 
 _page_cache: str | None = None
+_hvac_page_cache: str | None = None
 _page_lock = threading.Lock()
 
 
@@ -379,11 +392,114 @@ def render_page() -> str:
         return _page_cache
 
 
+def render_hvac_page() -> str:
+    """``static/hvac.html``, read once and cached — see :func:`render_page`."""
+    global _hvac_page_cache
+    with _page_lock:
+        if _hvac_page_cache is None:
+            _hvac_page_cache = (
+                resources.files(_PAGE_PACKAGE)
+                .joinpath(_HVAC_PAGE_RESOURCE)
+                .read_text(encoding="utf-8")
+            )
+        return _hvac_page_cache
+
+
 def reset_page_cache() -> None:
-    """Drop the cached page (tests; and a dev editing the HTML in place)."""
-    global _page_cache
+    """Drop the cached pages (tests; and a dev editing the HTML in place)."""
+    global _page_cache, _hvac_page_cache
     with _page_lock:
         _page_cache = None
+        _hvac_page_cache = None
+
+
+def handle_ui_hvac(
+    store: StatusStore | None = None,
+    target: str | None = None,
+    *,
+    spool_path: Path | str | None = None,
+    channel_map_path: Path | str | None = None,
+    inventory_path: Path | str | None = None,
+    now: datetime | None = None,
+    settings: Settings | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """``(status, document)`` for ``GET /ui/hvac/data``.
+
+    Always 200: an unparseable ``?window_s=`` falls back to the default rather
+    than 400ing, because this is a diagnostic screen and the default window is a
+    more useful answer than an error. Failures below the top level land in
+    ``errors`` the way ``/ui/data``'s do.
+    """
+    from energy_capture import hvacview
+
+    errors: list[str] = []
+    reference = timeutil.ensure_utc(now) if now is not None else timeutil.now_utc()
+
+    resolved = settings
+    if resolved is None:
+        try:
+            from energy_capture.config import get_settings
+
+            resolved = get_settings()
+        except Exception as exc:  # pragma: no cover - configuration must not break the page
+            errors.append(f"settings unavailable: {type(exc).__name__}: {exc}")
+
+    if spool_path is None:
+        spool_path = getattr(resolved, "spool_db_path", None)
+    if channel_map_path is None:
+        channel_map_path = Path("config/channel_map.json")
+    if inventory_path is None:
+        inventory_path = getattr(resolved, "blackstart_inventory_path", None)
+
+    window_s, clamped = hvacview.parse_window_s(_query_value(target, "window_s"))
+    labels = _labels(channel_map_path, inventory_path, errors)
+    poll_interval_s = int(getattr(resolved, "poll_interval_s", 30) or 30)
+    bryant_interval_s = int(getattr(resolved, "bryant_poll_interval_s", 30) or 30)
+
+    comparison: dict[str, Any]
+    if spool_path is None:
+        errors.append("no spool path is configured")
+        comparison = hvacview.hvac_comparison(
+            None, labels, now=reference, window_s=window_s, clamped=clamped, errors=errors
+        )
+    else:
+        try:
+            with open_readonly(spool_path) as conn:
+                comparison = hvacview.hvac_comparison(
+                    conn,
+                    labels,
+                    now=reference,
+                    window_s=window_s,
+                    clamped=clamped,
+                    poll_interval_s=poll_interval_s,
+                    bryant_interval_s=bryant_interval_s,
+                    errors=errors,
+                )
+        except Exception as exc:
+            errors.append(f"spool unreadable: {type(exc).__name__}: {exc}")
+            comparison = hvacview.hvac_comparison(
+                None, labels, now=reference, window_s=window_s, clamped=clamped, errors=errors
+            )
+
+    document = {
+        "generated": _stamp(reference),
+        "tz": timeutil.tz_name(),
+        "refresh_s": 15,
+        "hvac": comparison,
+        "errors": errors,
+    }
+    return (200, document)
+
+
+def _query_value(target: str | None, name: str) -> str | None:
+    """One query parameter out of a raw request target, or ``None``."""
+    if not target or "?" not in target:
+        return None
+    query = target.split("?", 1)[1].split("#", 1)[0]
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key == name:
+            return value
+    return None
 
 
 # ------------------------------------------------------------ time helpers
