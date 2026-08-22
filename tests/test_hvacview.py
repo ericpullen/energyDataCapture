@@ -499,6 +499,66 @@ def test_a_partly_covered_day_is_not_offered_as_a_comparison(
     assert "coverage" in entry["delta_reason"]
 
 
+def test_a_day_whose_compressor_channel_did_not_exist_is_not_a_disagreement(
+    spool: SpoolDB, channel_map: Path, make_obs, tmp_path: Path
+) -> None:
+    """The mistake this gate exists to prevent, from real data.
+
+    On 2026-08-18..21 the feeder covered 100% of every day while the compressor
+    breaker had not been installed yet. A single blended coverage number called
+    those days fully covered, so the screen reported a -99% "disagreement" that
+    was really a missing channel. Coverage is per group, and every mapped channel
+    must have reported.
+    """
+    from energy_capture.stages import dailystore
+
+    day = (NOW - timedelta(days=1)).date()
+    ts = timeutil.local_midnight_utc(day)
+    out_dir = tmp_path / "daily"
+    dailystore.write_month_table(
+        dailystore.build_month_table(
+            [
+                model.Observation(
+                    ts_utc=ts,
+                    ts_local=timeutil.to_local_naive(ts),
+                    source=model.SOURCE_BRYANT,
+                    device_id=SERIAL,
+                    channel_id="cooling",
+                    metric="kwh_day",
+                    value=21.0,
+                    unit="kWh",
+                )
+            ]
+        ),
+        dailystore.MonthDestination(
+            dailystore.month_start_of(day), out_dir=out_dir, bucket=None
+        ),
+    )
+
+    # A full day of the FEEDER only — no compressor rows at all, exactly as
+    # before the breaker went in.
+    start = timeutil.local_midnight_utc(day)
+    seed(
+        spool, make_obs, start=start, count=2880, every_s=30,
+        compressor_w=None, feeder_w=20.0, capacity_pct=None, blower_rpm=None,
+    )
+    # A window wide enough to include yesterday, or the payload short-circuits
+    # on "no rows in this window" before it ever reads the day-grain dataset.
+    energy = block(
+        spool,
+        channel_map,
+        energy_out_dir=out_dir,
+        target="/ui/hvac/data?window_s=172800",
+    )["bryant_energy"]
+
+    (entry,) = [d for d in energy["days"] if d["local_day"] == day.isoformat()]
+    assert entry["panel"]["feeder_coverage_pct"] == pytest.approx(100.0, abs=0.5)
+    assert entry["panel"]["equipment_coverage_pct"] == 0.0
+    assert entry["panel"]["all_channels_present"] is False
+    assert entry["delta_pct"] is None, "a missing channel is not a disagreement"
+    assert "did not exist yet" in entry["delta_reason"]
+
+
 # ----------------------------------------------------------------- the route
 
 

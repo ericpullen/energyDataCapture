@@ -323,18 +323,57 @@ def _panel_daily_kwh(
             continue
         bucket = per_day.setdefault(
             local_day,
-            {"equipment_kwh": 0.0, "feeder_kwh": 0.0, "samples": 0, "channels": 0},
+            {
+                "equipment_kwh": 0.0,
+                "feeder_kwh": 0.0,
+                "samples_by_group": {},
+                "channels_by_group": {},
+            },
         )
         kwh = float(mean_w or 0.0) * samples * poll_interval_s / 3.6e6
         bucket[f"{group}_kwh"] += kwh
-        bucket["samples"] = max(bucket["samples"], int(samples))
-        bucket["channels"] += 1
+        # Max, not sum: the group's channels are polled in the same cycle, so the
+        # samples of any one of them measure how much of the day was observed.
+        bucket["samples_by_group"][group] = max(
+            bucket["samples_by_group"].get(group, 0), int(samples)
+        )
+        bucket["channels_by_group"][group] = bucket["channels_by_group"].get(group, 0) + 1
     expected = 86400 // max(1, poll_interval_s)
+    equipment_channels = len(equipment_keys)
+    feeder_channels = len(feeder_keys)
     for bucket in per_day.values():
         bucket["equipment_kwh"] = round(bucket["equipment_kwh"], 4)
         bucket["feeder_kwh"] = round(bucket["feeder_kwh"], 4)
         bucket["total_kwh"] = round(bucket["equipment_kwh"] + bucket["feeder_kwh"], 4)
-        bucket["coverage_pct"] = round(100.0 * bucket["samples"] / expected, 1)
+        # Coverage is PER GROUP, and the comparable figure is the WORSE of the
+        # two. Measured the hard way: for 2026-08-18..21 the feeder covered 100%
+        # of every day while the compressor breaker did not yet exist, and a
+        # single blended coverage number reported those days as fully covered —
+        # so the screen showed a -99% "disagreement" that was really a channel
+        # that had not been installed.
+        for group, channels in (
+            ("equipment", equipment_channels),
+            ("feeder", feeder_channels),
+        ):
+            samples = bucket["samples_by_group"].get(group, 0)
+            bucket[f"{group}_coverage_pct"] = (
+                round(100.0 * samples / expected, 1) if channels else None
+            )
+            bucket[f"{group}_channels_seen"] = bucket["channels_by_group"].get(group, 0)
+            bucket[f"{group}_channels_expected"] = channels
+        covered = [
+            bucket[f"{group}_coverage_pct"]
+            for group in ("equipment", "feeder")
+            if bucket[f"{group}_coverage_pct"] is not None
+        ]
+        bucket["coverage_pct"] = round(min(covered), 1) if covered else 0.0
+        # Every mapped channel must have reported, not just enough samples: a
+        # missing channel is missing load, and it looks exactly like a discrepancy.
+        bucket["all_channels_present"] = all(
+            bucket[f"{group}_channels_seen"] == bucket[f"{group}_channels_expected"]
+            for group in ("equipment", "feeder")
+        )
+        del bucket["samples_by_group"], bucket["channels_by_group"]
     return per_day
 
 
@@ -432,7 +471,13 @@ def bryant_energy_block(
         }
         # A comparison is only offered when the panel actually covered the day.
         # Otherwise the delta is a measure of our coverage, not of agreement.
-        if measured and measured["coverage_pct"] >= 95.0 and bryant_total > 0:
+        comparable = (
+            measured is not None
+            and bryant_total > 0
+            and measured["all_channels_present"]
+            and measured["coverage_pct"] >= 95.0
+        )
+        if comparable:
             row["delta_kwh"] = round(measured["total_kwh"] - bryant_total, 3)
             row["delta_pct"] = round(
                 100.0 * (measured["total_kwh"] - bryant_total) / bryant_total, 1
@@ -440,11 +485,26 @@ def bryant_energy_block(
         else:
             row["delta_kwh"] = None
             row["delta_pct"] = None
-            row["delta_reason"] = (
-                "panel coverage below 95% for this day"
-                if measured
-                else "no panel samples for this day"
-            )
+            if measured is None:
+                row["delta_reason"] = "no panel samples for this day"
+            elif not measured["all_channels_present"]:
+                missing = [
+                    group
+                    for group in ("equipment", "feeder")
+                    if measured[f"{group}_channels_seen"]
+                    != measured[f"{group}_channels_expected"]
+                ]
+                row["delta_reason"] = (
+                    f"{', '.join(missing)} not metered on this day — the channel "
+                    "did not exist yet"
+                )
+            elif bryant_total <= 0:
+                row["delta_reason"] = "Bryant reported no energy for this day"
+            else:
+                row["delta_reason"] = (
+                    f"panel coverage {measured['coverage_pct']}% — below the 95% "
+                    "a comparison needs"
+                )
         block["days"].append(row)
     return block
 

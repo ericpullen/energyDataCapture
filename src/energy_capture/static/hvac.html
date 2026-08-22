@@ -405,7 +405,11 @@ function bryantEnergy(hv) {
     });
     cells += "<td><strong>" + num(d.bryant_total_kwh, 1) + "</strong></td>";
     cells += "<td>" + (d.panel ? num(d.panel.total_kwh, 1) +
-      ' <span class="n">' + num(d.panel.coverage_pct, 0) + "%</span>" : "—") + "</td>";
+      ' <span class="n" title="compressor ' +
+      (d.panel.equipment_coverage_pct === null ? "n/a" : num(d.panel.equipment_coverage_pct, 0) + "%") +
+      ", feeder " +
+      (d.panel.feeder_coverage_pct === null ? "n/a" : num(d.panel.feeder_coverage_pct, 0) + "%") +
+      '">' + num(d.panel.coverage_pct, 0) + "%</span>" : "—") + "</td>";
     cells += "<td>" + (d.delta_pct === null || d.delta_pct === undefined
       ? '<span class="n">' + esc(d.delta_reason || "—") + "</span>"
       : (d.delta_pct > 0 ? "+" : "") + num(d.delta_pct, 1) + "%") + "</td>";
@@ -428,8 +432,10 @@ function bryantEnergy(hv) {
     '<p class="note">' + esc(be.note || "") + " Blue components are on the " +
     "compressor’s own breaker; green ones share the HVAC subpanel feeder, where " +
     "the panel cannot tell them apart. A delta is shown only for days with 95% " +
-    "or better panel coverage — below that it would measure our coverage, not " +
-    "the agreement.</p>";
+    "or better panel coverage on EVERY mapped channel — below that, or with a " +
+    "channel that did not exist yet, the number would measure our coverage " +
+    "rather than the agreement. Hover a coverage figure for the per-group " +
+    "split.</p>";
 }
 
 function channelsCard(hv) {
