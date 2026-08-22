@@ -7,7 +7,7 @@
       "label": "HVAC — heat pump heating (daily energy)",
       "short_label": "Heat pump heat",
       "category": "hvac",
-      "notes": "Bryant/Carrier daily energy component hPHeat -> channel_id 'hpheat' (PLAN.md §7.2), metrics kwh_day and cost_day_usd at LOCAL midnight of the measured day. Physically this is the Bryant 284ANV060000 5-ton outdoor unit on Panel B slots 10/12 (blackstart B-10-12). Deliberately NOT joined with blackstart_device_id: this row is a cloud-reported energy component, not the breaker channel, and giving it the breaker's identity would invite double counting against a future leviton breaker_p10 row."
+      "notes": "Bryant/Carrier daily energy component hPHeat -> channel_id 'hpheat' (PLAN.md §7.2), metrics kwh_day and cost_day_usd at LOCAL midnight of the measured day. Physically this is the Bryant 284ANV060000 5-ton outdoor unit on Panel B slots 10/12 (blackstart B-10-12). Deliberately NOT joined with blackstart_device_id: this row is a cloud-reported energy component, not the breaker channel, and giving it the breaker's identity would invite double counting against leviton breaker_p10 on hub 1000_0046_1D48, which as of 2026-08-22 is a real channel: an LB240-0ST smart breaker now meters that circuit at 30 s. The two are the same outdoor unit measured by two clouds at two grains — correlate, never sum."
     },
     {
       "source": "bryant",
@@ -93,6 +93,90 @@
     {
       "source": "leviton",
       "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p1",
+      "blackstart_device_id": "A-1-3",
+      "notes": "REAL — confirmed by `energycap discover` 2026-08-22. Leviton name 'Dryer', model LB230-0ST, 30 A 2-pole, branchType 'Dryer'; blackstart A-1-3 is 'Dryer outlet' on slots 1/3 at 30 A 2-pole, so amps, poles and label all agree. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. This is the circuit STATE.md identified from the feed legs alone — a ~5.4 kW noon spike cycling on a thermostat, balanced across both legs — so it is now possible to check that inference directly instead of inferring it. Carries orange tape in the panel and is shed in both truck scenarios. `watts` is the sum of both poles, which for a true 240 V load is the load's total power."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p5",
+      "blackstart_device_id": "A-5-7",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Finished Basement/Ejector Pump', LB220-0ST, 20 A 2-pole, branchType 'Mixed Use'; blackstart A-5-7 is 'Basement — fridge, bath, ejector pump', 20 A, priority critical. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 123 W on pole 1 and 79 W on pole 2. TRAP: this is an MWBC (two 120 V legs sharing one neutral under one common-trip handle), and sources/leviton.py sums the two poles for every metric. `watts` is right (the legs are independent circuits, so the sum is the breaker's real load) but `volts` reads ~240 for two 120 V legs. Never read volts on this channel as the circuit voltage."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p6",
+      "blackstart_device_id": "A-6",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Front Of House', LB115-0ST, 15 A 1-pole, branchType 'Outlets'; blackstart A-6 is 'Front of house — living room, foyer, porch, Myia's room' at 15 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 21 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p8",
+      "blackstart_device_id": "A-8",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Dining Room Plugs/TV', LB120-0ST, 20 A 1-pole, branchType 'Outlets'; blackstart A-8 is 'Dining room plugs + TV / fireplace plugs' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 26 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p9",
+      "blackstart_device_id": "A-9",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Washing Machine', LB120-0ST, 20 A 1-pole, branchType 'Washing Machine'; blackstart A-9 is 'Washer outlet' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 522 W, i.e. mid-cycle — a washer is a duty-cycled load, so a run of 0 W here is the machine being idle and is real, not a stuck reading."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p10",
+      "blackstart_device_id": "A-10-12",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Kitchen Counter/Dishwasher', LB220-0ST, 20 A 2-pole, branchType 'Mixed Use'; blackstart A-10-12 is 'Kitchen counter plugs + dishwasher' on slots 10/12 at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. The second of STATE.md's two priority circuits, and the reason it was a priority: it straddles both legs, so in feed-leg data it masquerades as a 240 V load. It now has its own channel, which is the only way to tell it apart. Carries orange tape and is shed in both truck scenarios. TRAP: this is an MWBC (two 120 V legs sharing one neutral under one common-trip handle), and sources/leviton.py sums the two poles for every metric. `watts` is right (the legs are independent circuits, so the sum is the breaker's real load) but `volts` reads ~240 for two 120 V legs. Never read volts on this channel as the circuit voltage."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p11",
+      "blackstart_device_id": "A-11",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Mud room And Basement', LB115-0ST, 15 A 1-pole, branchType 'Outlets'; blackstart A-11 is 'Mud room + basement lights & plugs' at 15 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 183 W (1.45 A)."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p13",
+      "blackstart_device_id": "A-13-15",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Bedroom Lights And Plugs', LB215-0ST, 15 A 2-pole, branchType 'Mixed Use'; blackstart A-13-15 is 'Bedrooms + office (internet) + full bath' on slots 13/15 at 15 A, priority critical — this is the circuit the house internet is on. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 214 W and 96 W on the two poles. TRAP: this is an MWBC (two 120 V legs sharing one neutral under one common-trip handle), and sources/leviton.py sums the two poles for every metric. `watts` is right (the legs are independent circuits, so the sum is the breaker's real load) but `volts` reads ~240 for two 120 V legs. Never read volts on this channel as the circuit voltage."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p14",
+      "blackstart_device_id": "A-14",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Family Room Lamp Plugs', LB120-0ST, 20 A 1-pole, branchType 'Outlets'; blackstart A-14 is 'Lamp floor plugs' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 0 W (lamps off) — a switched lighting circuit legitimately reads 0."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p16",
+      "blackstart_device_id": "A-16",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Main Floor Lights', LB115-0ST, 15 A 1-pole, branchType 'Lights'; blackstart A-16 is 'Main floor lights — dining, living, family, kitchen' at 15 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 137 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p17",
+      "blackstart_device_id": "A-17",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Kitchen Hood/Hallway Lights', LB120-0ST, 20 A 1-pole, branchType 'Lights'; blackstart A-17 is 'Kitchen hood + hallway & mud room lights' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 30 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p18",
+      "blackstart_device_id": "A-18",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Outside Basement Outlet/Light', LB115-0ST, 15 A 1-pole, branchType 'Outlets'; blackstart A-18 is 'Outside basement outlet and flood light' at 15 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 0 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
       "channel_id": "breaker_p19",
       "blackstart_device_id": "A-19-21",
       "notes": "REAL — confirmed by `energycap discover` 2026-08-17. Hub 1000_0046_1D52 is the panel Leviton names 'Panel A'; the identification is not a guess about the letter, it is two independent label matches: this breaker reports name 'Water Heater' at position 19 and blackstart A-19-21 is 'Water heater' on slots 19/21, and breaker_p23 matches A-23-25 the same way. Carries no label/category of its own on purpose — with blackstart_device_id set and no explicit override, montfort.json supplies label/panel/slots/category/priority/estimated_watts, which is PLAN.md §9's rule that blackstart stays the source of truth for labels. 2-pole LB230-0ST, so ONE channel named for the lower slot; slots render as \"19,21\". Observed drawing 2462 W (element on) and 0 W (idle) within one hour — a resistive element holds a constant wattage while heating, so a long run of identical values here is real, not a stuck reading."
@@ -100,9 +184,37 @@
     {
       "source": "leviton",
       "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p20",
+      "blackstart_device_id": "A-20",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Septic Pump/doorbell', LB120-0ST, 20 A 1-pole, branchType 'Pump'; blackstart A-20 is 'Septic pump + doorbell' at 20 A, priority critical. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 0 W: a pump is a short-duty intermittent load, so most 30 s samples are legitimately 0 and the interesting statistic is the count and duration of nonzero runs, not the mean."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
       "channel_id": "breaker_p23",
       "blackstart_device_id": "A-23-25",
       "notes": "REAL — confirmed by discover 2026-08-17. Leviton name 'Mud Room Air Conditioner' at position 23; blackstart A-23-25 is 'Mini-split — mud room addition' on slots 23/25. Label comes from blackstart (the more accurate of the two — it is a mini-split, not a window AC). 2-pole LB220-0ST, observed 103-201 W."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p26",
+      "blackstart_device_id": "A-26",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Kitchen Fridge/Microwave', LB120-0ST, 20 A 1-pole, branchType 'Outlets'; blackstart A-26 is 'Kitchen fridge + counter, floor & microwave plugs' at 20 A, priority critical. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 9 W — the fridge compressor was off. Do not read a low sample as a gap: cardinal rule 5's sample_count is what separates 'the compressor was between cycles' from 'the collector was down'."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p28",
+      "blackstart_device_id": "A-28",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Sump Pump', LB120-0ST, 20 A 1-pole, branchType 'Pump'; blackstart A-28 is 'Sump Pump' at 20 A, priority critical. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 0 W — same intermittent-pump caveat as breaker_p20."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "breaker_p30",
+      "blackstart_device_id": "A-30",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Basement Plugs Door Side/WH Side', LB120-0ST, 20 A 1-pole, branchType 'Outlets'; blackstart A-30 is 'Basement plugs — door side + water heater side' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 21 W."
     },
     {
       "source": "leviton",
@@ -123,6 +235,54 @@
       "panel": "A",
       "category": "panel",
       "notes": "REAL — leg B of the same clamp pair. One IotCt object is one clamp PAIR and each leg is its own channel_id (PLAN.md §6.5); an absent ct_1_b row means a single-leg CT or a gap, never zero watts."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "panel_leg_a",
+      "label": "Panel A service — leg A voltage",
+      "short_label": "Panel A leg A",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — hub-level channel (PLAN.md §6.5): metrics volts and hz only. No blackstart_device_id exists for a panel leg, so this entry carries explicit fields only, which is the other legal shape in PLAN.md §9. There is no panel-level power field and none is synthesised."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D52",
+      "channel_id": "panel_leg_b",
+      "label": "Panel A service — leg B voltage",
+      "short_label": "Panel A leg B",
+      "panel": "A",
+      "category": "panel",
+      "notes": "REAL — see panel_leg_a on this hub."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "breaker_p1",
+      "blackstart_device_id": "B-1-3",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Cooktop', LB250-0ST, 50 A 2-pole, branchType 'Cooktop'; blackstart B-1-3 is 'Cooktop' on slots 1/3 at 50 A (amps corrected from 40 to 50 by photo), 7,500 W connected, shed in truckHome. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. First smart breaker in Panel B other than the three below. Observed 0 W (not cooking)."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "breaker_p10",
+      "blackstart_device_id": "B-10-12",
+      "notes": "REAL — discover 2026-08-22, and the most valuable of the new channels. Leviton name 'Heat Pump', LB240-0ST, 40 A 2-pole; blackstart B-10-12 is the Bryant 284ANV060000 5-ton variable-speed outdoor unit on slots 10/12 at 40 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Leviton's branchType is 'Air Conditioner' and, like the CT usageType, THAT IS A DROPDOWN SOMEBODY PICKED, not a fact: this unit is a heat pump and carries both cooling and heating. Observed 683 W + 667 W = 1,350 W with the compressor at part capacity. Two consequences. (1) It closes the gap blackstart's load meter warns about — B-10-12 was the last device with no traced load, so the Panel B meter reads LOW by exactly this circuit; a few days of history here is what lets a real figure replace the 0 W. (2) It is the instantaneous counterpart to the bryant 'cooling' and 'hpheat' daily-energy channels, which are the SAME physical unit reported by a second cloud at day grain. Correlate them, never sum them. This channel — not leviton ct_2_a/ct_2_b, which are on the strip-heat feeder — is the one that tracks cooling."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "breaker_p14",
+      "blackstart_device_id": "B-14-16",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Oven', LB240-0ST, 40 A 2-pole, branchType 'Oven'; blackstart B-14-16 is 'Double oven' on slots 14/16 at 40 A, 5,000 W connected (an estimate, not a nameplate), shed in truckHome. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 0 W. blackstart records that the directory card's other 'Oven' entry at B 5/7 is simply wrong; Leviton reports no breaker at 5 or 7 either, which is independent confirmation."
+    },
+    {
+      "source": "leviton",
+      "device_id": "1000_0046_1D48",
+      "channel_id": "breaker_p26",
+      "blackstart_device_id": "B-26",
+      "notes": "REAL — discover 2026-08-22. Leviton name 'Battery charger', LB120-0ST, 20 A 1-pole, branchType 'Outlets'; blackstart B-26 is the 'Anker F3800+ trickle-charge outlet' at 20 A. Installed 2026-08-22 (breaker object created 16:10Z) as part of taking the panel almost fully smart; the collector picked it up on its next hourly hierarchy refresh with no restart and no code change. Observed 10 W. This channel answers a question blackstart explicitly leaves open: B-26's 1,000 W is a placeholder with the note 'record the rate you actually use', and the AC charge rate is set in the Anker app anywhere from a couple of hundred watts to ~1,800 W. Measure it here. Deliberately not shed in any scenario — when the truck is on Panel B this plug is the no-extra-cable way to recharge the Anker."
     },
     {
       "source": "leviton",
@@ -153,7 +313,7 @@
       "short_label": "Strip heat feed A",
       "panel": "B",
       "category": "hvac",
-      "notes": "REAL — discover 2026-08-17. Leviton reports usageType HEAT_PUMP on this clamp pair, and THAT LABEL IS NOT AUTHORITATIVE — it is a dropdown someone picked in the app, which is why the label is overridden here (PLAN.md §9's explicit-override rule). What the clamps are physically on is the feeder to the HVAC subpanel, which blackstart B-6-8 describes as 'Feed-through lug tap — feeds the HVAC subpanel'; that subpanel holds the KFCEH3301C20 20 kW heat kit, i.e. the ELECTRIC STRIPS, not the compressor. The 5-ton Bryant 284ANV060000 outdoor unit is a separate circuit (blackstart B-10-12) and is not metered by this pair. Evidence: observed a flat 0 W across 17 minutes of continuous cooling with the blower running and the compressor at 35% capacity — the compressor's power was demonstrably not passing through these clamps. UNVERIFIED: the subpanel has not been opened, so this is a strong inference from the inventory plus the observed behaviour, not confirmed wiring. Expect this channel to read ~0 all summer and to carry real load only during defrost, aux heat and deep winter. A future breaker_p10 row (compressor) is the channel to correlate with cooling, NOT this one."
+      "notes": "REAL — discover 2026-08-17. Leviton reports usageType HEAT_PUMP on this clamp pair, and THAT LABEL IS NOT AUTHORITATIVE — it is a dropdown someone picked in the app, which is why the label is overridden here (PLAN.md §9's explicit-override rule). What the clamps are physically on is the feeder to the HVAC subpanel, which blackstart B-6-8 describes as 'Feed-through lug tap — feeds the HVAC subpanel'; that subpanel holds the KFCEH3301C20 20 kW heat kit, i.e. the ELECTRIC STRIPS, not the compressor. The 5-ton Bryant 284ANV060000 outdoor unit is a separate circuit (blackstart B-10-12) and is not metered by this pair. Evidence: observed a flat 0 W across 17 minutes of continuous cooling with the blower running and the compressor at 35% capacity — the compressor's power was demonstrably not passing through these clamps. UNVERIFIED: the subpanel has not been opened, so this is a strong inference from the inventory plus the observed behaviour, not confirmed wiring. Expect this channel to read ~0 all summer and to carry real load only during defrost, aux heat and deep winter. breaker_p10 on this hub (the compressor) is the channel to correlate with cooling, NOT this one — and as of 2026-08-22 it exists: an LB240-0ST smart breaker was installed on B-10-12, so the strip-heat inference below can now be tested against a real compressor series instead of resting on the observed flat 0 W. INDEPENDENT CORROBORATION 2026-08-22: the Leviton app's own placeholder object at Panel B position 6 — the two positions the feed-through lug occupies — is named 'Heat Strip Subpanel' by the owner. That is a second, separately recorded statement that 6/8 feeds the HVAC subpanel, which is what this clamp pair is on."
     },
     {
       "source": "leviton",
@@ -164,27 +324,7 @@
       "short_label": "Strip heat feed B",
       "panel": "B",
       "category": "hvac",
-      "notes": "REAL — leg B of the strip-heat clamp pair. See ct_2_a for why Leviton's HEAT_PUMP usageType is overridden."
-    },
-    {
-      "source": "leviton",
-      "device_id": "1000_0046_1D52",
-      "channel_id": "panel_leg_a",
-      "label": "Panel A service — leg A voltage",
-      "short_label": "Panel A leg A",
-      "panel": "A",
-      "category": "panel",
-      "notes": "REAL — hub-level channel (PLAN.md §6.5): metrics volts and hz only. No blackstart_device_id exists for a panel leg, so this entry carries explicit fields only, which is the other legal shape in PLAN.md §9. There is no panel-level power field and none is synthesised."
-    },
-    {
-      "source": "leviton",
-      "device_id": "1000_0046_1D52",
-      "channel_id": "panel_leg_b",
-      "label": "Panel A service — leg B voltage",
-      "short_label": "Panel A leg B",
-      "panel": "A",
-      "category": "panel",
-      "notes": "REAL — see panel_leg_a on this hub."
+      "notes": "REAL — leg B of the strip-heat clamp pair. See ct_2_a for why Leviton's HEAT_PUMP usageType is overridden. INDEPENDENT CORROBORATION 2026-08-22: the Leviton app's own placeholder object at Panel B position 6 — the two positions the feed-through lug occupies — is named 'Heat Strip Subpanel' by the owner. That is a second, separately recorded statement that 6/8 feeds the HVAC subpanel, which is what this clamp pair is on."
     },
     {
       "source": "leviton",

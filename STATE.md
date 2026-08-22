@@ -1,4 +1,4 @@
-# Where this project is — handoff, updated 2026-08-19 (afternoon)
+# Where this project is — handoff, updated 2026-08-22
 
 A snapshot for picking the work back up. `PLAN.md` is still the spec of record and
 `DEVIATIONS.md` (163+ entries) is still the record of every departure from it; this file
@@ -228,6 +228,111 @@ full-day comparison on **24 of 24 hours with zero exclusions** — meter 77.614 
 panels 75.186, **−3.1%**, consistent with the ~3.4% measured on the Mac. Nothing was lost
 in the move.
 
+---
+
+## The panel went almost fully smart — 2026-08-22
+
+20 more Leviton smart breakers went in. `energycap discover` found **32 live channels, all
+32 now mapped** (`unmapped_count: 0`), up from 12 mapped of 32. The collector needed **no
+restart and no code change**: it re-reads the hierarchy hourly, so
+`/healthz` was already reporting `channels_seen: 32` and 65 rows a cycle before anything
+was edited. What was missing was only the semantic layer.
+
+| | before | after |
+|---|---|---|
+| Leviton entries in `channel_map.json` | 12 | 32 |
+| `dim_channel` rows | 26 | 46 |
+| Panel A devices on a smart breaker | 2 of 22 | 18 of 22 |
+| Panel B | 0 of 10 | 4 of 10 |
+
+Both repos changed, and blackstart is still the source of truth for labels — every new
+entry carries `blackstart_device_id` and no label of its own:
+
+- `config/channel_map.json` — 20 new entries, plus the Leviton block reordered per hub
+  (breakers by position, then CTs, then legs) so it reads like a panel schedule.
+- `~/code/blackstart/data/montfort.json` — 22 devices retrofitted to the real `-0ST`
+  catalog numbers with a `monitoring.meteredBy` block naming hub, position and
+  `channel_id`. Every one of the 22 agreed with the amps and poles already recorded there,
+  which is a genuine cross-check of both files: **no rating changed.**
+
+**The catalog suffix is `-0ST`, not `-ST`.** blackstart's `smartUpgradePath` predicted
+`LB120-ST`; the hardware reports `LB120-0ST`. Seven ratings confirmed (15/20 A 1-pole,
+15/20/30/40/50 A 2-pole).
+
+### What the new channels are worth
+
+- **`breaker_p10` on hub `1000_0046_1D48` is the one to know about.** It is the Bryant
+  284ANV060000 5-ton outdoor unit — blackstart B-10-12, the **last untraced load in the
+  house** and the reason the Panel B load meter reads LOW. 683 W + 667 W = 1,350 W observed
+  at part capacity. It is also the 30 s counterpart to the Bryant `cooling`/`hpheat` daily
+  kWh channels: the same unit through two clouds at two grains. **Correlate, never sum.**
+  Note this is *not* `ct_2_a`/`ct_2_b`, which are on the strip-heat feeder.
+- **`breaker_p26` on the same hub** measures the Anker trickle-charge rate that blackstart
+  records as a 1,000 W placeholder.
+- **The three Panel A MWBCs (p5, p10, p13) carry a volts trap.** `sources/leviton.py` sums
+  both poles for every metric. `watts` is right — the legs are independent circuits — but
+  `volts` reads ~240 for what are two 120 V legs. The map notes say so on each of them.
+- Leviton's `branchType` is a dropdown somebody picked, exactly like the CT `usageType`:
+  it calls the heat pump "Air Conditioner". Not authoritative, ever.
+
+### Two contradictions the same data turned up — both resolved same day
+
+The owner settled both, and the answer moved more than the questions asked. **Each panel's
+LWHEM-2 energy monitor sits on its own 2-pole dumb breaker**, which is what those two
+"placeholder" objects are:
+
+- **Panel B 17/19** — a 2-pole 15 A dumb breaker feeding Panel B's monitor. The slots were
+  *not* empty; the photo reading was wrong. Panel B reconciles again at 18 occupied + 12
+  empty.
+- **Panel A 27/29** — the same thing for Panel A's monitor, and **not** the Siemens SPD it
+  was recorded as. Leviton's "Smart Home" label was right and the earlier identification
+  was wrong.
+- **Panel A 22/24 is now a Leviton LSPD1-T** plug-on surge protective device. That is where
+  the SPD went; the external Siemens unit is gone from Panel A (Panel B keeps its own at
+  28/30).
+
+Two things worth carrying forward:
+
+1. **Neither monitor breaker may be shed, and the reason is not what it looks like.**
+   Switching one off de-energises nothing — the smart breakers are ordinary mechanical
+   breakers and keep carrying current — but it takes out all metering, the app and remote
+   control for that panel, i.e. exactly the visibility you want in an outage. It also means
+   **the one load in the house that can never appear in the data is the metering system
+   itself**: each monitor's supply comes through a dumb breaker.
+2. **The LSPD1-T is a combination device, which is easy to model wrong.** Leviton's spec is
+   "two 15A single-pole standard thermal magnetic circuit breakers" plus a Type 1 SPD in one
+   plug-on body — so blackstart A-22 and A-24 keep their identities, their ten circuits and
+   their ~770 W unchanged; only the hardware record moved. I first modelled it as a bare SPD
+   and stranded those ten circuits; the owner corrected it. Two facts fell out of the spec
+   that are worth knowing: the SPD is fed **line-side**, so it keeps protecting with those
+   breakers off or tripped, and **there is no smart variant**, which makes A-22 and A-24 the
+   only Panel A branch circuits that can never report usage.
+
+One consequence on this side of the fence: **Panel A can produce no further Leviton
+channels.** 18 of its 22 devices are smart; the other four are the generator inlet, the
+monitor's own supply, and the two LSPD1-T circuits — none of which can ever be one. So
+`test_dim.py`'s "newly installed breaker" example moved to **`breaker_p9` on hub
+`1000_0046_1D48`** (blackstart B-9, full bath fan/light/heater), a real candidate on the
+panel that still has six dumb branch breakers. `channel_map.json` needed no change for any
+of this: every affected position is a dumb breaker and was never a channel.
+
+A third, happier corroboration stands unchanged: Leviton's own label for Panel B 6/8 is
+**"Heat Strip Subpanel"** — independent confirmation of the feed-through finding and of
+what `ct_2_a`/`ct_2_b` are clamped on.
+
+### Tests
+
+`uv run pytest` — 1592 passing. `tests/fixtures/blackstart/montfort_trimmed.json` was
+regenerated as a faithful trim of the corrected inventory (11 devices → 24). **3
+pre-existing failures** are environmental, not code: real `LGE_*` credentials are exported
+in the shell, so the three tests asserting that no LG&E credential has a default value
+fail. They fail identically on unmodified `main`.
+
+blackstart: `npm test` — 107 + 105 checks pass, 0 errors, and `sw.js` `CACHE` is bumped to
+`blackstart-v5`. The restored survey assertions now also pin *why* Panel B 17/19 reconcile
+— they hold the monitor breaker — so a future edit that "fixes" the count by declaring them
+empty again fails the test.
+
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep
@@ -312,12 +417,9 @@ to be the always-on host, so it stays untested and no longer matters much.
   `data/spool.db` is a static backup as of 2026-08-19 15:55Z). Nothing is uploaded, so
   nothing purges and it just grows — ~35 MB/day against 40 GB. Getting S3 working is what
   turns this from "one disk" into a real archive.
-- **New Leviton breakers** arriving ~2026-08-21. `energycap discover` prints a
-  `channel_map.json` skeleton for anything unmapped; `channel_id` is `breaker_p{position}`,
-  never the API's breaker id. Priority circuits, from the first real load analysis: **A-1-3
-  (dryer)** — a noon spike of ~5.4 kW cycling on a thermostat was identified as the dryer purely
-  from the feed legs, because it was balanced across both — then **A-10-12** (kitchen
-  counter/dishwasher MWBC), which straddles both legs and will otherwise keep masquerading as a
-  240 V load.
+- ~~**New Leviton breakers** arriving ~2026-08-21~~ — **installed and mapped 2026-08-22.**
+  See "The panel went almost fully smart" below. Both priority circuits from the first load
+  analysis now have their own channel: **A-1-3 (dryer)** and **A-10-12** (kitchen
+  counter/dishwasher MWBC).
 - The chart shows at most three series, so a derived "Panel A total (A+B)" series was offered
   and not yet built. Leg-level series read as though a 2-pole load exceeds its own panel feed.

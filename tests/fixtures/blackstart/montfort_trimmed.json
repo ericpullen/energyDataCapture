@@ -1,904 +1,2072 @@
 {
-  "schemaVersion": 2,
-  "metadata": {
-    "lastUpdated": "2026-08-10",
-    "notes": "Device-first schema. One entry per physical breaker; circuits nest underneath. Shed lists live on devices via shedIn so common-trip behaviour is explicit and there is one source of truth. Not every device is a breaker: role 'feedThrough' is a bus tap with no overcurrent protection, and what it feeds lives in subpanels[]. Handwritten panel directory cards are historical, not authoritative.",
-    "changelog": [
-      {
-        "version": "2.6",
-        "date": "2026-08-10",
-        "summary": "Two more findings closed by owner confirmation. A-mwbc-overlap resolved: slots 5/7, 10/12 and 13/15 in Panel A are genuinely multi-wire branch circuits - two 120V legs sharing a neutral under one common-trip handle, not 240V loads - so circuitType drops 'probable'. What survives from that finding is narrower and now lives in A-unmapped: A-5-7 and A-10-12 each have a second leg (slots 5 and 12) with no endpoints recorded. B-2-4-oven resolved: the double oven is confirmed at 14/16, and the directory card's second 'Oven' at 5/7 is simply wrong. Likely cause recorded on B-6-8 - slots 5/7 face the feed-through lug and the 2/0 feeder conductors probably make that pair unusable, which also means Panel B has fewer than 14 genuinely available slots for expansion."
-      }
-    ]
-  },
-  "home": {
-    "name": "Montfort Residence",
-    "serviceAmps": 400
-  },
-  "roomAliases": {
-    "First Bedroom on Left": "Myia's Bedroom",
-    "Second Bedroom on Left": "Office",
-    "Bedroom on Right": "Jordan's Room"
-  },
-  "panels": {
-    "A": {
-      "name": "Panel A",
-      "fullName": "Panel A (Primary / Anker Backup)",
-      "slots": 30,
-      "backupSource": "anker",
-      "location": "Garage",
-      "mainBreaker": {
-        "manufacturer": "Leviton",
-        "amps": 200,
-        "poles": 2,
-        "catalogNumber": "LM200-T",
-        "catalogNumberAlternate": "LM200",
-        "voltage": "120/240 VAC",
-        "interruptRating": "22kA",
-        "confidence": "medium"
-      },
-      "generatorInlet": {
-        "deviceId": "A-2-4",
-        "breakerSlots": [
-          2,
-          4
-        ],
-        "breakerAmps": 30,
-        "breakerPoles": 2,
-        "breakerCatalogNumber": "LB230-T",
-        "interlockType": "mechanical sliding-plate interlock over the top two right-column positions",
-        "cable": "l1430-ext",
-        "connection": {
-          "location": "Wall, immediately left of Panel A (garage, interior)",
-          "deviceType": "flanged power inlet box - MALE pins, not a receptacle",
-          "configuration": "NEMA L14-30 (30A, 125/250V, 3-pole 4-wire twist-lock)",
-          "gender": "male",
-          "genderVerified": true,
-          "manufacturer": "Reliance Controls",
-          "model": "PBN30",
-          "modelConfidence": "medium",
-          "enclosure": "surface-mount inlet box",
-          "confidence": "high"
-        },
-        "confidence": "high"
-      },
-      "emptySlots": []
-    },
-    "B": {
-      "name": "Panel B",
-      "fullName": "Panel B (Secondary / Lightning Backup)",
-      "slots": 30,
-      "backupSource": "lightning",
-      "location": "Garage",
-      "mainBreaker": {
-        "manufacturer": "Leviton",
-        "amps": 200,
-        "poles": 2,
-        "catalogNumber": "LM200-T",
-        "catalogNumberAlternate": "LM200",
-        "voltage": "120/240 VAC",
-        "interruptRating": "22kA",
-        "confidence": "medium"
-      },
-      "generatorInlet": {
-        "deviceId": "B-2-4",
-        "breakerSlots": [
-          2,
-          4
-        ],
-        "breakerAmps": 30,
-        "breakerPoles": 2,
-        "breakerCatalogNumber": "LB230-T",
-        "interlockType": "mechanical sliding-plate interlock over the top two right-column positions",
-        "cable": "l1430-ext",
-        "connection": {
-          "location": "Outdoors",
-          "deviceType": "flanged power inlet box - MALE pins, not a receptacle",
-          "configuration": "NEMA L14-30 (30A, 125/250V, 3-pole 4-wire twist-lock)",
-          "gender": "male",
-          "genderVerified": true,
-          "manufacturer": "Reliance Controls",
-          "model": "PBN30",
-          "modelConfidence": "medium",
-          "confidence": "medium"
-        },
-        "confidence": "high"
-      },
-      "emptySlots": [
-        5,
-        7,
-        15,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-        25,
-        27,
-        29
-      ]
-    }
-  },
-  "subpanels": [
-    {
-      "id": "hvac-strips",
-      "name": "HVAC heat-strip subpanel",
-      "shortName": "HVAC subpanel",
-      "location": "At the HVAC air handler",
-      "locationDetail": "Mounted on the air handler itself, NOT in the garage with panels A and B. A sweep of Panel B does not go anywhere near it.",
-      "fedFrom": {
-        "panel": "B",
-        "deviceId": "B-6-8"
-      },
-      "enclosure": {
-        "manufacturer": "unknown - not Leviton",
-        "description": "older grey load center",
-        "photoVerified": false,
-        "confidence": "medium"
-      },
-      "mainBreaker": null,
-      "disconnectArrangement": "No main breaker. Three 50A 2-pole handles, a six-disconnect arrangement - those handles ARE the disconnecting means for everything here.",
-      "feeder": {
-        "conductor": "2/0 aluminum",
-        "material": "aluminum",
-        "size": "2/0",
-        "ampacityAmps": 135,
-        "ampacityBasis": "75C column",
-        "overcurrentProtection": "none at the tap",
-        "protectedBy": "Panel B 200A main breaker only",
-        "verified": true
-      },
-      "monitoring": {
-        "smartBreakerMonitorable": false,
-        "reason": "Loads here never pass through a Panel B branch breaker, so no Leviton LWHEM smart breaker can ever measure them. Swapping breakers in Panel B will not instrument this branch, no matter how many are swapped.",
-        "instrumentationPath": "A CT pair on the 2/0 aluminum feeder is the only way to meter this."
-      },
-      "devices": [
-        {
-          "id": "HVAC-A",
-          "position": null,
-          "poles": 2,
-          "amps": 50,
-          "label": "Heat kit circuit A",
-          "serves": [
-            "heat-kit"
-          ],
-          "verified": true,
-          "notes": [
-            "Physical position in the subpanel was not recorded, so these are listed A/B/C rather than by slot number. Identify them at the panel before switching anything."
-          ]
-        },
-        {
-          "id": "HVAC-B",
-          "position": null,
-          "poles": 2,
-          "amps": 50,
-          "label": "Heat kit circuit B",
-          "serves": [
-            "heat-kit"
-          ],
-          "verified": true,
-          "notes": [
-            "May ALSO feed the FE4ANB006L00 fan coil blower - unverified. See hvac-blower-circuit."
-          ]
-        },
-        {
-          "id": "HVAC-C",
-          "position": null,
-          "poles": 2,
-          "amps": 50,
-          "label": "Heat kit circuit C",
-          "serves": [
-            "heat-kit"
-          ],
-          "verified": true,
-          "notes": [
-            "May ALSO feed the FE4ANB006L00 fan coil blower - unverified. See hvac-blower-circuit."
-          ]
-        }
-      ],
-      "appliances": [
-        {
-          "id": "heat-kit",
-          "room": "HVAC Air Handler",
-          "endpoint": "Electric heat kit",
-          "manufacturer": "Bryant",
-          "model": "KFCEH3301C20",
-          "estimatedWatts": 20000,
-          "rating": "20 kW @ 240V, ~83A, 62,800 BTU/hr, internal circuit breakers",
-          "fieldPowerCircuits": 3,
-          "fieldPowerCircuitsVerified": false,
-          "verified": true
-        },
-        {
-          "id": "blower",
-          "room": "HVAC Air Handler",
-          "endpoint": "Fan coil blower",
-          "manufacturer": "Bryant",
-          "model": "FE4ANB006L00",
-          "estimatedWatts": null,
-          "verified": false
-        }
-      ],
-      "estimatedWattsTotal": 20000,
-      "notes": [
-        "Nothing in Panel B can disconnect these loads. The feed-through lug at Panel B 6/8 has no handle, so the only disconnecting means is the three 50A handles inside this subpanel, at the air handler."
-      ]
-    }
-  ],
-  "devices": [
-    {
-      "id": "A-1-3",
-      "panel": "A",
-      "slots": [
-        1,
-        3
-      ],
-      "poles": 2,
-      "amps": 30,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB230-T",
-        "legacyCatalogNumber": "LB230",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": "0107964",
-        "smartReplacement": "LB230-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Dryer outlet",
-      "labelSource": "single circuit",
-      "circuitType": "240V appliance",
-      "physicalMarking": "orange tape",
-      "physicalMarkingMeaning": "Orange tape marks a breaker to shut off during an outage.",
-      "priority": null,
-      "shedIn": [
-        "truckHome",
-        "truckAway"
-      ],
-      "circuits": [
-        {
-          "room": "Mud Room",
-          "endpoint": "Dryer outlet",
-          "estimatedWatts": 5000,
-          "fedFromSlot": [
-            1,
-            3
-          ],
-          "voltage": "240V",
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        }
-      ],
-      "notes": [
-        "The orange tape means 'shut this off in an outage'. Confirmed by the owner: the dryer is not needed on backup power."
-      ],
-      "estimatedWattsTotal": 5000
-    },
-    {
-      "id": "A-5-7",
-      "panel": "A",
-      "slots": [
-        5,
-        7
-      ],
-      "poles": 2,
-      "amps": 20,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB220-T",
-        "legacyCatalogNumber": "LB220",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": "0107844",
-        "smartReplacement": "LB220-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Basement — fridge, bath, ejector pump",
-      "shortLabel": "Basement: fridge, bath, pump",
-      "labelSource": "authored",
-      "circuitType": "MWBC (two 120V legs sharing one neutral, one common-trip handle)",
-      "physicalMarking": null,
-      "priority": "critical",
-      "shedIn": [],
-      "circuits": [
-        {
-          "room": "Finished Basement",
-          "endpoint": "Refrigerator",
-          "estimatedWatts": 150,
-          "fedFromSlot": 7,
-          "priority": "critical",
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Finished Basement",
-          "endpoint": "Kitchenette counter electrical plug",
-          "estimatedWatts": 200,
-          "fedFromSlot": 7,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Basement Bathroom",
-          "endpoint": "Floor electrical plug",
-          "estimatedWatts": 50,
-          "fedFromSlot": 7,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Basement Bathroom",
-          "endpoint": "Vanity Plugs",
-          "estimatedWatts": 100,
-          "fedFromSlot": 7,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Unfinished Basement",
-          "endpoint": "Ejector Pump",
-          "estimatedWatts": 500,
-          "fedFromSlot": 7,
-          "priority": "critical",
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        }
-      ],
-      "notes": [
-        "CONFIRMED multi-wire branch circuit: two 120V legs sharing one neutral under one common-trip handle. Not a 240V load."
-      ],
-      "estimatedWattsTotal": 1000
-    },
-    {
-      "id": "A-9",
-      "panel": "A",
-      "slots": [
-        9
-      ],
-      "poles": 1,
-      "amps": 20,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB120-T",
-        "legacyCatalogNumber": "LB120",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": "0106687",
-        "smartReplacement": "LB120-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Washer outlet",
-      "labelSource": "single circuit",
-      "circuitType": "120V branch",
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [
-        "truckAway"
-      ],
-      "circuits": [
-        {
-          "room": "Mud Room",
-          "endpoint": "Washer outlet",
-          "estimatedWatts": 500,
-          "fedFromSlot": 9,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        }
-      ],
-      "notes": [],
-      "estimatedWattsTotal": 500
-    },
-    {
-      "id": "A-11",
-      "panel": "A",
-      "slots": [
-        11
-      ],
-      "poles": 1,
-      "amps": 15,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB115-T",
-        "legacyCatalogNumber": "LB115",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": "0146422",
-        "smartReplacement": "LB115-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Mud room + basement lights & plugs",
-      "shortLabel": "Mud room + basement lights",
-      "labelSource": "authored",
-      "circuitType": "120V branch",
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [],
-      "circuits": [
-        {
-          "room": "Mud Room",
-          "endpoint": "Floor plugs",
-          "estimatedWatts": 100,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Mud Room",
-          "endpoint": "Counter electrical plugs",
-          "estimatedWatts": 200,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Mud Room",
-          "endpoint": "Island electrical plugs",
-          "estimatedWatts": 200,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Finished Basement",
-          "endpoint": "Overhead lights",
-          "estimatedWatts": 200,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Finished Basement",
-          "endpoint": "Floor electrical plugs",
-          "estimatedWatts": 200,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Finished Basement",
-          "endpoint": "Kitchen light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Finished Basement",
-          "endpoint": "Bottom of stairs light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Basement Bathroom",
-          "endpoint": "Vanity Lights",
-          "estimatedWatts": 100,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Basement Bathroom",
-          "endpoint": "Bathroom Fan/Light",
-          "estimatedWatts": 100,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Basement Bathroom",
-          "endpoint": "Hallway Light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Unfinished Basement",
-          "endpoint": "Overhead lights",
-          "estimatedWatts": 200,
-          "fedFromSlot": 11,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        }
-      ],
-      "notes": [],
-      "estimatedWattsTotal": 1480
-    },
-    {
-      "id": "A-13-15",
-      "panel": "A",
-      "slots": [
-        13,
-        15
-      ],
-      "poles": 2,
-      "amps": 15,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB215-T",
-        "legacyCatalogNumber": "LB215",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": null,
-        "smartReplacement": "LB215-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Bedrooms + office (internet) + full bath",
-      "shortLabel": "Bedrooms, office (net), bath",
-      "labelSource": "authored",
-      "circuitType": "MWBC (two 120V legs sharing one neutral, one common-trip handle)",
-      "physicalMarking": null,
-      "priority": "critical",
-      "shedIn": [],
-      "circuits": [
-        {
-          "room": "Master Bedroom",
-          "endpoint": "Light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 13,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Master Bedroom",
-          "endpoint": "Floor electrical plug",
-          "estimatedWatts": 100,
-          "fedFromSlot": 13,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Master Bedroom",
-          "endpoint": "Exterior light switch",
-          "estimatedWatts": 60,
-          "fedFromSlot": 13,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Bedroom Hallway",
-          "endpoint": "Light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 15,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Second Bedroom on Left",
-          "endpoint": "Light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 15,
-          "priority": "critical",
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Bedroom on Right",
-          "endpoint": "Light",
-          "estimatedWatts": 60,
-          "fedFromSlot": 15,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Bedroom on Right",
-          "endpoint": "Floor electrical plug",
-          "estimatedWatts": 100,
-          "fedFromSlot": 15,
-          "verified": true,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Full Bath",
-          "endpoint": "Vanity Lights",
-          "estimatedWatts": 100,
-          "fedFromSlot": 15,
-          "verified": false,
-          "verificationMethod": "breaker walk-through"
-        },
-        {
-          "room": "Full Bath",
-          "endpoint": "Countertop Plug",
-          "estimatedWatts": 100,
-          "fedFromSlot": 15,
-          "verified": false,
-          "verificationMethod": "breaker walk-through"
-        }
-      ],
-      "notes": [
-        "CONFIRMED multi-wire branch circuit: two 120V legs sharing one neutral under one common-trip handle. Not a 240V load. Both legs are traced."
-      ],
-      "estimatedWattsTotal": 700
-    },
-    {
-      "id": "A-19-21",
-      "panel": "A",
-      "slots": [
-        19,
-        21
-      ],
-      "poles": 2,
-      "amps": 30,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB230-T",
-        "legacyCatalogNumber": "LB230",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": null,
-        "smartReplacement": "LB230-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Water heater",
-      "labelSource": "owner identification",
-      "circuitType": "240V appliance",
-      "physicalMarking": "orange tape",
-      "physicalMarkingMeaning": "Orange tape marks a breaker to shut off during an outage.",
-      "priority": null,
-      "shedIn": [
-        "truckHome",
-        "truckAway"
-      ],
-      "circuits": [
-        {
-          "room": "Unfinished Basement",
-          "endpoint": "Water heater",
-          "estimatedWatts": 4500,
-          "fedFromSlot": [
-            19,
-            21
-          ],
-          "voltage": "240V",
-          "notes": "4500 W is the usual single-element rating for a 30A 2-pole electric tank, not a nameplate reading. Elements are normally interlocked so only one runs at a time. Read the nameplate to confirm.",
-          "verified": true,
-          "verificationMethod": "owner identification"
-        }
-      ],
-      "notes": [
-        "Identified by the owner. This confirms the earlier hypothesis behind the orange tape: 30A 2-pole, in the unfinished basement, and exactly the kind of load you tape for shedding.",
-        "Location taken from the A-30 note ('on side with hot water heater'). Confirm the tank is on this circuit by killing 19/21 and checking for hot water.",
-        "Shed in BOTH scenarios. At roughly 4.5 kW it exceeds the Anker's entire 3.8 kW output on its own. A tank holds hot water for hours with the power off."
-      ],
-      "estimatedWattsTotal": 4500
-    },
-    {
-      "id": "A-23-25",
-      "panel": "A",
-      "slots": [
-        23,
-        25
-      ],
-      "poles": 2,
-      "amps": 20,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB220-T",
-        "legacyCatalogNumber": "LB220",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": null,
-        "smartReplacement": "LB220-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Mini-split — mud room addition",
-      "shortLabel": "Mini-split (mud room)",
-      "labelSource": "owner identification",
-      "circuitType": "240V appliance",
-      "equipment": {
-        "manufacturer": "Pioneer",
-        "model": "CYB012GMFILCAD-16",
-        "description": "12,000 BTU (1 ton) ductless mini-split, 22 SEER, 8-way cassette, heat pump, 230V",
-        "productUrl": "https://www.homedepot.com/p/Pioneer-12000-BTU-1-Ton-Ductless-Mini-Split-22-SEER-8-Way-Cassette-Air-Conditioner-with-Heat-Pump-230V-CYB012GMFILCAD-16/313980078"
-      },
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [
-        "truckHome",
-        "truckAway"
-      ],
-      "circuits": [
-        {
-          "room": "Mud Room",
-          "endpoint": "Mini-split cassette (heat and cool)",
-          "estimatedWatts": 1200,
-          "fedFromSlot": [
-            23,
-            25
-          ],
-          "voltage": "240V",
-          "notes": "1200 W is an estimate for a 12k BTU 22 SEER inverter unit at full load, not a nameplate reading. Read the MCA and maximum fuse size off the outdoor unit to confirm.",
-          "verified": true,
-          "verificationMethod": "owner identification"
-        }
-      ],
-      "notes": [
-        "Identified by the owner as a Pioneer 12k mini-split serving the mud room addition. This RESOLVES the old contradiction: the 3500 W figure was wrong, not the breaker. A 12k BTU inverter unit draws roughly 1 kW and sits comfortably on a 20A 2-pole.",
-        "It is a HEAT PUMP, so it heats as well as cools. It is shed by default in both scenarios, but at roughly 1.2 kW it is by far the cheapest heat in the house - worth bringing back if the load budget allows and the Panel B heat kit is locked out."
-      ],
-      "estimatedWattsTotal": 1200
-    },
-    {
-      "id": "A-2-4",
-      "panel": "A",
-      "slots": [
-        2,
-        4
-      ],
-      "poles": 2,
-      "amps": 30,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB230-T",
-        "legacyCatalogNumber": "LB230",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": "0114704",
-        "smartReplacement": "LB230-ST",
-        "photoVerified": true
-      },
-      "role": "generatorInlet",
-      "label": "Backup / generator inlet",
-      "shortLabel": "Backup / generator inlet",
-      "labelSource": "hardware",
-      "circuitType": "backup-feed",
-      "physicalMarking": "mechanical interlock plate",
-      "priority": null,
-      "shedIn": [],
-      "circuits": [],
-      "notes": [
-        "Not a load. Interlocked against the main breaker."
-      ],
-      "estimatedWattsTotal": 0
-    },
-    {
-      "id": "B-6-8",
-      "panel": "B",
-      "slots": [
-        6,
-        8
-      ],
-      "poles": 2,
-      "amps": null,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LFTLA",
-        "deviceType": "Plug-on Feed Through Lug Accessory",
-        "photoVerified": true,
-        "confidence": "high"
-      },
-      "role": "feedThrough",
-      "feeds": "hvac-strips",
-      "overcurrentProtection": "none",
-      "protectedBy": "Panel B 200A main breaker only",
-      "label": "Feed-through lug tap — feeds the HVAC subpanel (NOT a breaker)",
-      "shortLabel": "Feed-through lug — HVAC sub",
-      "labelSource": "hardware",
-      "circuitType": "bus tap / feed-through lug",
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [],
-      "circuits": [],
-      "monitoring": {
-        "smartBreakerMonitorable": false,
-        "reason": "Loads reaching the HVAC subpanel never pass through a Panel B branch breaker, so no LWHEM smart breaker can ever measure them.",
-        "instrumentationPath": "A CT pair on the 2/0 aluminum feeder is the only instrumentation path."
-      },
-      "notes": [
-        "THIS DEVICE CANNOT BE SWITCHED OFF. It has no handle and no overcurrent protection of its own. Everything downstream of it is protected only by Panel B's 200A main."
-      ],
-      "estimatedWattsTotal": 0
-    },
-    {
-      "id": "B-10-12",
-      "panel": "B",
-      "slots": [
-        10,
-        12
-      ],
-      "poles": 2,
-      "amps": 40,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB240-T",
-        "legacyCatalogNumber": "LB240",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120/240V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": null,
-        "smartReplacement": "LB240-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Heat pump outdoor unit (Bryant 284ANV060000, 5-ton)",
-      "shortLabel": "Heat pump outdoor unit (5-ton)",
-      "labelSource": "authored",
-      "circuitType": "240V appliance",
-      "equipment": {
-        "manufacturer": "Bryant",
-        "model": "284ANV060000",
-        "description": "Evolution variable-speed heat pump, 5-ton, outdoor unit"
-      },
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [],
-      "circuits": [],
-      "notes": [
-        "This is the OUTDOOR half of the same system the HVAC subpanel serves. The indoor half is the FE4ANB006L00 fan coil and the KFCEH3301C20 electric heat kit, both behind the feed-through lug at 6/8."
-      ],
-      "estimatedWattsTotal": 0
-    },
-    {
-      "id": "B-26",
-      "panel": "B",
-      "slots": [
-        26
-      ],
-      "poles": 1,
-      "amps": 20,
-      "hardware": {
-        "manufacturer": "Leviton",
-        "catalogNumber": "LB120-T",
-        "legacyCatalogNumber": "LB120",
-        "breakerType": "standard thermal-magnetic",
-        "voltage": "120V~",
-        "interruptRating": "10kA",
-        "hacr": true,
-        "issueNo": null,
-        "smartReplacement": "LB120-ST",
-        "photoVerified": true
-      },
-      "role": "branch",
-      "label": "Anker F3800+ trickle-charge outlet",
-      "shortLabel": "Anker trickle-charge outlet",
-      "labelSource": "owner identification",
-      "circuitType": "120V branch",
-      "physicalMarking": null,
-      "priority": null,
-      "shedIn": [],
-      "circuits": [
-        {
-          "room": "Garage",
-          "endpoint": "Anker F3800+ trickle-charge plug",
-          "estimatedWatts": 1000,
-          "fedFromSlot": 26,
-          "verified": true,
-          "verificationMethod": "owner identification"
-        }
-      ],
-      "notes": [
-        "This is the outlet the trickle-charge safety warning is about. Step 1 of the Panel A procedure is to unplug the Anker from it before connecting the Anker to Panel A."
-      ],
-      "estimatedWattsTotal": 1000
-    }
+ "schemaVersion": 2,
+ "metadata": {
+  "lastUpdated": "2026-08-22",
+  "notes": "Device-first schema. One entry per physical breaker; circuits nest underneath. Shed lists live on devices via shedIn so common-trip behaviour is explicit and there is one source of truth. Not every device is a breaker: role 'feedThrough' is a bus tap with no overcurrent protection, and what it feeds lives in subpanels[]. Handwritten panel directory cards are historical, not authoritative.",
+  "changelog": [
+   {
+    "version": "2.8",
+    "date": "2026-08-22",
+    "summary": "Owner resolved both questions v2.7 raised. Each panel's Leviton LWHEM-2 energy monitor sits on its own 2-pole dumb breaker: Panel B on a 15 A breaker at 17/19 - so those slots are NOT empty and the panel reconciles again at 18 occupied + 12 empty - and Panel A on the reused 20 A LB220-T at 27/29, which was NOT the Siemens SPD it had been recorded as. Leviton's own 'Smart Home' label for 27/29 was right. Both monitor breakers are DO NOT SHED, and the reason is not the obvious one: switching one off de-energises nothing, because smart breakers are ordinary mechanical breakers, but it takes out all metering, the app and remote control for that panel. It also means the one load in the house that can never be measured is the metering system itself. Panel A's surge protection is now a plug-on Leviton LSPD1-T at 22/24, which is a COMBINATION device - two independent 15 A single-pole breakers plus a Type 1 SPD in one body - so A-22 and A-24 keep their identities, their ten circuits and their ~770 W unchanged; only their hardware record changed. Per Leviton's spec the SPD is fed line-side and keeps protecting with those breakers off or tripped, which is a real improvement on the external Siemens unit it replaced (Panel B keeps its own Siemens SPD at 28/30). The one coverage consequence: no smart LSPD1-T exists, so A-22 and A-24 are the only Panel A branch circuits that can never report usage."
+   },
+   {
+    "version": "2.7",
+    "date": "2026-08-22",
+    "summary": "Smart-breaker retrofit. 22 of the 32 devices are now Leviton 2nd-gen smart breakers (-0ST), up from 2: 18 of Panel A's 22 devices and 4 in Panel B. Every catalog number, amp rating and pole count in this change is the installed hardware's own report through the LWHEM-2 cloud, cross-checked against the amps and poles already recorded here - all 22 agreed, so no rating changed. Each retrofitted device gains a monitoring block naming the hub, position and channel_id it is metered under, which is the join the energycap pipeline uses to inherit its label from this file. Two consequences worth knowing: B-10-12, the 5-ton heat pump and the last untraced load in the house, is now metered, so the Panel B load meter's 'reads LOW' warning can finally be closed with a measured figure; and B-26 measures the Anker trickle-charge rate that was a 1,000 W placeholder. Two new medium open questions came out of the same data - a monitor module apparently at Panel B 17/19 (so those slots are no longer claimed verified-empty) and a conflicting name on Panel A 27/29. Leviton's own label for Panel B 6/8, 'Heat Strip Subpanel', independently corroborates the feed-through finding."
+   },
+   {
+    "version": "2.6",
+    "date": "2026-08-10",
+    "summary": "Two more findings closed by owner confirmation. A-mwbc-overlap resolved: slots 5/7, 10/12 and 13/15 in Panel A are genuinely multi-wire branch circuits - two 120V legs sharing a neutral under one common-trip handle, not 240V loads - so circuitType drops 'probable'. What survives from that finding is narrower and now lives in A-unmapped: A-5-7 and A-10-12 each have a second leg (slots 5 and 12) with no endpoints recorded. B-2-4-oven resolved: the double oven is confirmed at 14/16, and the directory card's second 'Oven' at 5/7 is simply wrong. Likely cause recorded on B-6-8 - slots 5/7 face the feed-through lug and the 2/0 feeder conductors probably make that pair unusable, which also means Panel B has fewer than 14 genuinely available slots for expansion."
+   },
+   {
+    "version": "2.5",
+    "date": "2026-08-10",
+    "summary": "Both generator inlets verified by the owner as MALE flanged power inlets (Reliance Controls PBN30, model per recollection), connected with an ordinary L14-30 generator extension cord. This resolves A-inlet-receptacle, the high-severity worry that the Panel A inlet was a female receptacle needing a male-to-male cord - the photo was misread. Renamed generatorInlet.receptacle to generatorInlet.connection, because calling a male inlet a 'receptacle' is what caused the misreading in the first place. Added a top-level cables{} keyed like backupSources, referenced by generatorInlet.cable, so the one cord is described once and both panels point at it. Connection steps in both walkthroughs now say which end goes where. What remains open is only that the Panel B inlet has never been photographed (B-inlet-unphotographed, low)."
+   },
+   {
+    "version": "2.4",
+    "date": "2026-08-10",
+    "summary": "Owner identification closed out every unidentified breaker in Panel A and both in Panel B. A-19-21 is the water heater (4500W, shed in both scenarios), A-23-25 is a Pioneer CYB012GMFILCAD-16 12k mini-split in the mud room addition (1200W, not the recorded 3500W - the breaker was right and the figure was wrong), A-27-29 and B-28-30 are both Siemens whole-house SPDs, B-26 is the dedicated plug that trickle-charges the Anker F3800+. The orange tape is confirmed to mean 'shut this off in an outage', so A-10-12 joins A-1-3 and A-19-21 in being shed in BOTH scenarios rather than only truck-away. SPDs carry an explicit 0W circuit so they read as 'nothing to trace' instead of inflating the untraced-capacity warning. Noted that the Anker's charge outlet is on Panel B, which makes it the no-extra-cable recharge path when the truck is on Panel B. Resolved: A-19-21-identity, A-23-25-ac, ac-count, B-26-unknown, A-orange-tape."
+   },
+   {
+    "version": "2.3",
+    "date": "2026-08-10",
+    "summary": "Panel B 6/8 reclassified: it is a Leviton LFTLA plug-on feed-through lug, not a breaker, and the directory's 'Furn' label is wrong. New role 'feedThrough' (no handle, no ampacity, no overcurrent protection) and a new top-level subpanels[] holding the HVAC heat-strip subpanel at the air handler: 2/0 aluminum feeder, three 50A 2-pole breakers, one 20 kW Bryant KFCEH3301C20 heat kit (NOT three). That 20 kW now counts toward Panel B's connected load and is marked unsheddable, because no Panel B breaker can disconnect it. Lightning inlet corrected 9600W -> 7200W (the 30A/240V receptacle is the ceiling, not the truck). B-10-12 identified as the Bryant 284ANV060000 5-ton heat pump outdoor unit and REMOVED from the truckHome shed list, because the outage plan is heat-pump-only with strips locked out at the Evolution Connex control. Panel B walkthrough gained a thermostat-lockout step and a subpanel backstop step. Resolved: B-6-8-unknown (identified), and the feeder's copper-vs-aluminium question (2/0 aluminum, confirmed)."
+   },
+   {
+    "version": "2.2",
+    "date": "2026-08-07",
+    "summary": "Panel B photo inventory: 10 devices, all 30 slots reconciled (16 occupied, 14 empty). Slots 2/4 identified as the generator inlet - previously recorded as a 50A double oven, which put the inlet on the Panel B shed list. Oven reassigned to 14/16. B-1-3 40A->50A, B-13 15A->20A. One unidentified device at B 6/8. Circuits now carry verified / verificationMethod. Added unassignedEndpoints and panels.*.emptySlots; dropped slotsSurveyed (now derived from slot reconciliation). Resolved open questions retired to this changelog."
+   },
+   {
+    "version": "2.1",
+    "date": "2026-08-07",
+    "summary": "Moved to blackstart repo. Shed lists derived from devices[].shedIn (dropped scenarios.shedDevices/shedDeviceLabels). Added panels.*.slotsSurveyed and a Panel B generatorInlet stub. Rewrote auto-generated device labels. Panel B walkthrough shed list now scenario-derived."
+   },
+   {
+    "version": "2.0",
+    "date": "2026-08-07",
+    "summary": "Restructured to device-first. Panel A hardware photo-verified; Panel B carried forward unverified."
+   },
+   {
+    "version": "1.1",
+    "date": "2026-08-07",
+    "summary": "Panel A physical breaker inventory from photos. Corrected amps on slots 8, 13/15, 14, 17, 18, 19/21, 23/25. Identified slots 2/4 as the generator inlet breaker under a mechanical interlock. Flagged slots 5/7, 10/12, 13/15 as probable MWBCs."
+   },
+   {
+    "version": "1.0",
+    "date": "2025-01-31",
+    "summary": "Initial setup."
+   }
   ]
+ },
+ "home": {
+  "name": "Montfort Residence",
+  "serviceAmps": 400
+ },
+ "roomAliases": {
+  "First Bedroom on Left": "Myia's Bedroom",
+  "Second Bedroom on Left": "Office",
+  "Bedroom on Right": "Jordan's Room"
+ },
+ "panels": {
+  "A": {
+   "name": "Panel A",
+   "fullName": "Panel A (Primary / Anker Backup)",
+   "slots": 30,
+   "backupSource": "anker",
+   "location": "Garage",
+   "notes": "Primary backup panel - can be powered by Anker F3800+",
+   "mainBreaker": {
+    "manufacturer": "Leviton",
+    "amps": 200,
+    "poles": 2,
+    "catalogNumber": "LM200-T",
+    "catalogNumberAlternate": "LM200",
+    "voltage": "120/240 VAC",
+    "interruptRating": "22kA",
+    "confidence": "medium",
+    "notes": "Face is marked only 'LEVITON 200'. LM200-T is thermal-magnetic; LM200 is the older hydraulic-magnetic part. All branch breakers in this panel are thermal-magnetic '-T' style, so LM200-T is the likely part. Confirm from the side label or panel schedule."
+   },
+   "generatorInlet": {
+    "deviceId": "A-2-4",
+    "breakerSlots": [
+     2,
+     4
+    ],
+    "breakerAmps": 30,
+    "breakerPoles": 2,
+    "breakerCatalogNumber": "LB230-T",
+    "interlockType": "mechanical sliding-plate interlock over the top two right-column positions",
+    "interlockCandidates": [
+     "Leviton LITLK Transfer Interlock Kit",
+     "GenSafety LEV-200 (aftermarket)"
+    ],
+    "cable": "l1430-ext",
+    "connection": {
+     "location": "Wall, immediately left of Panel A (garage, interior)",
+     "deviceType": "flanged power inlet box - MALE pins, not a receptacle",
+     "configuration": "NEMA L14-30 (30A, 125/250V, 3-pole 4-wire twist-lock)",
+     "gender": "male",
+     "genderVerified": true,
+     "manufacturer": "Reliance Controls",
+     "model": "PBN30",
+     "modelConfidence": "medium",
+     "enclosure": "surface-mount inlet box",
+     "confidence": "high",
+     "notes": "RESOLVED. Earlier this was read off a photo as a female receptacle, which implied a male-to-male cord - it does not. It is a male flanged power inlet, so an ordinary L14-30 extension cord connects it to the Anker with no exposed live pins. The PBN30 model number is the owner's recollection and is the one part still worth confirming; the male gender is verified."
+    },
+    "confidence": "high",
+    "notes": "Slots 2 and 4 are NOT a branch circuit - they are the backup feed. The interlock plate physically prevents the main and this breaker from both being ON."
+   },
+   "emptySlots": []
+  },
+  "B": {
+   "name": "Panel B",
+   "fullName": "Panel B (Secondary / Lightning Backup)",
+   "slots": 30,
+   "backupSource": "lightning",
+   "location": "Garage",
+   "notes": "Secondary panel - can be powered by the F-150 Lightning through the outdoor 30A/240V inlet, which caps it at 7.2 kW. 14 of 30 slots are empty, so there is real room for smart-breaker or solar expansion - but count on fewer than 14. Slots 5 and 7 sit opposite the feed-through lug at 6/8, and the 2/0 feeder conductors landing there most likely make that pair unusable. Check before planning around them.",
+   "mainBreaker": {
+    "manufacturer": "Leviton",
+    "amps": 200,
+    "poles": 2,
+    "catalogNumber": "LM200-T",
+    "catalogNumberAlternate": "LM200",
+    "voltage": "120/240 VAC",
+    "interruptRating": "22kA",
+    "confidence": "medium",
+    "notes": "Face is marked only 'LEVITON 200', same as Panel A. Confirm LM200-T vs LM200."
+   },
+   "generatorInlet": {
+    "deviceId": "B-2-4",
+    "breakerSlots": [
+     2,
+     4
+    ],
+    "breakerAmps": 30,
+    "breakerPoles": 2,
+    "breakerCatalogNumber": "LB230-T",
+    "interlockType": "mechanical sliding-plate interlock over the top two right-column positions",
+    "cable": "l1430-ext",
+    "connection": {
+     "location": "Outdoors",
+     "deviceType": "flanged power inlet box - MALE pins, not a receptacle",
+     "configuration": "NEMA L14-30 (30A, 125/250V, 3-pole 4-wire twist-lock)",
+     "gender": "male",
+     "genderVerified": true,
+     "manufacturer": "Reliance Controls",
+     "model": "PBN30",
+     "modelConfidence": "medium",
+     "confidence": "medium",
+     "notes": "Same arrangement as Panel A and the same cord fits both, so this is a male inlet - that much is verified by the owner. Still not photographed: the exact NEMA configuration is inferred from the PBN30 (L14-30) and from the fact that one cable serves both panels. Confirm on sight before the first real transfer."
+    },
+    "confidence": "high",
+    "notes": "Slots 2 and 4 are the backup feed, not a branch circuit. Confirmed from photo and the directory card ('GEN INPUT').\nThe truck side is the Lightning's 240V 30A outlet, which is what caps this panel at 7.2 kW regardless of Pro Power Onboard's total rating. Confirm the truck-side outlet configuration when you confirm the inlet."
+   },
+   "emptySlots": [
+    5,
+    7,
+    15,
+    18,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    27,
+    29
+   ]
+  }
+ },
+ "subpanels": [
+  {
+   "id": "hvac-strips",
+   "name": "HVAC heat-strip subpanel",
+   "shortName": "HVAC subpanel",
+   "location": "At the HVAC air handler",
+   "locationDetail": "Mounted on the air handler itself, NOT in the garage with panels A and B. A sweep of Panel B does not go anywhere near it.",
+   "fedFrom": {
+    "panel": "B",
+    "deviceId": "B-6-8"
+   },
+   "enclosure": {
+    "manufacturer": "unknown - not Leviton",
+    "description": "older grey load center",
+    "photoVerified": false,
+    "confidence": "medium"
+   },
+   "mainBreaker": null,
+   "disconnectArrangement": "No main breaker. Three 50A 2-pole handles, a six-disconnect arrangement - those handles ARE the disconnecting means for everything here.",
+   "feeder": {
+    "conductor": "2/0 aluminum",
+    "material": "aluminum",
+    "size": "2/0",
+    "ampacityAmps": 135,
+    "ampacityBasis": "75C column",
+    "overcurrentProtection": "none at the tap",
+    "protectedBy": "Panel B 200A main breaker only",
+    "verified": true,
+    "notes": "Confirmed aluminum, 2/0 - the copper-vs-aluminium question is settled. Whether the run satisfies the NEC 10-ft tap rule is NOT settled: it needs a measured run length and confirmation of whether it is in raceway. No code conclusion has been recorded either way."
+   },
+   "monitoring": {
+    "smartBreakerMonitorable": false,
+    "reason": "Loads here never pass through a Panel B branch breaker, so no Leviton LWHEM smart breaker can ever measure them. Swapping breakers in Panel B will not instrument this branch, no matter how many are swapped.",
+    "instrumentationPath": "A CT pair on the 2/0 aluminum feeder is the only way to meter this."
+   },
+   "devices": [
+    {
+     "id": "HVAC-A",
+     "position": null,
+     "poles": 2,
+     "amps": 50,
+     "label": "Heat kit circuit A",
+     "serves": [
+      "heat-kit"
+     ],
+     "verified": true,
+     "notes": [
+      "Physical position in the subpanel was not recorded, so these are listed A/B/C rather than by slot number. Identify them at the panel before switching anything.",
+      "May ALSO feed the FE4ANB006L00 fan coil blower - unverified. See hvac-blower-circuit."
+     ]
+    },
+    {
+     "id": "HVAC-B",
+     "position": null,
+     "poles": 2,
+     "amps": 50,
+     "label": "Heat kit circuit B",
+     "serves": [
+      "heat-kit"
+     ],
+     "verified": true,
+     "notes": [
+      "May ALSO feed the FE4ANB006L00 fan coil blower - unverified. See hvac-blower-circuit."
+     ]
+    },
+    {
+     "id": "HVAC-C",
+     "position": null,
+     "poles": 2,
+     "amps": 50,
+     "label": "Heat kit circuit C",
+     "serves": [
+      "heat-kit"
+     ],
+     "verified": true,
+     "notes": [
+      "May ALSO feed the FE4ANB006L00 fan coil blower - unverified. See hvac-blower-circuit.",
+      "Whether the heat kit is wired for two or three field power circuits is itself unverified - see hvac-heat-kit-circuits. If it is two, one of these three handles feeds something else."
+     ]
+    }
+   ],
+   "appliances": [
+    {
+     "id": "heat-kit",
+     "room": "HVAC Air Handler",
+     "endpoint": "Electric heat kit",
+     "manufacturer": "Bryant",
+     "model": "KFCEH3301C20",
+     "estimatedWatts": 20000,
+     "rating": "20 kW @ 240V, ~83A, 62,800 BTU/hr, internal circuit breakers",
+     "fieldPowerCircuits": 3,
+     "fieldPowerCircuitsVerified": false,
+     "verified": true,
+     "notes": "ONE heat kit, not three. The three 50A 2-pole breakers are the field power circuits of a single 20 kW appliance - roughly 6,667 W per circuit. Never sum them as three 20 kW loads."
+    },
+    {
+     "id": "blower",
+     "room": "HVAC Air Handler",
+     "endpoint": "Fan coil blower",
+     "manufacturer": "Bryant",
+     "model": "FE4ANB006L00",
+     "estimatedWatts": null,
+     "verified": false,
+     "notes": "Likely fed from one of the three subpanel circuits, but which one is unknown and even the fact that it is fed from here is unconfirmed. No draw figure recorded, so it contributes nothing to the total below."
+    }
+   ],
+   "estimatedWattsTotal": 20000,
+   "notes": [
+    "Nothing in Panel B can disconnect these loads. The feed-through lug at Panel B 6/8 has no handle, so the only disconnecting means is the three 50A handles inside this subpanel, at the air handler.",
+    "20 kW of connected electric heat against a 7.2 kW inlet is roughly 2.8x the ceiling. The heat strips must be locked out at the Evolution Connex control before any transfer.",
+    "DO NOT switch off all three handles as a blanket move: the blower is probably on one of them, and killing the blower leaves the heat pump unable to run at all."
+   ]
+  }
+ ],
+ "devices": [
+  {
+   "id": "A-1-3",
+   "panel": "A",
+   "slots": [
+    1,
+    3
+   ],
+   "poles": 2,
+   "amps": 30,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB230-0ST",
+    "legacyCatalogNumber": "LB230",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0107964",
+    "replacedCatalogNumber": "LB230-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Dryer outlet",
+   "labelSource": "single circuit",
+   "circuitType": "240V appliance",
+   "physicalMarking": "orange tape",
+   "physicalMarkingMeaning": "Orange tape marks a breaker to shut off during an outage.",
+   "priority": null,
+   "shedIn": [
+    "truckHome",
+    "truckAway"
+   ],
+   "circuits": [
+    {
+     "room": "Mud Room",
+     "endpoint": "Dryer outlet",
+     "estimatedWatts": 5000,
+     "fedFromSlot": [
+      1,
+      3
+     ],
+     "voltage": "240V",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [
+    "The orange tape means 'shut this off in an outage'. Confirmed by the owner: the dryer is not needed on backup power."
+   ],
+   "estimatedWattsTotal": 5000,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 1,
+     "channelId": "breaker_p1",
+     "levitonLabel": "Dryer",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-5-7",
+   "panel": "A",
+   "slots": [
+    5,
+    7
+   ],
+   "poles": 2,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB220-0ST",
+    "legacyCatalogNumber": "LB220",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0107844",
+    "replacedCatalogNumber": "LB220-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Basement — fridge, bath, ejector pump",
+   "shortLabel": "Basement: fridge, bath, pump",
+   "labelSource": "authored",
+   "circuitType": "MWBC (two 120V legs sharing one neutral, one common-trip handle)",
+   "physicalMarking": null,
+   "priority": "critical",
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Finished Basement",
+     "endpoint": "Refrigerator",
+     "estimatedWatts": 150,
+     "fedFromSlot": 7,
+     "priority": "critical",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Finished Basement",
+     "endpoint": "Kitchenette counter electrical plug",
+     "estimatedWatts": 200,
+     "fedFromSlot": 7,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Basement Bathroom",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 50,
+     "fedFromSlot": 7,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Basement Bathroom",
+     "endpoint": "Vanity Plugs",
+     "estimatedWatts": 100,
+     "fedFromSlot": 7,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Unfinished Basement",
+     "endpoint": "Ejector Pump",
+     "estimatedWatts": 500,
+     "fedFromSlot": 7,
+     "priority": "critical",
+     "notes": "Also has freezer plugged in right now",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [
+    "CONFIRMED multi-wire branch circuit: two 120V legs sharing one neutral under one common-trip handle. Not a 240V load.",
+    "Endpoints are recorded on slot 7 only. The slot 5 leg is real but nothing on it has been traced yet - see A-unmapped."
+   ],
+   "estimatedWattsTotal": 1000,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 5,
+     "channelId": "breaker_p5",
+     "levitonLabel": "Finished Basement/Ejector Pump",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-9",
+   "panel": "A",
+   "slots": [
+    9
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0106687",
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Washer outlet",
+   "labelSource": "single circuit",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [
+    "truckAway"
+   ],
+   "circuits": [
+    {
+     "room": "Mud Room",
+     "endpoint": "Washer outlet",
+     "estimatedWatts": 500,
+     "fedFromSlot": 9,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 500,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 9,
+     "channelId": "breaker_p9",
+     "levitonLabel": "Washing Machine",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-11",
+   "panel": "A",
+   "slots": [
+    11
+   ],
+   "poles": 1,
+   "amps": 15,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB115-0ST",
+    "legacyCatalogNumber": "LB115",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0146422",
+    "replacedCatalogNumber": "LB115-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Mud room + basement lights & plugs",
+   "shortLabel": "Mud room + basement lights",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Mud Room",
+     "endpoint": "Floor plugs",
+     "estimatedWatts": 100,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Mud Room",
+     "endpoint": "Counter electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Mud Room",
+     "endpoint": "Island electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Finished Basement",
+     "endpoint": "Overhead lights",
+     "estimatedWatts": 200,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Finished Basement",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 11,
+     "notes": "1/2 on kitchen side",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Finished Basement",
+     "endpoint": "Kitchen light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Finished Basement",
+     "endpoint": "Bottom of stairs light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Basement Bathroom",
+     "endpoint": "Vanity Lights",
+     "estimatedWatts": 100,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Basement Bathroom",
+     "endpoint": "Bathroom Fan/Light",
+     "estimatedWatts": 100,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Basement Bathroom",
+     "endpoint": "Hallway Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Unfinished Basement",
+     "endpoint": "Overhead lights",
+     "estimatedWatts": 200,
+     "fedFromSlot": 11,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 1480,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 11,
+     "channelId": "breaker_p11",
+     "levitonLabel": "Mud room And Basement",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-13-15",
+   "panel": "A",
+   "slots": [
+    13,
+    15
+   ],
+   "poles": 2,
+   "amps": 15,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB215-0ST",
+    "legacyCatalogNumber": "LB215",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB215-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Bedrooms + office (internet) + full bath",
+   "shortLabel": "Bedrooms, office (net), bath",
+   "labelSource": "authored",
+   "circuitType": "MWBC (two 120V legs sharing one neutral, one common-trip handle)",
+   "physicalMarking": null,
+   "priority": "critical",
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Master Bedroom",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 13,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Master Bedroom",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 100,
+     "fedFromSlot": 13,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Master Bedroom",
+     "endpoint": "Exterior light switch",
+     "estimatedWatts": 60,
+     "fedFromSlot": 13,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Bedroom Hallway",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 15,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Second Bedroom on Left",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 15,
+     "priority": "critical",
+     "notes": "Office - INTERNET/NETWORKING",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Bedroom on Right",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 15,
+     "notes": "Jordan's old room",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Bedroom on Right",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 100,
+     "fedFromSlot": 15,
+     "notes": "Jordan's old room",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Full Bath",
+     "endpoint": "Vanity Lights",
+     "estimatedWatts": 100,
+     "fedFromSlot": 15,
+     "notes": "Double check",
+     "verified": false,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Full Bath",
+     "endpoint": "Countertop Plug",
+     "estimatedWatts": 100,
+     "fedFromSlot": 15,
+     "notes": "Double check",
+     "verified": false,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [
+    "CONFIRMED multi-wire branch circuit: two 120V legs sharing one neutral under one common-trip handle. Not a 240V load. Both legs are traced."
+   ],
+   "estimatedWattsTotal": 700,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 13,
+     "channelId": "breaker_p13",
+     "levitonLabel": "Bedroom Lights And Plugs",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-17",
+   "panel": "A",
+   "slots": [
+    17
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Kitchen hood + hallway & mud room lights",
+   "shortLabel": "Kitchen hood + hall/mud lights",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Kitchen",
+     "endpoint": "Hood fan and light",
+     "estimatedWatts": 200,
+     "fedFromSlot": 17,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen Hallway",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 17,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Mud Room",
+     "endpoint": "Lights",
+     "estimatedWatts": 100,
+     "fedFromSlot": 17,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Mud Room",
+     "endpoint": "Outside Carriage Lights",
+     "estimatedWatts": 100,
+     "fedFromSlot": 17,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 460,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 17,
+     "channelId": "breaker_p17",
+     "levitonLabel": "Kitchen Hood/Hallway Lights",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-19-21",
+   "panel": "A",
+   "slots": [
+    19,
+    21
+   ],
+   "poles": 2,
+   "amps": 30,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB230-0ST",
+    "legacyCatalogNumber": "LB230",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB230-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Water heater",
+   "labelSource": "owner identification",
+   "circuitType": "240V appliance",
+   "physicalMarking": "orange tape",
+   "physicalMarkingMeaning": "Orange tape marks a breaker to shut off during an outage.",
+   "priority": null,
+   "shedIn": [
+    "truckHome",
+    "truckAway"
+   ],
+   "circuits": [
+    {
+     "room": "Unfinished Basement",
+     "endpoint": "Water heater",
+     "estimatedWatts": 4500,
+     "fedFromSlot": [
+      19,
+      21
+     ],
+     "voltage": "240V",
+     "notes": "4500 W is the usual single-element rating for a 30A 2-pole electric tank, not a nameplate reading. Elements are normally interlocked so only one runs at a time. Read the nameplate to confirm.",
+     "verified": true,
+     "verificationMethod": "owner identification"
+    }
+   ],
+   "notes": [
+    "Identified by the owner. This confirms the earlier hypothesis behind the orange tape: 30A 2-pole, in the unfinished basement, and exactly the kind of load you tape for shedding.",
+    "Location taken from the A-30 note ('on side with hot water heater'). Confirm the tank is on this circuit by killing 19/21 and checking for hot water.",
+    "Shed in BOTH scenarios. At roughly 4.5 kW it exceeds the Anker's entire 3.8 kW output on its own. A tank holds hot water for hours with the power off."
+   ],
+   "estimatedWattsTotal": 4500,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 19,
+     "channelId": "breaker_p19",
+     "levitonLabel": "Water Heater",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-23-25",
+   "panel": "A",
+   "slots": [
+    23,
+    25
+   ],
+   "poles": 2,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB220-0ST",
+    "legacyCatalogNumber": "LB220",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB220-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Mini-split — mud room addition",
+   "shortLabel": "Mini-split (mud room)",
+   "labelSource": "owner identification",
+   "circuitType": "240V appliance",
+   "equipment": {
+    "manufacturer": "Pioneer",
+    "model": "CYB012GMFILCAD-16",
+    "description": "12,000 BTU (1 ton) ductless mini-split, 22 SEER, 8-way cassette, heat pump, 230V",
+    "productUrl": "https://www.homedepot.com/p/Pioneer-12000-BTU-1-Ton-Ductless-Mini-Split-22-SEER-8-Way-Cassette-Air-Conditioner-with-Heat-Pump-230V-CYB012GMFILCAD-16/313980078"
+   },
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [
+    "truckHome",
+    "truckAway"
+   ],
+   "circuits": [
+    {
+     "room": "Mud Room",
+     "endpoint": "Mini-split cassette (heat and cool)",
+     "estimatedWatts": 1200,
+     "fedFromSlot": [
+      23,
+      25
+     ],
+     "voltage": "240V",
+     "notes": "1200 W is an estimate for a 12k BTU 22 SEER inverter unit at full load, not a nameplate reading. Read the MCA and maximum fuse size off the outdoor unit to confirm.",
+     "verified": true,
+     "verificationMethod": "owner identification"
+    }
+   ],
+   "notes": [
+    "Identified by the owner as a Pioneer 12k mini-split serving the mud room addition. This RESOLVES the old contradiction: the 3500 W figure was wrong, not the breaker. A 12k BTU inverter unit draws roughly 1 kW and sits comfortably on a 20A 2-pole.",
+    "It is a HEAT PUMP, so it heats as well as cools. It is shed by default in both scenarios, but at roughly 1.2 kW it is by far the cheapest heat in the house - worth bringing back if the load budget allows and the Panel B heat kit is locked out."
+   ],
+   "estimatedWattsTotal": 1200,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 23,
+     "channelId": "breaker_p23",
+     "levitonLabel": "Mud Room Air Conditioner",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-2-4",
+   "panel": "A",
+   "slots": [
+    2,
+    4
+   ],
+   "poles": 2,
+   "amps": 30,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB230-T",
+    "legacyCatalogNumber": "LB230",
+    "breakerType": "standard thermal-magnetic",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0114704",
+    "smartReplacement": "LB230-ST",
+    "photoVerified": true
+   },
+   "role": "generatorInlet",
+   "label": "Backup / generator inlet",
+   "shortLabel": "Backup / generator inlet",
+   "labelSource": "hardware",
+   "circuitType": "backup-feed",
+   "physicalMarking": "mechanical interlock plate",
+   "priority": null,
+   "shedIn": [],
+   "circuits": [],
+   "notes": [
+    "Not a load. Interlocked against the main breaker."
+   ],
+   "estimatedWattsTotal": 0
+  },
+  {
+   "id": "A-6",
+   "panel": "A",
+   "slots": [
+    6
+   ],
+   "poles": 1,
+   "amps": 15,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB115-0ST",
+    "legacyCatalogNumber": "LB115",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0109615",
+    "replacedCatalogNumber": "LB115-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Front of house — living room, foyer, porch, Myia's room",
+   "shortLabel": "Living rm, foyer, porch, Myia",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Living Room",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 6,
+     "notes": "Eric lamp only",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Foyer",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 6,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Foyer Closet",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 50,
+     "fedFromSlot": 6,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Front Porch",
+     "endpoint": "Carriage Lights & Light Pole",
+     "estimatedWatts": 100,
+     "fedFromSlot": 6,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Front Porch",
+     "endpoint": "Light Pole and electrical outlet",
+     "estimatedWatts": 100,
+     "fedFromSlot": 6,
+     "notes": "Outlet is next to water spigot and controlled by same switch",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Front Porch",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 50,
+     "fedFromSlot": 6,
+     "notes": "Double check",
+     "verified": false,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "First Bedroom on Left",
+     "endpoint": "Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 6,
+     "notes": "Myia's Bedroom",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "First Bedroom on Left",
+     "endpoint": "Floor electrical plug",
+     "estimatedWatts": 100,
+     "fedFromSlot": 6,
+     "notes": "Myia's Bedroom",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 720,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 6,
+     "channelId": "breaker_p6",
+     "levitonLabel": "Front Of House",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-8",
+   "panel": "A",
+   "slots": [
+    8
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0106687",
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Dining room plugs + TV / fireplace plugs",
+   "shortLabel": "Dining + TV/fireplace plugs",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Dining Room",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 100,
+     "fedFromSlot": 8,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Family/TV Room",
+     "endpoint": "TV Plugs",
+     "estimatedWatts": 300,
+     "fedFromSlot": 8,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Family/TV Room",
+     "endpoint": "Fireplace plugs",
+     "estimatedWatts": 100,
+     "fedFromSlot": 8,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 500,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 8,
+     "channelId": "breaker_p8",
+     "levitonLabel": "Dining Room Plugs/TV",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-10-12",
+   "panel": "A",
+   "slots": [
+    10,
+    12
+   ],
+   "poles": 2,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB220-0ST",
+    "legacyCatalogNumber": "LB220",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0101662",
+    "replacedCatalogNumber": "LB220-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Kitchen counter plugs + dishwasher",
+   "shortLabel": "Kitchen counter + dishwasher",
+   "labelSource": "authored",
+   "circuitType": "MWBC (two 120V legs sharing one neutral, one common-trip handle)",
+   "physicalMarking": "orange tape",
+   "physicalMarkingMeaning": "Orange tape marks a breaker to shut off during an outage.",
+   "priority": null,
+   "shedIn": [
+    "truckHome",
+    "truckAway"
+   ],
+   "circuits": [
+    {
+     "room": "Kitchen",
+     "endpoint": "Counter electrical plugs",
+     "estimatedWatts": 1500,
+     "fedFromSlot": 10,
+     "notes": "Coffee pot and air fryer. Slot 10 is half of the 20A 2-pole at 10/12 - likely one leg of a kitchen MWBC",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Dishwasher",
+     "estimatedWatts": 1800,
+     "fedFromSlot": 10,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [
+    "CONFIRMED multi-wire branch circuit: two 120V legs sharing one neutral under one common-trip handle. Not a 240V load.",
+    "Endpoints are recorded on slot 10 only. The slot 12 leg is real but nothing on it has been traced yet - see A-unmapped.",
+    "The orange tape means 'shut this off in an outage'. Confirmed by the owner: shed in BOTH scenarios, not just truck-away. The dishwasher alone is 1.8 kW."
+   ],
+   "estimatedWattsTotal": 3300,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 10,
+     "channelId": "breaker_p10",
+     "levitonLabel": "Kitchen Counter/Dishwasher",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-14",
+   "panel": "A",
+   "slots": [
+    14
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0106687",
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Lamp floor plugs",
+   "labelSource": "single circuit",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Family/TV Room",
+     "endpoint": "Lamp floor plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 14,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 200,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 14,
+     "channelId": "breaker_p14",
+     "levitonLabel": "Family Room Lamp Plugs",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-16",
+   "panel": "A",
+   "slots": [
+    16
+   ],
+   "poles": 1,
+   "amps": 15,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB115-0ST",
+    "legacyCatalogNumber": "LB115",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0109615",
+    "replacedCatalogNumber": "LB115-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Main floor lights — dining, living, family, kitchen",
+   "shortLabel": "Main floor lights",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Dining Room",
+     "endpoint": "Lights",
+     "estimatedWatts": 100,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Living Room",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 16,
+     "notes": "2 are switched and others are not",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Family/TV Room",
+     "endpoint": "Fan",
+     "estimatedWatts": 75,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Family/TV Room",
+     "endpoint": "Track Lights",
+     "estimatedWatts": 200,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Family/TV Room",
+     "endpoint": "Fireplace Lights",
+     "estimatedWatts": 60,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Bay window light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Fluorescent Lights",
+     "estimatedWatts": 150,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Pantry Light",
+     "estimatedWatts": 60,
+     "fedFromSlot": 16,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 905,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 16,
+     "channelId": "breaker_p16",
+     "levitonLabel": "Main Floor Lights",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-18",
+   "panel": "A",
+   "slots": [
+    18
+   ],
+   "poles": 1,
+   "amps": 15,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB115-0ST",
+    "legacyCatalogNumber": "LB115",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB115-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Outside basement outlet and flood light",
+   "shortLabel": "Outside basement + flood light",
+   "labelSource": "single circuit",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Outside Basement",
+     "endpoint": "Outlet and flood light",
+     "estimatedWatts": 200,
+     "fedFromSlot": 18,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 200,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 18,
+     "channelId": "breaker_p18",
+     "levitonLabel": "Outside Basement Outlet/Light",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-20",
+   "panel": "A",
+   "slots": [
+    20
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Septic pump + doorbell",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": "critical",
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Outside",
+     "endpoint": "Septic Pump Tank",
+     "estimatedWatts": 750,
+     "fedFromSlot": 20,
+     "priority": "critical",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Outside",
+     "endpoint": "Doorbell",
+     "estimatedWatts": 10,
+     "fedFromSlot": 20,
+     "notes": "Transformer is in panel and goes up to doorbell chime",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 760,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 20,
+     "channelId": "breaker_p20",
+     "levitonLabel": "Septic Pump/doorbell",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-26",
+   "panel": "A",
+   "slots": [
+    26
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Kitchen fridge + counter, floor & microwave plugs",
+   "shortLabel": "Kitchen fridge + microwave",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": "critical",
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Kitchen",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 26,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Counter electrical plugs",
+     "estimatedWatts": 300,
+     "fedFromSlot": 26,
+     "notes": "One plug near door",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Refrigerator plug",
+     "estimatedWatts": 150,
+     "fedFromSlot": 26,
+     "priority": "critical",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Kitchen",
+     "endpoint": "Microwave plug",
+     "estimatedWatts": 1200,
+     "fedFromSlot": 26,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 1850,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 26,
+     "channelId": "breaker_p26",
+     "levitonLabel": "Kitchen Fridge/Microwave",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-28",
+   "panel": "A",
+   "slots": [
+    28
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Sump Pump",
+   "labelSource": "single circuit",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": "critical",
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Unfinished Basement",
+     "endpoint": "Sump Pump",
+     "estimatedWatts": 800,
+     "fedFromSlot": 28,
+     "priority": "critical",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 800,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 28,
+     "channelId": "breaker_p28",
+     "levitonLabel": "Sump Pump",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "A-30",
+   "panel": "A",
+   "slots": [
+    30
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Basement plugs — door side + water heater side",
+   "shortLabel": "Basement plugs (both sides)",
+   "labelSource": "authored",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Finished Basement",
+     "endpoint": "door side electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 30,
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    },
+    {
+     "room": "Unfinished Basement",
+     "endpoint": "Floor electrical plugs",
+     "estimatedWatts": 200,
+     "fedFromSlot": 30,
+     "notes": "on side with hot water heater",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [],
+   "estimatedWattsTotal": 400,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D52",
+     "hubName": "Panel A",
+     "position": 30,
+     "channelId": "breaker_p30",
+     "levitonLabel": "Basement Plugs Door Side/WH Side",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "B-1-3",
+   "panel": "B",
+   "slots": [
+    1,
+    3
+   ],
+   "poles": 2,
+   "amps": 50,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB250-0ST",
+    "legacyCatalogNumber": "LB250",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": "0109618",
+    "replacedCatalogNumber": "LB250-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Cooktop",
+   "labelSource": "walkthrough",
+   "circuitType": "240V appliance",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [
+    "truckHome"
+   ],
+   "circuits": [
+    {
+     "room": "Kitchen",
+     "endpoint": "Stovetop",
+     "estimatedWatts": 7500,
+     "fedFromSlot": [
+      1,
+      3
+     ],
+     "voltage": "240V",
+     "verified": true,
+     "verificationMethod": "breaker walk-through"
+    }
+   ],
+   "notes": [
+    "Amps corrected from 40 to 50 per photo.",
+    "Panel directory agrees: 1/3 = Cooktop."
+   ],
+   "estimatedWattsTotal": 7500,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D48",
+     "hubName": "Panel B",
+     "position": 1,
+     "channelId": "breaker_p1",
+     "levitonLabel": "Cooktop",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "B-6-8",
+   "panel": "B",
+   "slots": [
+    6,
+    8
+   ],
+   "poles": 2,
+   "amps": null,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LFTLA",
+    "deviceType": "Plug-on Feed Through Lug Accessory",
+    "photoVerified": true,
+    "confidence": "high",
+    "notes": "Black body with no handle and no amp rating because it is not a breaker. It is a plug-on lug accessory that taps both busbars and hands the feeder straight through. The two heavy black conductors landing to its right are that feeder."
+   },
+   "role": "feedThrough",
+   "feeds": "hvac-strips",
+   "overcurrentProtection": "none",
+   "protectedBy": "Panel B 200A main breaker only",
+   "label": "Feed-through lug tap — feeds the HVAC subpanel (NOT a breaker)",
+   "shortLabel": "Feed-through lug — HVAC sub",
+   "labelSource": "hardware",
+   "circuitType": "bus tap / feed-through lug",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [],
+   "monitoring": {
+    "smartBreakerMonitorable": false,
+    "reason": "Loads reaching the HVAC subpanel never pass through a Panel B branch breaker, so no LWHEM smart breaker can ever measure them.",
+    "instrumentationPath": "A CT pair on the 2/0 aluminum feeder is the only instrumentation path."
+   },
+   "notes": [
+    "THIS DEVICE CANNOT BE SWITCHED OFF. It has no handle and no overcurrent protection of its own. Everything downstream of it is protected only by Panel B's 200A main.",
+    "The handwritten directory card reads 'Furn' at 6/8. That label is WRONG and must not be carried forward - there is no furnace breaker here, and nothing at Panel B disconnects what this feeds.",
+    "It feeds the HVAC heat-strip subpanel at the air handler (2/0 aluminum, roughly 135A at 75C). The only disconnecting means for those loads is inside that subpanel.",
+    "Its downstream load (20 kW of electric heat) IS counted in the Panel B load figure, but it can never be shed at Panel B.",
+    "It probably explains the phantom 'Oven' the directory card lists at 5/7. Those slots face this lug, and the 2/0 feeder conductors landing here most likely make the pair unusable - so a breaker that was written on the card was never installed there. Treat 5/7 as doubtful when planning expansion.",
+    "INDEPENDENT CORROBORATION, 2026-08-22: in the Leviton app the owner labelled the placeholder object occupying these two positions 'Heat Strip Subpanel'. That is a second, separately recorded statement that 6/8 feeds the HVAC subpanel and not a branch circuit."
+   ],
+   "estimatedWattsTotal": 0
+  },
+  {
+   "id": "B-10-12",
+   "panel": "B",
+   "slots": [
+    10,
+    12
+   ],
+   "poles": 2,
+   "amps": 40,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB240-0ST",
+    "legacyCatalogNumber": "LB240",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB240-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Heat pump outdoor unit (Bryant 284ANV060000, 5-ton)",
+   "shortLabel": "Heat pump outdoor unit (5-ton)",
+   "labelSource": "authored",
+   "circuitType": "240V appliance",
+   "equipment": {
+    "manufacturer": "Bryant",
+    "model": "284ANV060000",
+    "description": "Evolution variable-speed heat pump, 5-ton, outdoor unit"
+   },
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [],
+   "notes": [
+    "This is the OUTDOOR half of the same system the HVAC subpanel serves. The indoor half is the FE4ANB006L00 fan coil and the KFCEH3301C20 electric heat kit, both behind the feed-through lug at 6/8.",
+    "DELIBERATELY NOT SHED. The Panel B outage procedure is heat-pump-only: lock the electric heat out at the Evolution Connex control and let the heat pump run. Shedding this breaker would turn off the one piece of heating that fits inside a 7.2 kW inlet.",
+    "40A 2-pole confirmed from photo. No load figure recorded, so it contributes 0 W to the Panel B load meter - see hvac-heat-pump-on-truck before assuming it fits.",
+    "A 'Mud Room Air Conditioner' is also recorded on Panel A 23/25 (20A 2-pole). That is a separate unit or a wrong label; this one is the main system.",
+    "METERED as of 2026-08-22. The LB240-0ST smart breaker on these slots reports this circuit's real draw every 30 seconds (1,350 W observed with the compressor at part capacity), so the 0 W above - the last untraced load in the house, and the reason the Panel B meter reads LOW - can be replaced with a measured figure once a few days of heating and cooling have been recorded. Do not guess it from this one sample: a variable-speed 5-ton unit at part capacity is nothing like its peak."
+   ],
+   "estimatedWattsTotal": 0,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D48",
+     "hubName": "Panel B",
+     "position": 10,
+     "channelId": "breaker_p10",
+     "levitonLabel": "Heat Pump",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "B-14-16",
+   "panel": "B",
+   "slots": [
+    14,
+    16
+   ],
+   "poles": 2,
+   "amps": 40,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB240-0ST",
+    "legacyCatalogNumber": "LB240",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120/240V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB240-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Double oven",
+   "labelSource": "owner identification",
+   "circuitType": "240V appliance",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [
+    "truckHome"
+   ],
+   "circuits": [
+    {
+     "room": "Kitchen",
+     "endpoint": "Double oven",
+     "estimatedWatts": 5000,
+     "fedFromSlot": [
+      14,
+      16
+     ],
+     "voltage": "240V",
+     "notes": "5000 W is an estimate for a double wall oven on a 40A 2-pole, not a nameplate reading.",
+     "verified": true,
+     "verificationMethod": "owner identification"
+    }
+   ],
+   "notes": [
+    "CONFIRMED at 14/16 by the owner. This closes the old contradiction: the walkthrough had the oven on 'Panel B breaker 2', and following that would have shut off the generator inlet while leaving a 5 kW oven live behind it.",
+    "The directory card's other 'Oven' entry, at 5/7, is simply wrong - those slots are empty."
+   ],
+   "estimatedWattsTotal": 5000,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D48",
+     "hubName": "Panel B",
+     "position": 14,
+     "channelId": "breaker_p14",
+     "levitonLabel": "Oven",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  },
+  {
+   "id": "B-26",
+   "panel": "B",
+   "slots": [
+    26
+   ],
+   "poles": 1,
+   "amps": 20,
+   "hardware": {
+    "manufacturer": "Leviton",
+    "catalogNumber": "LB120-0ST",
+    "legacyCatalogNumber": "LB120",
+    "breakerType": "2nd-gen smart breaker — thermal-magnetic with per-pole metering and remote trip",
+    "voltage": "120V~",
+    "interruptRating": "10kA",
+    "hacr": true,
+    "issueNo": null,
+    "replacedCatalogNumber": "LB120-T",
+    "confidence": "high",
+    "notes": "Smart-breaker retrofit of 2026-08-22. The catalog number, amps and pole count are the Leviton cloud's own report of the breaker that is physically in this slot, read through the LWHEM-2 energy monitor - provenance at least as strong as a photograph, which is why this record is not badged unverified even though nobody has photographed the new body. The breaker it replaced is kept in replacedCatalogNumber."
+   },
+   "role": "branch",
+   "label": "Anker F3800+ trickle-charge outlet",
+   "shortLabel": "Anker trickle-charge outlet",
+   "labelSource": "owner identification",
+   "circuitType": "120V branch",
+   "physicalMarking": null,
+   "priority": null,
+   "shedIn": [],
+   "circuits": [
+    {
+     "room": "Garage",
+     "endpoint": "Anker F3800+ trickle-charge plug",
+     "estimatedWatts": 1000,
+     "fedFromSlot": 26,
+     "notes": "A single dedicated plug. 1000 W is a placeholder: the F3800+ AC charge rate is set in the Anker app and can run from a couple of hundred watts to about 1800 W. Record the rate you actually use.",
+     "verified": true,
+     "verificationMethod": "owner identification"
+    }
+   ],
+   "notes": [
+    "This is the outlet the trickle-charge safety warning is about. Step 1 of the Panel A procedure is to unplug the Anker from it before connecting the Anker to Panel A.",
+    "WORTH KNOWING: the outlet is on PANEL B, but the Anker backs up PANEL A. So when the truck is powering Panel B, this plug is live from the truck - which makes it the no-extra-cable way to recharge the Anker mid-outage. The truck is then carrying both panels through the Anker, so watch the 7.2 kW ceiling.",
+    "Not shed in any scenario, precisely so that recharge path stays available. If you are not using it, unplug the Anker rather than switching the breaker.",
+    "METERED as of 2026-08-22. The LB120-0ST smart breaker on this slot measures the trickle-charge rate directly, which is what the 1,000 W placeholder above was waiting for. Read it off the recorded data rather than the Anker app."
+   ],
+   "estimatedWattsTotal": 1000,
+   "monitoring": {
+    "smartBreakerMonitorable": true,
+    "smartBreakerInstalled": true,
+    "meteredBy": {
+     "system": "Leviton LWHEM-2 load center energy monitor",
+     "hubId": "1000_0046_1D48",
+     "hubName": "Panel B",
+     "position": 26,
+     "channelId": "breaker_p26",
+     "levitonLabel": "Battery charger",
+     "pipeline": "energycap raw_30s, source='leviton', device_id=hub id, channel_id as above; the label in that pipeline is inherited from THIS file"
+    }
+   }
+  }
+ ]
 }

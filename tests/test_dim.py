@@ -805,9 +805,9 @@ def test_a_rerun_is_byte_identical(tmp_path: Path, s3) -> None:
 
 def test_updated_at_is_the_inventory_vintage(tmp_path: Path) -> None:
     inventory = dim.load_inventory(MONTFORT)
-    # metadata.lastUpdated = 2026-08-10 -> local midnight, converted to UTC.
+    # metadata.lastUpdated = 2026-08-22 -> local midnight, converted to UTC.
     assert inventory.updated_at == timeutil.local_midnight_utc(
-        timeutil.parse_local_date("2026-08-10")
+        timeutil.parse_local_date("2026-08-22")
     )
 
     table = build_table_for(
@@ -941,9 +941,11 @@ def test_the_shipped_map_builds_against_the_inventory(s3) -> None:
         map_path=SHIPPED_MAP, inventory_path=MONTFORT, bucket=BUCKET, client=s3
     )
     assert summary["sources"] == ["bryant", "leviton", "lge"]
-    # 10 Bryant + 12 live Leviton + 4 LG&E meter ids (house, barn, two retired
+    # 10 Bryant + 32 live Leviton + 4 LG&E meter ids (house, barn, two retired
     # aliases of the house the Download export republishes — DEVIATIONS #168).
-    assert summary["rows"] == 26
+    # The Leviton count went 12 -> 32 on 2026-08-22, when 20 more smart breakers
+    # went in and `energycap discover` reported every live channel as mapped.
+    assert summary["rows"] == 46
     assert summary["placeholders"] == 0
 
     table = s3io.read_table(BUCKET, summary["key"], client=s3)
@@ -1015,7 +1017,13 @@ def test_a_newly_installed_smart_breaker_is_reported_as_unmapped(
     the WARN means "something new arrived" rather than being constant noise.
     """
     known = ("leviton", "1000_0046_1D52", "breaker_p19")
-    fresh = ("leviton", "1000_0046_1D52", "breaker_p11")
+    # Panel B position 9 still holds a dumb breaker (blackstart B-9, full bath
+    # fan/light/heater), so it is genuinely absent from the shipped map and is a
+    # realistic next arrival. Panel A has none left to use: its four non-smart
+    # positions are the generator inlet, the energy monitor's own supply at
+    # 27/29, and the two circuits inside the LSPD1-T at 22/24 — a combination
+    # SPD/breaker with no metering variant. None of them can ever be a channel.
+    fresh = ("leviton", "1000_0046_1D48", "breaker_p9")
 
     summary = dim.build(
         map_path=SHIPPED_MAP,
@@ -1024,9 +1032,9 @@ def test_a_newly_installed_smart_breaker_is_reported_as_unmapped(
         live_channels=[known, fresh],
     )
 
-    assert summary["unmapped"] == ["leviton/1000_0046_1D52/breaker_p11"]
+    assert summary["unmapped"] == ["leviton/1000_0046_1D48/breaker_p9"]
     (event,) = log_events(log_stream, "dim_unmapped_live_channel")
-    assert event["channel_id"] == "breaker_p11"
+    assert event["channel_id"] == "breaker_p9"
     # No placeholder exists for it any more, so the remedy is the discover flow.
     assert "skeleton" in event["remedy"]
 
