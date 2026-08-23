@@ -327,9 +327,22 @@ _DAILY_CHANNELS = ", ".join(spec.channel_id for spec in DAILY_COMPONENTS)
 #: The enum decode, quoted from the append-only tables in ``sources/bryant.py``.
 #: Built, never typed: a renumber or an appended value shows up here on the next
 #: ``create-glue-tables`` run, and ``tests/test_glue.py`` pins the agreement.
+#: Built from every table in ``bryant.ENUM_TABLES`` rather than a typed list of
+#: three, because a typed list silently omits a new enum metric — which is
+#: exactly what happened when ``op_status``/``odu_mode``/``idu_status``
+#: were added on 2026-08-22 and shipped with no published decode at all.
 _ENUM_DECODE = "; ".join(
-    f"{metric} {bryant.enum_decode_text(metric)}" for metric in ("mode", "stage", "fan")
+    f"{metric} {bryant.enum_decode_text(metric).replace(', ', ',')}"
+    for metric in model.UNIT_FOR_METRIC
+    if metric in bryant.ENUM_TABLES
 )
+
+#: The decode no longer fits in a 255-character column comment (six enum metrics,
+#: ~350 characters), so it lives in the table DESCRIPTION, whose budget is 2048,
+#: and the columns point at it. That is the only way to obey both the Glue limit
+#: and the rule that a published decode may never drop an entry: move it to the
+#: field that can hold it, never truncate it.
+_DECODE_POINTER: Final[str] = "full enum decode in dim_channel's table description"
 
 #: The enum metrics, named from ``model.ENUM_METRICS`` rather than typed, so a
 #: metric that stops (or starts) being an enum cannot leave the warnings below
@@ -365,15 +378,16 @@ ODU_TYPE_OBSERVED: Final[str] = "gs3ngiphp"
 #: and concludes the compressor never ran. The metric names are quoted from
 #: ``sources/bryant.py`` and the unit from ``model.UNIT_FOR_METRIC``, so a rename
 #: there cannot leave this sentence describing metrics that no longer exist.
+# Compressed 2026-08-22 when nine new metrics pushed both descriptions past the
+# 2048-character budget. The load-bearing half is the last clause — that on THIS
+# unit one of the two metrics can never appear — so that is what survived intact.
 STAGE_REPRESENTATION_NOTE: Final[str] = " ".join(
     (
-        f"{bryant.STAGE_METRIC} and {bryant.STAGE_PCT_METRIC} render ONE field",
-        "(odu.opstat), MUTUALLY EXCLUSIVE: staged units emit",
-        f"{bryant.STAGE_METRIC} (enum code), VARIABLE-CAPACITY ones emit",
-        f"{bryant.STAGE_PCT_METRIC} (0-100 capacity,",
-        f"{model.unit_for_metric(bryant.STAGE_PCT_METRIC)}). THIS unit is",
-        f"variable-capacity (odu.type {ODU_TYPE_OBSERVED}), so",
-        f"{bryant.STAGE_METRIC} never appears: absence, not zero.",
+        f"{bryant.STAGE_METRIC}/{bryant.STAGE_PCT_METRIC} are MUTUALLY EXCLUSIVE",
+        "renderings of one field (odu.opstat): staged units emit the enum,",
+        "VARIABLE-CAPACITY ones the pct.",
+        f"THIS unit is variable-capacity (odu.type {ODU_TYPE_OBSERVED}), so",
+        f"{bryant.STAGE_METRIC} NEVER appears: absence, not zero.",
     )
 )
 
@@ -435,6 +449,25 @@ _METRIC_GROUPS: Final[tuple[_MetricGroup, ...]] = (
                 "fan",
                 "blower_rpm",
                 "cfm",
+                # Added 2026-08-22 (see model.UNIT_FOR_METRIC). `compressor_rpm`
+                # is the one worth naming to a reader: it is the compressor's own
+                # speed, continuous where `stage_pct` is quantised, and it is the
+                # better variable to compare against a metered watts channel.
+                "compressor_rpm",
+                "outdoor_coil_temp_f",
+                "static_pressure",
+                # THREE airflow numbers, deliberately unblended because they
+                # disagree: `idu_cfm` and `idu_iducfm` are the indoor unit's, and
+                # `odu_iducfm` is the outdoor unit's view of the same air. `cfm`
+                # above is the older blended pick, kept for archive continuity.
+                "idu_cfm",
+                "idu_iducfm",
+                "odu_iducfm",
+                # Per-unit state, distinct from `mode` (the system's intent) and
+                # from `stage` (the outdoor unit's capacity).
+                "op_status",
+                "odu_mode",
+                "idu_status",
             }
         ),
         tables=frozenset({TABLE_ENERGY_RAW_30S, TABLE_ENERGY_HOURLY}),
@@ -628,15 +661,23 @@ CANONICAL_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
         f"{_DAILY_CHANNELS}."
     ),
     "metric": (
-        # Generated from model.UNIT_FOR_METRIC: a reader writes
-        # `WHERE metric IN (...)` from this list, so an omission drops rows.
-        f"What is measured: {_metric_list_text(_CATALOG_GROUPS)}."
+        # The full catalog stopped fitting at 28 metrics: the raw_30s names alone
+        # are 251 of the 255 characters allowed, leaving no room for a word of
+        # prose. So this enumerates the metrics a reader gets WRONG — watts, the
+        # mutually exclusive stage pair, and the day-grain pair that is barred
+        # from this table — names the rest by family, and points at the one
+        # enumeration that cannot go stale. Day-grain names are generated.
+        "What is measured; enumerate with SELECT DISTINCT metric. "
+        "watts/amps/volts/hz (leviton); temperatures, setpoints, humidity, mode, "
+        "stage|stage_pct, fan, rpm, cfm, static_pressure (bryant status); "
+        f"{', '.join(sorted(model.DAY_GRAIN_METRICS))} (energy_daily only)."
     ),
     "value": (
         # Budget note: the Glue limit is 255 characters and the decode below is
         # generated, so appending an enum value grows this string. If it ever
         # overflows, shorten THIS prose — never drop a decode entry.
-        f"The measured number (see metric/unit). Enum decode: {_ENUM_DECODE}."
+        f"The measured number (see metric/unit). Enum rows ({_ENUM_METRIC_NAMES}) "
+        f"carry an integer CODE, not a quantity: {_DECODE_POINTER}."
     ),
     "unit": (
         f"Unit of value: {_unit_list_text(_CATALOG_METRICS)}. Constant per "
@@ -750,16 +791,14 @@ _HOURLY_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
     "unit": (
         "Unit of the aggregates: "
         f"{_unit_list_text(_metrics_for_table(TABLE_ENERGY_HOURLY))}. "
-        f"Constant per metric. Only 'enum' rows ({_ENUM_METRIC_NAMES}) are "
-        "integer CODES — decoded in this table's comment, and mean/p95 over them "
-        "are MEANINGLESS. 'pct' (stage_pct) is a real number."
+        f"Constant per metric. 'enum' rows ({_ENUM_METRIC_NAMES}) are CODES: "
+        f"mean/p95 over them are MEANINGLESS. {_DECODE_POINTER.capitalize()}."
     ),
     "mean": (
-        "Mean of the samples ACTUALLY OBSERVED this hour — no gap filling, no "
-        "carry-forward. For 'watts' the mean power kwh comes from; for "
-        "stage_pct, mean capacity. MEANINGLESS for "
-        f"unit='enum' rows: the average of two {_ENUM_METRIC_NAMES} codes is not "
-        "a state."
+        "Mean of the samples ACTUALLY OBSERVED this hour — no gap filling. For "
+        "'watts' it is the mean power kwh comes from; for stage_pct, mean "
+        f"capacity. MEANINGLESS for unit='enum' ({_ENUM_METRIC_NAMES}): "
+        "averaging codes is not a state."
     ),
     "min": (
         "Smallest observed value in the hour. A 0.0 may be a genuine Leviton fw "
@@ -877,20 +916,26 @@ _RAW_30S_DESCRIPTION = _paragraphs(
     "A local day normally holds EITHER hourly part-*.parquet files OR the "
     "compacted day-*.parquet, never both: the compactor writes day-{D}.parquet, "
     "then archives the parts to energy/raw_30s_parts_archive/ (not a table "
-    "here), so nothing is double counted.",
-    "THE ONE EXCEPTION: both are present while a compaction is in flight, and "
-    "stay so if it died between those steps; rows they share count twice. The "
-    "tell is part-*.parquet beside day-*.parquet, or totals ~2x neighbouring "
-    "days'. Re-run `energycap compact-daily --start D --end D` to finish it; "
+    "here), so nothing is double counted. THE ONE EXCEPTION: both are present "
+    "while a compaction is in flight, and stay so if it died between those "
+    "steps; rows they share "
+    "count twice. The tell is part-*.parquet beside day-*.parquet, or totals ~2x "
+    "neighbouring days'. Re-run `energycap compact-daily --start D --end D`; "
     "until then, dedupe that day on the key above.",
     _GAP_CLAUSE,
     # The gap rule has a metric-shaped instance here, and it is invisible from
     # the metric list: on this system one of the two `stage` metrics can never
     # appear at all, so filtering on it returns an empty result forever.
     STAGE_REPRESENTATION_NOTE,
+    # The roster is already on this table's `value` column; the description only
+    # needs to say where the codes are decoded.
+    "Enum rows carry integer codes; decoded in dim_channel's description.",
+    # Tightened 2026-08-22 to leave headroom: this description sits within a few
+    # characters of the 2048 budget, and every new metric grows the comments
+    # around it. The facts are unchanged; the words are fewer.
     "Day-grain rows (kwh_day, cost_day_usd) are barred here — they live in "
-    "energy_daily; a day total would poison the hourly rollup. Join dim_channel "
-    "on (source, device_id, channel_id); prefer energy_hourly beyond a day.",
+    "energy_daily. Join dim_channel on (source, device_id, channel_id); prefer "
+    "energy_hourly beyond a day.",
 )
 
 _HOURLY_DESCRIPTION = _paragraphs(
@@ -906,7 +951,7 @@ _HOURLY_DESCRIPTION = _paragraphs(
     # the decode on, so it lives here — where a reader meets it before writing
     # an AVG() that returns a number with no meaning. STAGE_MEAN_NOTE keeps the
     # warning from swallowing stage_pct, which really is averageable.
-    f"{ENUM_ROLLUP_WARNING} {STAGE_MEAN_NOTE} Enum decode: {_ENUM_DECODE}.",
+    f"{ENUM_ROLLUP_WARNING} {STAGE_MEAN_NOTE} {_DECODE_POINTER.capitalize()}.",
     STAGE_REPRESENTATION_NOTE,
     "Buckets are LOCAL-day hours keyed by hour_start_utc: 25 per series on the "
     "DST fall-back day, 23 on spring-forward; local_hour_start is the label, "
@@ -960,6 +1005,18 @@ _DIM_DESCRIPTION = _paragraphs(
     "channel must never drop a real measurement from a result.",
     "estimated_watts is a planning estimate from the inventory, never a "
     "measurement; use energy_hourly for what actually happened.",
+    # The single authoritative home for the enum decode, and deliberately here:
+    # this is the semantic-layer table, the decode is a dictionary, and one copy
+    # in a 2048-character field beats two copies that both overflow. Every
+    # enum-bearing column and both raw/hourly descriptions point at this
+    # sentence, and it is generated from bryant.ENUM_TABLES so an appended code
+    # appears on the next `create-glue-tables` run.
+    # The decode ENDS this description on purpose: it is parsed back out by the
+    # tests (and by anyone scripting against the catalog) as "everything after
+    # 'Enum decode:'", so a sentence after it would be read as another entry.
+    "For unit='enum' rows in energy_raw_30s and energy_hourly; codes are "
+    "append-only and never renumbered, so an archived value keeps its meaning. "
+    f"Enum decode: {_ENUM_DECODE}.",
 )
 
 

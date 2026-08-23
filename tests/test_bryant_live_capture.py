@@ -195,10 +195,16 @@ async def test_the_live_capture_emits_one_stage_pct_row_at_35_and_no_stage_row()
 
 
 async def test_the_live_capture_produces_exactly_this_row_set() -> None:
-    """Ten rows, whole-payload, pinned — the record of what this house reports.
+    """Nineteen rows, whole-payload, pinned — what this house actually reports.
 
     Read the absences as carefully as the presences: no ``stage`` (the metric
     this hardware cannot express), and nothing at all from ``zone_2``-``zone_8``.
+
+    It was ten rows until 2026-08-22. This capture is the evidence that mapped
+    the other nine: every field the module had been *requesting* pending a live
+    response came back populated here, including all three airflow numbers —
+    which disagree by more than 2x, so each is recorded under the field it came
+    from rather than blended.
     """
     rows = await _source().poll()
 
@@ -208,13 +214,22 @@ async def test_the_live_capture_produces_exactly_this_row_set() -> None:
         (SYSTEM_CHANNEL, STAGE_PCT_METRIC): (35.0, "pct"),
         (SYSTEM_CHANNEL, "blower_rpm"): (433.0, "rpm"),  # idu.blwrpm
         (SYSTEM_CHANNEL, "cfm"): (500.0, "CFM"),  # idu.cfm
+        (SYSTEM_CHANNEL, "compressor_rpm"): (1190.0, "rpm"),  # odu.comprpm
+        (SYSTEM_CHANNEL, "outdoor_coil_temp_f"): (74.0, "degF"),  # odu.oducoiltmp
+        (SYSTEM_CHANNEL, "static_pressure"): (0.13999998569488525, "inwc"),
+        (SYSTEM_CHANNEL, "idu_cfm"): (500.0, "CFM"),
+        (SYSTEM_CHANNEL, "idu_iducfm"): (513.0, "CFM"),
+        (SYSTEM_CHANNEL, "odu_iducfm"): (1166.0, "CFM"),
+        (SYSTEM_CHANNEL, "op_status"): (0.0, "enum"),  # oprstsmsg = idle
+        (SYSTEM_CHANNEL, "odu_mode"): (1.0, "enum"),  # odu.opmode = cooling
+        (SYSTEM_CHANNEL, "idu_status"): (0.0, "enum"),  # idu.opstat = off
         ("zone_1", "indoor_temp_f"): (68.0, "degF"),
         ("zone_1", "humidity_pct"): (53.0, "pct"),
         ("zone_1", "setpoint_heat_f"): (64.0, "degF"),
         ("zone_1", "setpoint_cool_f"): (68.0, "degF"),
         ("zone_1", "fan"): (3.0, "enum"),  # high
     }
-    assert len(rows) == 10
+    assert len(rows) == 19
     # PLAN.md §6.5: one cycle, one instant, so a rollup buckets them together.
     assert len({row.ts_utc for row in rows}) == 1
 

@@ -59,6 +59,7 @@ __all__ = [
     "SOURCE_LGE",
     "UNITS",
     "UNIT_FOR_METRIC",
+    "UNIT_INWC",
     "Dataset",
     "MeterObservation",
     "Observation",
@@ -136,6 +137,11 @@ UNIT_ENUM = "enum"
 UNIT_CCF = "CCF"
 UNIT_RPM = "rpm"
 UNIT_CFM = "CFM"
+#: Inches of water column — static pressure across the air handler. The unit is
+#: a reference client's claim rather than a documented one, exactly as `rpm` and
+#: `degF` are for `blwrpm`/`oat` (DEVIATIONS.md #75); it is recorded so the
+#: number is interpretable, not because it is confirmed.
+UNIT_INWC = "inwc"
 
 #: Canonical unit vocabulary (PLAN.md §3, plus §13's CCF and §7.3's native units).
 UNITS: frozenset[str] = frozenset(
@@ -152,6 +158,7 @@ UNITS: frozenset[str] = frozenset(
         UNIT_CCF,
         UNIT_RPM,
         UNIT_CFM,
+        UNIT_INWC,
     }
 )
 
@@ -182,6 +189,35 @@ UNIT_FOR_METRIC: dict[str, str] = {
     "fan": UNIT_ENUM,
     "blower_rpm": UNIT_RPM,
     "cfm": UNIT_CFM,
+    # Added 2026-08-22, after the 2026-08-17 live capture showed every one of
+    # these populated (they had been requested-but-unmapped precisely until such
+    # a capture existed — see sources/bryant.py's "Unverified fields").
+    #
+    # The compressor's own speed. Continuous where `stage_pct` is quantised to
+    # whatever steps the control reports, so it is the better independent
+    # variable for comparing against measured watts — and watts rising against a
+    # flat rpm is how a failing compressor shows up.
+    "compressor_rpm": UNIT_RPM,
+    # Outdoor coil temperature. With `outdoor_temp_f` this is the condenser
+    # approach temperature, the standard charge/fouling indicator. Converted
+    # through `cfgem` like every other temperature: no row if the unit is unknown.
+    "outdoor_coil_temp_f": UNIT_DEGF,
+    # Static pressure across the air handler — filter loading. Unit unverified
+    # (see UNIT_INWC).
+    "static_pressure": UNIT_INWC,
+    # THREE airflow numbers exist and they disagree (500 / 513 / 1166 observed in
+    # one cycle), so each is recorded under the API path it came from rather than
+    # blended. `cfm` above is the reference client's fallback pick and is kept
+    # for continuity of the existing archive; prefer these when you need to know
+    # WHICH number you are reading.
+    "idu_cfm": UNIT_CFM,
+    "idu_iducfm": UNIT_CFM,
+    "odu_iducfm": UNIT_CFM,
+    # Per-unit state strings. `mode` is the system's intent; these three are what
+    # each half of the system says it is actually doing.
+    "op_status": UNIT_ENUM,
+    "odu_mode": UNIT_ENUM,
+    "idu_status": UNIT_ENUM,
     # Bryant daily energy (day grain)
     "kwh_day": UNIT_KWH,
     "cost_day_usd": UNIT_USD,
@@ -199,7 +235,9 @@ METRICS: frozenset[str] = frozenset(UNIT_FOR_METRIC)
 #: ``stage_pct`` is deliberately **not** here: it is an ordinary percentage
 #: measurement, not a code, even though it renders the same API field as
 #: ``stage``. Averaging it is meaningful; averaging an enum code is not.
-ENUM_METRICS: frozenset[str] = frozenset({"mode", "stage", "fan"})
+ENUM_METRICS: frozenset[str] = frozenset(
+    {"mode", "stage", "fan", "op_status", "odu_mode", "idu_status"}
+)
 
 #: Day-grain metrics. These live only in ``energy/daily``: they must never be
 #: written to ``raw_30s`` and are excluded from rollup input (CLAUDE.md rule 6).

@@ -290,6 +290,15 @@ async def test_a_multizone_response_maps_to_exactly_the_expected_observations() 
         (SYSTEM_CHANNEL, "stage"): (2.0, "enum"),  # odu.opstat = high
         (SYSTEM_CHANNEL, "blower_rpm"): (875.0, "rpm"),
         (SYSTEM_CHANNEL, "cfm"): (1180.0, "CFM"),
+        (SYSTEM_CHANNEL, "idu_cfm"): (1180.0, "CFM"),
+        (SYSTEM_CHANNEL, "odu_iducfm"): (1180.0, "CFM"),
+        (SYSTEM_CHANNEL, "idu_status"): (3.0, "enum"),  # high
+        # This fixture says odu.opmode = "cool" where the 2026-08-17 capture says
+        # "cooling". Both are in the table at DIFFERENT codes (1 and 6): the
+        # table is append-only, so a synonym gets the next unused integer and an
+        # archived code never changes meaning.
+        (SYSTEM_CHANNEL, "odu_mode"): (6.0, "enum"),  # cool
+        (SYSTEM_CHANNEL, "static_pressure"): (0.6000000238418579, "inwc"),
         ("zone_1", "indoor_temp_f"): (71.5, "degF"),
         ("zone_1", "humidity_pct"): (38.0, "pct"),
         ("zone_1", "setpoint_heat_f"): (70.0, "degF"),
@@ -301,7 +310,7 @@ async def test_a_multizone_response_maps_to_exactly_the_expected_observations() 
         ("zone_3", "setpoint_cool_f"): (76.0, "degF"),
         ("zone_3", "fan"): (1.0, "enum"),  # low
     }
-    assert len(rows) == 15
+    assert len(rows) == 20
     assert {row.source for row in rows} == {SOURCE_BRYANT}
     assert {row.device_id for row in rows} == {SERIAL}
 
@@ -334,6 +343,13 @@ async def test_a_single_zone_system_emits_one_zone_and_seven_phantoms_are_absent
         (SYSTEM_CHANNEL, "stage"): (0.0, "enum"),  # odu off
         (SYSTEM_CHANNEL, "blower_rpm"): (1224.0, "rpm"),
         (SYSTEM_CHANNEL, "cfm"): (1239.0, "CFM"),
+        # Mapped 2026-08-22. This fixture has no comprpm/oducoiltmp/oprstsmsg,
+        # so those produce NO rows rather than zeros — which is the point of
+        # adding them field by field instead of assuming a payload shape.
+        (SYSTEM_CHANNEL, "idu_cfm"): (1239.0, "CFM"),
+        (SYSTEM_CHANNEL, "idu_status"): (2.0, "enum"),  # low
+        (SYSTEM_CHANNEL, "odu_mode"): (0.0, "enum"),  # off
+        (SYSTEM_CHANNEL, "static_pressure"): (1.399999976158142, "inwc"),
         ("zone_1", "indoor_temp_f"): (74.0, "degF"),
         ("zone_1", "humidity_pct"): (32.0, "pct"),
         ("zone_1", "setpoint_heat_f"): (74.0, "degF"),
@@ -581,6 +597,18 @@ async def test_a_numeric_opstat_emits_one_stage_pct_row_and_no_stage_row() -> No
         (SYSTEM_CHANNEL, STAGE_PCT_METRIC): (35.0, "pct"),
         (SYSTEM_CHANNEL, "blower_rpm"): (433.0, "rpm"),
         (SYSTEM_CHANNEL, "cfm"): (500.0, "CFM"),
+        # The real 2026-08-17 capture, which is the one that populates every
+        # field added on 2026-08-22 — including all three airflow numbers, which
+        # disagree by more than 2x and are therefore recorded separately.
+        (SYSTEM_CHANNEL, "compressor_rpm"): (1190.0, "rpm"),
+        (SYSTEM_CHANNEL, "outdoor_coil_temp_f"): (74.0, "degF"),
+        (SYSTEM_CHANNEL, "static_pressure"): (0.13999998569488525, "inwc"),
+        (SYSTEM_CHANNEL, "idu_cfm"): (500.0, "CFM"),
+        (SYSTEM_CHANNEL, "idu_iducfm"): (513.0, "CFM"),
+        (SYSTEM_CHANNEL, "odu_iducfm"): (1166.0, "CFM"),
+        (SYSTEM_CHANNEL, "op_status"): (0.0, "enum"),  # idle
+        (SYSTEM_CHANNEL, "odu_mode"): (1.0, "enum"),  # cooling
+        (SYSTEM_CHANNEL, "idu_status"): (0.0, "enum"),  # off
         ("zone_1", "indoor_temp_f"): (68.0, "degF"),
         ("zone_1", "humidity_pct"): (53.0, "pct"),
         ("zone_1", "setpoint_heat_f"): (64.0, "degF"),
@@ -890,6 +918,15 @@ def test_adding_stage_pct_disturbed_no_existing_metric() -> None:
         "fan": "enum",
         "blower_rpm": "rpm",
         "cfm": "CFM",
+        "compressor_rpm": "rpm",
+        "outdoor_coil_temp_f": "degF",
+        "static_pressure": "inwc",
+        "idu_cfm": "CFM",
+        "idu_iducfm": "CFM",
+        "odu_iducfm": "CFM",
+        "op_status": "enum",
+        "odu_mode": "enum",
+        "idu_status": "enum",
         "kwh_day": "kWh",
         "cost_day_usd": "USD",
         "kwh_interval": "kWh",
@@ -1376,7 +1413,7 @@ async def test_the_query_reaches_the_wire_through_the_real_graphql_client(
         await client.close()
         await http.aclose()
 
-    assert len(rows) == 10
+    assert len(rows) == 14
     graphql_request = seen[-1]
     body = json.loads(graphql_request.content.decode("utf-8"))
     assert body["operationName"] == OPERATION_STATUS

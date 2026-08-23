@@ -65,11 +65,23 @@ Unverified fields
 -----------------
 
 The research behind this module distinguishes fields observed in a real captured
-response from fields that merely exist in the introspected schema. Anything in
-the second category (``damperposition``, ``occupancy``, ``zones[].name``,
-``oprstsmsg``, ``odu.opmode``, the ``odu`` compressor telemetry) is *requested*
-so a live call can be inspected, and **not mapped to a metric**. A field whose
-shape is unverified must not be given a schema.
+response from fields that merely exist in the introspected schema. The second
+category was *requested* so a live call could be inspected, and not mapped until
+one had been.
+
+**That capture happened on 2026-08-17 and every one of those fields came back
+populated**, so as of 2026-08-22 the compressor telemetry and the per-unit state
+strings ARE mapped: ``odu.comprpm`` → ``compressor_rpm``, ``odu.oducoiltmp`` →
+``outdoor_coil_temp_f``, ``idu.statpress`` → ``static_pressure``, the three
+airflow fields → ``idu_cfm``/``idu_iducfm``/``odu_iducfm``, and ``oprstsmsg`` /
+``odu.opmode`` / ``idu.opstat`` → ``op_status`` / ``odu_mode`` /
+``idu_status`` with their own append-only tables.
+
+Two things are deliberately still unmapped. ``zones[].damperposition``,
+``occupancy``, ``hold``, ``currentActivity`` and ``zoneconditioning`` are real
+but near-worthless on a single-zone install, and ``humlvl``/``filtrlvl``/``uvlvl``
+remain consumable *used* percentages rather than readings (see trap 5). A field
+whose shape is unverified still must not be given a schema.
 
 Likewise the GraphQL operation itself: ``infinityStatus(serial:)`` is present in
 the maintainer-committed introspection dump of the live endpoint but is called by
@@ -110,6 +122,9 @@ from energy_capture.timeutil import now_utc
 __all__ = [
     "ENUM_TABLES",
     "FAN_CODES",
+    "IDU_STATUS_CODES",
+    "ODU_MODE_CODES",
+    "OP_STATUS_CODES",
     "MODE_CODES",
     "NULL_SENTINEL",
     "OPERATION_STATUS",
@@ -206,12 +221,66 @@ FAN_CODES: Final[Mapping[str, int]] = MappingProxyType(
     }
 )
 
+#: ``oprstsmsg`` — the system's own one-word account of what it is doing.
+#: Observed live: ``idle``. The rest are the vocabulary the reference clients
+#: display; anything outside the table WARNs and emits no row, which is how the
+#: real domain gets discovered rather than guessed. Append only, never renumber.
+OP_STATUS_CODES: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "idle": 0,
+        "cooling": 1,
+        "heating": 2,
+        "fanonly": 3,
+        "defrost": 4,
+        "dehumidify": 5,
+        "off": 6,
+    }
+)
+
+#: ``odu.opmode`` — what the OUTDOOR unit says it is doing, as distinct from
+#: ``odu.opstat`` (its stage/capacity) and from ``mode`` (the system's intent).
+#: Observed live: ``cooling``.
+ODU_MODE_CODES: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "off": 0,
+        "cooling": 1,
+        "heating": 2,
+        "defrost": 3,
+        "dehumidify": 4,
+        "idle": 5,
+        # Both spellings are real: the 2026-08-16 capture says "cool" and the
+        # 2026-08-17 one says "cooling". APPENDED at the next unused integers
+        # rather than folded into 1/2 — renumbering an archived code is the one
+        # thing this table may never do, and a synonym is cheaper than a lie.
+        "cool": 6,
+        "heat": 7,
+    }
+)
+
+#: ``idu.opstat`` — the INDOOR unit's operating state. Observed live: ``off``
+#: (the air handler idle while the compressor ran, which is itself worth having
+#: recorded). Deliberately its own table rather than a reuse of
+#: :data:`STAGE_CODES`: they are different fields on different hardware, and
+#: sharing a table would tie their futures together.
+IDU_STATUS_CODES: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "off": 0,
+        "on": 1,
+        "low": 2,
+        "high": 3,
+        "idle": 4,
+    }
+)
+
 #: metric -> its append-only decode table. What ``build-dim``/Glue/README quote.
 ENUM_TABLES: Final[Mapping[str, Mapping[str, int]]] = MappingProxyType(
     {
         "mode": MODE_CODES,
         "stage": STAGE_CODES,
         "fan": FAN_CODES,
+        "op_status": OP_STATUS_CODES,
+        "odu_mode": ODU_MODE_CODES,
+        "idu_status": IDU_STATUS_CODES,
     }
 )
 
@@ -611,7 +680,26 @@ class SystemStatus:
     #: branches on it, because the value itself is the evidence.
     odu_type: str | None = None
     blower_rpm: float | None = None
+    #: The reference client's fallback pick between ``idu.cfm`` and
+    #: ``odu.iducfm``. Kept for continuity; the three explicit fields below are
+    #: what a query should prefer, because they say which number they are.
     cfm: float | None = None
+    #: ``odu.comprpm`` — compressor speed.
+    compressor_rpm: float | None = None
+    #: ``odu.oducoiltmp``, in whatever ``cfgem`` says (converted like any temp).
+    outdoor_coil_temp: float | None = None
+    #: ``idu.statpress`` — static pressure across the air handler.
+    static_pressure: float | None = None
+    #: The three airflow numbers, unblended: ``idu.cfm``, ``idu.iducfm``,
+    #: ``odu.iducfm``. They disagreed by more than 2x in the first live capture,
+    #: so which one a reader is looking at matters.
+    idu_cfm: float | None = None
+    idu_iducfm: float | None = None
+    odu_iducfm: float | None = None
+    #: ``oprstsmsg`` — the system's own account of what it is doing.
+    op_status: str | None = None
+    #: ``odu.opmode`` — the outdoor unit's, distinct from its stage.
+    odu_mode: str | None = None
     #: The **server's** clock. Recorded for staleness diagnosis only; ``ts_utc``
     #: is poll-completion time per PLAN.md §6.5.
     server_utc_time: str | None = None
@@ -640,6 +728,14 @@ class SystemStatus:
             # The reference's own fallback chain: the indoor unit reports CFM,
             # and on some systems only the outdoor unit's `iducfm` is populated.
             cfm=_first_number(idu.get("cfm"), odu.get("iducfm")),
+            compressor_rpm=_as_float(odu.get("comprpm")),
+            outdoor_coil_temp=_as_float(odu.get("oducoiltmp")),
+            static_pressure=_as_float(idu.get("statpress")),
+            idu_cfm=_as_float(idu.get("cfm")),
+            idu_iducfm=_as_float(idu.get("iducfm")),
+            odu_iducfm=_as_float(odu.get("iducfm")),
+            op_status=_as_text(payload.get("oprstsmsg")),
+            odu_mode=_as_text(odu.get("opmode")),
             server_utc_time=_as_text(payload.get("utcTime")),
             zones=zones,
         )
@@ -1141,6 +1237,29 @@ class BryantStatusSource(BaseSource):
         self._add_stage(cycle, status)
         cycle.add(device, SYSTEM_CHANNEL, "blower_rpm", status.blower_rpm)
         cycle.add(device, SYSTEM_CHANNEL, "cfm", status.cfm)
+        cycle.add(device, SYSTEM_CHANNEL, "compressor_rpm", status.compressor_rpm)
+        # A coil temperature is a temperature: it goes through `cfgem` like the
+        # rest, so an unknown unit means no row rather than a bare number.
+        cycle.add(
+            device,
+            SYSTEM_CHANNEL,
+            "outdoor_coil_temp_f",
+            self._temp_f(status, status.outdoor_coil_temp),
+        )
+        cycle.add(device, SYSTEM_CHANNEL, "static_pressure", status.static_pressure)
+        cycle.add(device, SYSTEM_CHANNEL, "idu_cfm", status.idu_cfm)
+        cycle.add(device, SYSTEM_CHANNEL, "idu_iducfm", status.idu_iducfm)
+        cycle.add(device, SYSTEM_CHANNEL, "odu_iducfm", status.odu_iducfm)
+        cycle.add(
+            device,
+            SYSTEM_CHANNEL,
+            "op_status",
+            self._encode("op_status", status.op_status),
+        )
+        cycle.add(device, SYSTEM_CHANNEL, "odu_mode", self._encode("odu_mode", status.odu_mode))
+        cycle.add(
+            device, SYSTEM_CHANNEL, "idu_status", self._encode("idu_status", status.idu_opstat)
+        )
 
         for zone in status.enabled_zones:
             channel = zone.channel_id

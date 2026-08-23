@@ -78,7 +78,10 @@ def test_the_readme_enum_table_matches_bryant_integer_for_integer(readme: str) -
     """
     documented: dict[str, dict[int, str]] = {}
     for line in readme.splitlines():
-        match = re.match(r"^\|\s*`(mode|stage|fan)`\s*\|", line)
+        # Generated from bryant.ENUM_TABLES: a new enum metric must appear in
+        # the README table, and this regex must not be the thing that hides it.
+        roster = "|".join(re.escape(m) for m in bryant.ENUM_TABLES)
+        match = re.match(rf"^\|\s*`({roster})`\s*\|", line)
         if not match:
             continue
         pairs = re.findall(r"`(\d+)`\s*=\s*([a-z]+)", line)
@@ -124,18 +127,22 @@ def test_the_glue_comment_and_the_readme_quote_the_same_decode(readme: str) -> N
     """One decode string, two documents (PLAN.md §12, CLAUDE.md "Conventions")."""
     from energy_capture.aws import glue
 
-    raw_30s = glue.table_input(
-        next(spec for spec in glue.table_specs() if spec.name == glue.TABLE_ENERGY_RAW_30S),
-        "example-bucket",
-    )
-    comment = next(
+    # The decode moved to dim_channel's description when six enum metrics
+    # overflowed the 255-character column limit (DEVIATIONS.md #174). The seam
+    # this test guards is unchanged: ONE decode string, quoted identically by the
+    # catalog and the README.
+    comment = _spec(glue.TABLE_DIM_CHANNEL).description
+    raw_value = next(
         column["Comment"]
-        for column in raw_30s["StorageDescriptor"]["Columns"]
+        for column in glue.table_input(
+            _spec(glue.TABLE_ENERGY_RAW_30S), "example-bucket"
+        )["StorageDescriptor"]["Columns"]
         if column["Name"] == "value"
     )
+    assert "dim_channel" in raw_value, "raw_30s.value must point at the decode"
     for metric, table in bryant.ENUM_TABLES.items():
-        decode = bryant.enum_decode_text(metric)
-        assert decode in comment, f"{metric} decode is not in the Glue comment"
+        decode = bryant.enum_decode_text(metric).replace(", ", ",")
+        assert decode in comment, f"{metric} decode is not in the Glue catalog"
         for name, code in table.items():
             assert f"{code}={name}" in decode
 
@@ -277,8 +284,23 @@ def test_the_readme_and_the_glue_comments_name_the_same_metrics(readme: str) -> 
         "the Glue metric comments name metrics the README omits: "
         f"{sorted(glue_metrics - readme_metrics)}"
     )
+    # The Glue comment stopped being a closed list at 28 metrics — the raw_30s
+    # names alone are 251 of the 255 characters allowed (DEVIATIONS.md #174). The
+    # README still is one, and it has to stay the superset. What the catalog owes
+    # a reader instead is the traps plus a way to enumerate.
     uncollected = _metrics_no_table_can_hold()
-    assert readme_metrics - glue_metrics == uncollected
+    assert not (uncollected & glue_metrics), (
+        "the catalog names a metric no table can hold: "
+        f"{sorted(uncollected & glue_metrics)}"
+    )
+    assert uncollected <= readme_metrics
+    traps = {"watts", bryant.STAGE_METRIC, bryant.STAGE_PCT_METRIC} | set(
+        model.DAY_GRAIN_METRICS
+    )
+    assert traps <= glue_metrics, (
+        "the catalog stopped naming a metric a reader gets wrong: "
+        f"{sorted(traps - glue_metrics)}"
+    )
 
     _, _, tail = _vocabulary_cell(readme, "metric").partition("designed but not yet collected")
     assert set(re.findall(r"`([a-z][a-z0-9_]*)`", tail)) == uncollected, (
@@ -313,9 +335,15 @@ def test_the_enum_decode_reaches_the_hourly_table_comment_too(readme: str) -> No
 
     description = _spec(glue.TABLE_ENERGY_HOURLY).description
     assert "value" not in _spec(glue.TABLE_ENERGY_HOURLY).schema.names
+    # The decode outgrew a 255-character column comment at six enum metrics and
+    # now lives once, in dim_channel's description (DEVIATIONS.md #174). What
+    # energy_hourly owes a reader is the pointer — and the pointer has to resolve
+    # to every code, integer for integer, or moving it lost something.
+    assert "dim_channel" in description
+    published = _spec(glue.TABLE_DIM_CHANNEL).description
     for metric, table in bryant.ENUM_TABLES.items():
-        decode = bryant.enum_decode_text(metric)
-        assert decode in description, f"{metric} decode is missing from energy_hourly"
+        decode = bryant.enum_decode_text(metric).replace(", ", ",")
+        assert decode in published, f"{metric} decode is missing from the catalog"
         for name, code in table.items():
             assert f"{code}={name}" in decode
     assert "energy_hourly" in readme and "table** comment" in readme

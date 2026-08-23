@@ -57,14 +57,23 @@ Every dataset shares the same eight columns. A new sensor adds **rows, never col
 | `source` | string | `leviton`, `bryant`, or `lge` (designed for, not yet collected). |
 | `device_id` | string | Leviton hub id (= panel serial), Bryant system serial, LG&E meter id. |
 | `channel_id` | string | Leviton: `breaker_p{position}` (a 2-pole breaker is **one** channel), `ct_{channel}_{a,b}`, `panel_leg_{a,b}`. Bryant: `system`, `zone_{n}`, and the lowercase energy components (`cooling`, `hpheat`, `eheat`, `fan`, `fangas`, `looppump`, `gas`, `reheat`). |
-| `metric` | string | `watts`, `amps`, `volts`, `hz`, `indoor_temp_f`, `outdoor_temp_f`, `setpoint_heat_f`, `setpoint_cool_f`, `humidity_pct`, `mode`, `stage`, `stage_pct`, `fan`, `blower_rpm`, `cfm`, `kwh_day`, `cost_day_usd`, and — designed but not yet collected — `kwh_interval`, `ccf_interval`. |
+| `metric` | string | `watts`, `amps`, `volts`, `hz`, `indoor_temp_f`, `outdoor_temp_f`, `setpoint_heat_f`, `setpoint_cool_f`, `humidity_pct`, `mode`, `stage`, `stage_pct`, `fan`, `blower_rpm`, `cfm`, `compressor_rpm`, `outdoor_coil_temp_f`, `static_pressure`, `idu_cfm`, `idu_iducfm`, `odu_iducfm`, `op_status`, `odu_mode`, `idu_status`, `kwh_day`, `cost_day_usd`, and — designed but not yet collected — `kwh_interval`, `ccf_interval`. The Glue metric column comment no longer lists all of them (28 names overflow the 255-character limit); SELECT DISTINCT on this column is the authoritative enumeration. |
 | `value` | double | The number. Enum metrics store a small integer code — see [the decodes](#enum-decodes-mode-stage-fan). |
-| `unit` | string | `W`, `A`, `V`, `Hz`, `degF`, `rpm`, `CFM`, `pct`, `enum`, `kWh`, `USD`, `CCF`. Constant per metric. |
+| `unit` | string | `W`, `A`, `V`, `Hz`, `degF`, `rpm`, `CFM`, `inwc`, `pct`, `enum`, `kWh`, `USD`, `CCF`. Constant per metric. |
 
 Those two lists are the **complete** vocabularies, not a sample: they are pinned
 integer-for-integer to `UNIT_FOR_METRIC` in
 [`src/energy_capture/model.py`](src/energy_capture/model.py) by a test, so filtering on
-them cannot silently drop a real row. `blower_rpm` / `cfm` are Bryant air-handler
+them cannot silently drop a real row. `compressor_rpm` is the compressor's own
+speed — continuous where `stage_pct` is quantised, so it is the better variable
+to correlate against a metered watts channel, and watts rising against a flat
+rpm is how a failing compressor shows up. `outdoor_coil_temp_f` with
+`outdoor_temp_f` gives the condenser approach temperature. `static_pressure` is
+filter loading (unit `inwc`, a reference client's claim rather than a documented
+one). **Three airflow numbers exist and disagree** — `idu_cfm` (500),
+`idu_iducfm` (513) and `odu_iducfm` (1166) in one observed cycle — so each is
+recorded under the field it came from; `cfm` is an older blended pick, kept for
+archive continuity. `blower_rpm` / `cfm` are Bryant air-handler
 telemetry on `channel_id = 'system'`; `kwh_interval` / `ccf_interval` and `CCF` belong to
 the LG&E `energy/meter` dataset that PLAN.md §13 designs and does not build.
 
@@ -1257,6 +1266,9 @@ rows. Both quotations, and this table, are pinned to that source by tests.
 | `mode` | `system` | `0` = off, `1` = heat, `2` = cool, `3` = auto, `4` = fanonly, `5` = hpheat, `6` = electric, `7` = gasheat, `8` = dehumidify |
 | `stage` | `system` | `0` = off, `1` = low, `2` = high, `3` = idle, `4` = dehumidify — the **outdoor unit's** operating stage (`odu.opstat`). **Not emitted on this system** — see the next section |
 | `fan` | `zone_{n}` | `0` = off, `1` = low, `2` = med, `3` = high |
+| `op_status` | `system` | `0` = idle, `1` = cooling, `2` = heating, `3` = fanonly, `4` = defrost, `5` = dehumidify, `6` = off — the system's own one-word account (`oprstsmsg`) |
+| `odu_mode` | `system` | `0` = off, `1` = cooling, `2` = heating, `3` = defrost, `4` = dehumidify, `5` = idle, `6` = cool, `7` = heat — the **outdoor** unit's `opmode`, distinct from its stage. Two spellings of cooling are live in the wild (`1` and `6`) and both are kept: the table is append-only |
+| `idu_status` | `system` | `0` = off, `1` = on, `2` = low, `3` = high, `4` = idle — the **indoor** unit's `opstat` |
 
 Note that `fan`'s `"auto"` is *not* an API value — it is a Home Assistant display label
 that some clients substitute for `"off"`. It is deliberately absent here.

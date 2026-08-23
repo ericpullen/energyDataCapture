@@ -1068,36 +1068,69 @@ def _parse_decode(comment: str) -> dict[str, dict[str, int]]:
     return parsed
 
 
-def test_the_value_comment_decodes_the_enums_integer_for_integer() -> None:
-    """The comment and ``sources/bryant.py`` must never disagree.
+def _decode_home() -> str:
+    """Where the generated enum decode is published.
+
+    It used to be the ``value`` column comment on ``energy_raw_30s``. At six enum
+    metrics the decode is ~330 characters and the Glue API allows 255 in a column
+    comment, so it moved to ``dim_channel``'s table DESCRIPTION (budget 2048) —
+    the semantic-layer table, which is where a dictionary belongs. Every
+    guarantee below is unchanged except the field it lives in: still generated,
+    still integer-for-integer, still covering every metric in
+    ``model.ENUM_METRICS``, and every enum-bearing table still points at it.
+    See DEVIATIONS.md #174.
+    """
+    return _spec(glue.TABLE_DIM_CHANNEL).description
+
+
+def test_the_published_decode_matches_the_source_tables_integer_for_integer() -> None:
+    """The published decode and ``sources/bryant.py`` must never disagree.
 
     The decode is *generated* from ``bryant.ENUM_TABLES``, so an appended enum
     value propagates automatically; this test is what stops somebody replacing
     the generated string with a hand-typed copy that then rots.
     """
-    parsed = _parse_decode(glue.CANONICAL_COLUMN_COMMENTS["value"])
+    parsed = _parse_decode(_decode_home())
     assert parsed == {metric: dict(table) for metric, table in bryant.ENUM_TABLES.items()}
     assert parsed["mode"] == dict(bryant.MODE_CODES)
     assert parsed["stage"] == dict(bryant.STAGE_CODES)
     assert parsed["fan"] == dict(bryant.FAN_CODES)
 
 
-def test_the_rendered_raw_30s_value_column_carries_the_full_decode() -> None:
+def test_the_rendered_raw_30s_value_column_points_at_the_decode() -> None:
+    """The rendered Glue column must lead a reader to the codes in one hop.
+
+    It used to carry the decode inline; at six enum metrics that overflows the
+    255-character limit, so it names the enum metrics and says where the decode
+    is. The pointer is only worth anything if it resolves, so this asserts both.
+    """
     columns = {
         c["Name"]: c["Comment"]
         for c in glue.table_input(glue.table_specs()[0], BUCKET)["StorageDescriptor"][
             "Columns"
         ]
     }
-    parsed = _parse_decode(columns["value"])
-    assert parsed == {metric: dict(table) for metric, table in bryant.ENUM_TABLES.items()}
-    for metric in ("mode", "stage", "fan"):
-        assert bryant.enum_decode_text(metric) in columns["value"]
+    comment = columns["value"]
+    assert glue._ENUM_METRIC_NAMES in comment
+    assert "dim_channel" in comment
+    assert _parse_decode(_decode_home())
 
 
 def test_every_enum_metric_the_model_knows_about_is_decoded() -> None:
-    parsed = _parse_decode(glue.CANONICAL_COLUMN_COMMENTS["value"])
+    parsed = _parse_decode(_decode_home())
     assert set(parsed) == set(model.ENUM_METRICS)
+
+
+def test_every_table_holding_enum_rows_points_at_the_decode() -> None:
+    """Moving the decode is only safe if nothing has to guess where it went."""
+    for table in (glue.TABLE_ENERGY_RAW_30S, glue.TABLE_ENERGY_HOURLY):
+        spec = _spec(table)
+        pointer = "dim_channel"
+        haystack = spec.description + " ".join((spec.column_comments or {}).values())
+        assert pointer in haystack, (
+            f"{table} carries enum rows but never says where their codes are "
+            "decoded — a reader meeting a 3 in `value` has nowhere to go"
+        )
 
 
 def test_an_appended_enum_value_reaches_the_comment_without_anyone_editing_it() -> None:
@@ -1116,10 +1149,14 @@ def test_an_appended_enum_value_reaches_the_comment_without_anyone_editing_it() 
         bryant.MODE_CODES = extended  # type: ignore[misc]
         bryant.ENUM_TABLES = {**dict(original_tables), "mode": extended}  # type: ignore[misc]
         reloaded = importlib.reload(glue)
-        comment = reloaded.CANONICAL_COLUMN_COMMENTS["value"]
-        assert f"{extended['vacation']}=vacation" in comment
-        assert len(comment) <= reloaded.GLUE_COMMENT_MAX_LEN, (
-            "the value comment has no headroom left for a new enum value; "
+        published = next(
+            spec.description
+            for spec in reloaded.table_specs()
+            if spec.name == reloaded.TABLE_DIM_CHANNEL
+        )
+        assert f"{extended['vacation']}=vacation" in published
+        assert len(published) <= reloaded.GLUE_DESCRIPTION_MAX_LEN, (
+            "the decode's home has no headroom left for a new enum value; "
             "shorten its prose, never drop a decode entry"
         )
     finally:
@@ -1128,9 +1165,7 @@ def test_an_appended_enum_value_reaches_the_comment_without_anyone_editing_it() 
         importlib.reload(glue)
 
     # And the restored module is back to the real tables.
-    assert _parse_decode(glue.CANONICAL_COLUMN_COMMENTS["value"])["mode"] == dict(
-        bryant.MODE_CODES
-    )
+    assert _parse_decode(_decode_home())["mode"] == dict(bryant.MODE_CODES)
 
 
 def test_the_unit_comment_points_at_the_enum_decode() -> None:
@@ -1440,18 +1475,23 @@ def test_the_hourly_table_comment_warns_that_enum_aggregates_are_meaningless() -
     assert glue.ENUM_ROLLUP_WARNING in description
 
 
-def test_the_hourly_table_comment_carries_the_enum_decode_integer_for_integer() -> None:
-    """DEFECT: energy_hourly has no value column, so the decode had no home."""
+def test_the_hourly_table_points_at_the_decode_rather_than_repeating_it() -> None:
+    """energy_hourly has no value column, and the decode no longer fits inline.
+
+    DEFECT it replaces: the table used to carry no decode at all. Then it carried
+    a second copy. Now it points at the one published copy — which is only safe
+    while the pointer names a real table and that table really holds every code.
+    """
     description = _spec(glue.TABLE_ENERGY_HOURLY).description
-    head, marker, tail = description.partition("Enum decode:")
-    assert marker, "energy_hourly's comment carries no enum decode"
-    parsed = _parse_decode(f"Enum decode: {tail.split('. ')[0]}")
-    assert parsed == {metric: dict(table) for metric, table in bryant.ENUM_TABLES.items()}
-    for metric in ("mode", "stage", "fan"):
-        assert bryant.enum_decode_text(metric) in description
+    assert "dim_channel" in description, (
+        "energy_hourly rolls up enum rows and must say where the codes are"
+    )
+    assert glue.ENUM_ROLLUP_WARNING in description
+    published = _parse_decode(_decode_home())
+    assert published == {m: dict(t) for m, t in bryant.ENUM_TABLES.items()}
 
 
-def test_an_appended_enum_value_reaches_the_hourly_table_comment_too() -> None:
+def test_an_appended_enum_value_reaches_the_published_decode_from_hourly_too() -> None:
     """Proves the hourly decode is generated, not a hand-typed second copy."""
     original_tables = bryant.ENUM_TABLES
     original_modes = bryant.MODE_CODES
@@ -1461,10 +1501,19 @@ def test_an_appended_enum_value_reaches_the_hourly_table_comment_too() -> None:
         bryant.MODE_CODES = extended  # type: ignore[misc]
         bryant.ENUM_TABLES = {**dict(original_tables), "mode": extended}  # type: ignore[misc]
         reloaded = importlib.reload(glue)
+        # The hourly table points at the decode rather than repeating it, so the
+        # appended value must reach the published home and hourly must still
+        # resolve to it.
         hourly = next(
             s for s in reloaded.table_specs() if s.name == reloaded.TABLE_ENERGY_HOURLY
         )
-        assert f"{extended['vacation']}=vacation" in hourly.description
+        published = next(
+            s.description
+            for s in reloaded.table_specs()
+            if s.name == reloaded.TABLE_DIM_CHANNEL
+        )
+        assert f"{extended['vacation']}=vacation" in published
+        assert "dim_channel" in hourly.description
         assert (
             len(reloaded.table_input(hourly, BUCKET)["Description"])
             <= reloaded.GLUE_DESCRIPTION_MAX_LEN
@@ -1486,7 +1535,7 @@ def test_the_hourly_aggregate_comments_say_which_ones_mean_anything_for_enums() 
     # And the unit column, which is where a reader meets 'enum' in the first
     # place, has to point at the decode that is actually reachable from here.
     assert "'enum'" in comments["unit"]
-    assert "this table's comment" in comments["unit"]
+    assert "dim_channel" in comments["unit"]
 
 
 # ------------------------------- 3. the metric and unit vocabularies are closed
@@ -1530,13 +1579,38 @@ _TABLES_WITH_METRICS = (
 
 
 @pytest.mark.parametrize("table", _TABLES_WITH_METRICS)
-def test_every_metric_a_table_can_hold_is_named_in_its_metric_comment(table: str) -> None:
+def test_the_metric_comment_never_reads_as_an_exhaustive_list(table: str) -> None:
+    """It used to name every metric. At 28 metrics that is arithmetically dead.
+
+    The raw_30s metric names alone are 251 of the 255 characters a Glue column
+    comment allows — no room for a single word of prose, let alone the day-grain
+    cross-reference. So the guarantee changed shape rather than being dropped:
+    the comment must not invite `WHERE metric IN (...)` off a partial list, and
+    must name the enumeration that cannot go stale. The original failure mode —
+    a reader filtering on an incomplete list and silently losing rows — is
+    prevented better by "SELECT DISTINCT metric" than by a list that no longer
+    fits. See DEVIATIONS.md #174.
+    """
     comment = _column_comments(table)["metric"]
-    for metric in glue._metrics_for_table(table):
-        assert re.search(rf"\b{re.escape(metric)}\b", comment), (
-            f"{table}.metric never mentions {metric}, which really lands there — "
-            "a reader filtering on this list drops those rows"
-        )
+    metrics = glue._metrics_for_table(table)
+    exhaustive = all(re.search(rf"\b{re.escape(m)}\b", comment) for m in metrics)
+    if exhaustive:
+        # Still achievable where a table holds few metrics (energy_daily holds
+        # two), and still the better comment when it fits.
+        return
+    assert "SELECT DISTINCT metric" in comment, (
+        f"{table}.metric lists only some of the {len(metrics)} metrics that land "
+        "there, so it MUST tell a reader how to enumerate them authoritatively"
+    )
+    # The traps still have to be named, because they are what a reader gets
+    # wrong: watts is the metric nearly every query wants, the stage pair is
+    # mutually exclusive, and the day-grain pair is barred from these tables.
+    assert re.search(r"\bwatts\b", comment)
+    for metric in (bryant.STAGE_METRIC, bryant.STAGE_PCT_METRIC):
+        assert metric in comment
+    for metric in sorted(model.DAY_GRAIN_METRICS):
+        assert metric in comment
+    assert "energy_daily only" in comment
 
 
 @pytest.mark.parametrize("table", _TABLES_WITH_METRICS)

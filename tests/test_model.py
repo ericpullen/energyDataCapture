@@ -86,7 +86,11 @@ def test_unit_for_metric_rejects_an_unknown_metric() -> None:
 
 def test_enum_metrics_carry_the_enum_unit() -> None:
     """§7.3: enums are a small integer in ``value`` with ``unit='enum'``."""
-    assert model.ENUM_METRICS == frozenset({"mode", "stage", "fan"})
+    # Six as of 2026-08-22: the three original, plus the per-unit state strings
+    # mapped when the live capture proved they are populated.
+    assert model.ENUM_METRICS == frozenset(
+        {"mode", "stage", "fan", "op_status", "odu_mode", "idu_status"}
+    )
     for metric in model.ENUM_METRICS:
         assert model.unit_for_metric(metric) == model.UNIT_ENUM
 
