@@ -1,0 +1,1120 @@
+<!--
+  /ui/history — the S3 archive, not the spool.
+
+  Self-contained by design: no CDN, no build step, no framework, vanilla JS and
+  inline SVG. Same constraints as dashboard.html and hvac.html, and the same
+  reason — this file is read out of the installed wheel inside the container.
+
+  Colour comes from a validated palette (see the project's dataviz notes): the
+  four categorical slots pass CVD separation and the normal-vision floor in BOTH
+  light and dark modes on the adjacent pairlist. Two of the light-mode slots sit
+  below 3:1 against the surface, which is why every chart here ships a table view
+  and direct labels — that is the documented relief, not a nicety.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>energycap — history</title>
+<style>
+  /* ---------------------------------------------------------------- tokens */
+  :root {
+    color-scheme: light;
+    --page:            #f9f9f7;
+    --surface-1:       #fcfcfb;
+    --surface-2:       #f2f1ed;
+    --text-primary:    #0b0b0b;
+    --text-secondary:  #52514e;
+    --text-muted:      #898781;
+    --grid:            #e1e0d9;
+    --axis:            #c3c2b7;
+    --border:          rgba(11, 11, 11, 0.10);
+    --border-strong:   rgba(11, 11, 11, 0.18);
+    --series-1:        #2a78d6;
+    --series-2:        #eb6834;
+    --series-3:        #1baf7a;
+    --series-4:        #eda100;
+    --pole-low:        #2a78d6;
+    --pole-high:       #e34948;
+    --neutral-mid:     #f0efec;
+    --good:            #0ca30c;
+    --warning:         #fab219;
+    --critical:        #d03b3b;
+    --seq-1:  #cde2fb; --seq-2:  #9ec5f4; --seq-3:  #6da7ec;
+    --seq-4:  #3987e5; --seq-5:  #256abf; --seq-6:  #104281;
+    --shadow: 0 1px 2px rgba(11,11,11,.04), 0 8px 24px -16px rgba(11,11,11,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --surface-2:      #232322;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255, 255, 255, 0.10);
+      --border-strong:  rgba(255, 255, 255, 0.18);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --series-4:       #c98500;
+      --pole-low:       #3987e5;
+      --pole-high:      #e66767;
+      --neutral-mid:    #383835;
+      --seq-1: #104281; --seq-2: #1c5cab; --seq-3: #256abf;
+      --seq-4: #3987e5; --seq-5: #6da7ec; --seq-6: #b7d3f6;
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --surface-2:      #232322;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --border-strong:  rgba(255, 255, 255, 0.18);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --series-4:       #c98500;
+    --pole-low:       #3987e5;
+    --pole-high:      #e66767;
+    --neutral-mid:    #383835;
+    --seq-1: #104281; --seq-2: #1c5cab; --seq-3: #256abf;
+    --seq-4: #3987e5; --seq-5: #6da7ec; --seq-6: #b7d3f6;
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 24px 96px; }
+
+  /* ---------------------------------------------------------------- header */
+  header.top { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end;
+               justify-content: space-between; margin-bottom: 4px; }
+  h1 { font-size: 21px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
+  .sub { color: var(--text-secondary); font-size: 13.5px; margin: 4px 0 0; max-width: 62ch; }
+  nav.views { display: flex; gap: 2px; background: var(--surface-2);
+              border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
+  nav.views a {
+    font-size: 13px; font-weight: 550; text-decoration: none; padding: 6px 12px;
+    border-radius: 6px; color: var(--text-secondary);
+  }
+  nav.views a:hover { color: var(--text-primary); }
+  nav.views a[aria-current="page"] {
+    background: var(--surface-1); color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+  .iconbtn {
+    font: inherit; font-size: 13px; cursor: pointer; padding: 7px 11px;
+    background: var(--surface-1); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .iconbtn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
+  /* ---------------------------------------------------------------- filters */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+    margin: 20px 0 22px; padding: 12px 14px;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow);
+  }
+  .filters .lbl { font-size: 12px; font-weight: 600; letter-spacing: .04em;
+                  text-transform: uppercase; color: var(--text-muted); }
+  .presets { display: flex; gap: 2px; flex-wrap: wrap; }
+  .preset {
+    font: inherit; font-size: 13px; font-variant-numeric: tabular-nums;
+    cursor: pointer; padding: 6px 11px; border-radius: 7px;
+    border: 1px solid transparent; background: transparent; color: var(--text-secondary);
+  }
+  .preset:hover { background: var(--surface-2); color: var(--text-primary); }
+  .preset[aria-pressed="true"] {
+    background: var(--surface-2); border-color: var(--border-strong);
+    color: var(--text-primary); font-weight: 600;
+  }
+  .preset[aria-pressed="true"]::before { content: "✓ "; font-weight: 700; }
+  .custom { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+  .custom input {
+    font: inherit; font-size: 13px; padding: 5px 8px; color: var(--text-primary);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 7px;
+  }
+  .stamp { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .badge {
+    font-size: 11px; font-weight: 600; letter-spacing: .03em; padding: 2px 7px;
+    border-radius: 999px; border: 1px solid var(--border); color: var(--text-muted);
+  }
+
+  /* ------------------------------------------------------------------ cards */
+  .kpis { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+          margin-bottom: 22px; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px;
+  }
+  .kpi .label { font-size: 12px; font-weight: 600; letter-spacing: .04em;
+                text-transform: uppercase; color: var(--text-muted); }
+  .kpi .value { font-size: 30px; font-weight: 650; letter-spacing: -0.02em;
+                margin: 6px 0 2px; line-height: 1.1; }
+  .kpi.hero .value { font-size: 48px; }
+  .kpi .unit { font-size: 15px; font-weight: 550; color: var(--text-secondary); margin-left: 3px; }
+  .kpi .detail { font-size: 12.5px; color: var(--text-secondary); }
+
+  section.block { margin-top: 26px; }
+  .block > .card { padding: 0; overflow: hidden; }
+  .head {
+    display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: baseline;
+    justify-content: space-between; padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .head h2 { font-size: 15.5px; font-weight: 650; margin: 0; letter-spacing: -0.005em; }
+  .head p { font-size: 12.5px; color: var(--text-secondary); margin: 5px 0 0; max-width: 78ch; }
+  .head .tools { display: flex; gap: 6px; align-items: center; }
+  .seg { display: flex; gap: 2px; background: var(--surface-2);
+         border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .seg button {
+    font: inherit; font-size: 12.5px; cursor: pointer; padding: 4px 10px;
+    border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary);
+  }
+  .seg button[aria-pressed="true"] {
+    background: var(--surface-1); color: var(--text-primary); font-weight: 600;
+  }
+  .body { padding: 16px 18px 18px; }
+  .note {
+    font-size: 12.5px; color: var(--text-secondary); background: var(--surface-2);
+    border-left: 2px solid var(--axis); border-radius: 0 7px 7px 0;
+    padding: 9px 12px; margin: 14px 0 0;
+  }
+
+  /* ----------------------------------------------------------------- legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 14px; }
+  .legend .item { display: inline-flex; gap: 7px; align-items: center;
+                  font-size: 12.5px; color: var(--text-secondary); }
+  .legend .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .legend .key { width: 14px; height: 2px; border-radius: 2px; flex: none; }
+
+  /* ------------------------------------------------------------------ table */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  caption { text-align: left; font-size: 12.5px; color: var(--text-secondary);
+            padding-bottom: 8px; }
+  th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--grid);
+           font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal;
+                                    white-space: normal; }
+  thead th { font-size: 11.5px; font-weight: 600; letter-spacing: .03em;
+             text-transform: uppercase; color: var(--text-muted);
+             border-bottom-color: var(--axis); }
+  tbody tr:hover { background: var(--surface-2); }
+  .scroll { overflow-x: auto; }
+  .dim { color: var(--text-muted); }
+  .swatch-cell { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+                 margin-right: 7px; vertical-align: baseline; }
+
+  /* ------------------------------------------------------------------ chart */
+  figure { margin: 0; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .axisline { stroke: var(--axis); stroke-width: 1; }
+  .tick { font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .datalabel { font-size: 11.5px; fill: var(--text-secondary);
+               font-variant-numeric: tabular-nums; }
+  .catlabel { font-size: 12px; fill: var(--text-secondary); }
+  .hit { fill: transparent; cursor: pointer; }
+  .mark { transition: opacity .12s ease; }
+  figure.hovering .mark:not(.on) { opacity: .45; }
+  .crosshair { stroke: var(--axis); stroke-width: 1; pointer-events: none; }
+
+  .tip {
+    position: fixed; z-index: 40; pointer-events: none; opacity: 0;
+    transition: opacity .1s ease; min-width: 150px; max-width: 300px;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border-strong); border-radius: 9px;
+    box-shadow: 0 6px 22px -8px rgba(0,0,0,.35); padding: 9px 11px; font-size: 12.5px;
+  }
+  .tip.on { opacity: 1; }
+  .tip .t { font-weight: 650; margin-bottom: 6px; font-size: 12.5px; }
+  .tip .r { display: flex; gap: 9px; align-items: baseline; justify-content: space-between; }
+  .tip .r + .r { margin-top: 3px; }
+  .tip .n { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tip .s { color: var(--text-secondary); display: inline-flex; gap: 6px; align-items: center; }
+  .tip .k { width: 12px; height: 2px; border-radius: 2px; flex: none; }
+  .tip .foot { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+               color: var(--text-muted); font-size: 11.5px; }
+
+  .empty { padding: 26px 4px; color: var(--text-muted); font-size: 13.5px; text-align: center; }
+  .err {
+    font-size: 12.5px; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--critical); border-left-width: 3px;
+    border-radius: 0 8px 8px 0; padding: 10px 13px; margin-bottom: 14px;
+  }
+  .err b { color: var(--critical); }
+  body.loading .wrap { opacity: .55; }
+  .wrap { transition: opacity .15s ease; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (max-width: 640px) {
+    .wrap { padding: 18px 14px 72px; }
+    .kpi.hero .value { font-size: 38px; }
+    .custom { margin-left: 0; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Energy history</h1>
+      <p class="sub">
+        Read from the S3 archive, not the live spool — so this goes back as far as
+        the data does. Energy is only ever totalled <em>within</em> a measurement
+        level, because the hierarchy nests.
+      </p>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <nav class="views" aria-label="Views">
+        <a href="/ui">Live</a>
+        <a href="/ui/hvac">HVAC</a>
+        <a href="/ui/history" aria-current="page">History</a>
+      </nav>
+      <button class="iconbtn" id="theme" type="button" title="Toggle light / dark">◐</button>
+    </div>
+  </header>
+
+  <div class="filters" role="group" aria-label="Date range">
+    <span class="lbl">Range</span>
+    <div class="presets" id="presets"></div>
+    <div class="custom">
+      <input type="date" id="from" aria-label="From (local date)">
+      <span class="dim" aria-hidden="true">→</span>
+      <input type="date" id="to" aria-label="To (local date)">
+      <button class="iconbtn" id="apply" type="button">Apply</button>
+    </div>
+  </div>
+
+  <div id="errors" aria-live="polite"></div>
+  <div class="kpis" id="kpis"></div>
+  <div id="blocks"></div>
+
+  <p class="stamp" id="stamp" style="margin-top:26px"></p>
+</div>
+<div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
+
+<script>
+"use strict";
+// ------------------------------------------------------------------ helpers
+const $ = (id) => document.getElementById(id);
+const PRESETS = [
+  { label: "7 days", days: 7 }, { label: "30 days", days: 30 },
+  { label: "90 days", days: 90 }, { label: "1 year", days: 365 },
+];
+const SERIES = ["--series-1", "--series-2", "--series-3", "--series-4"];
+const SEQ = ["--seq-1", "--seq-2", "--seq-3", "--seq-4", "--seq-5", "--seq-6"];
+const cssv = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// The URL IS the state. A page whose purpose is looking at a specific past
+// period has to be linkable and bookmarkable, and the back button has to work.
+function stateFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const start = q.get("start"), end = q.get("end");
+  if (start && end) return { days: null, start, end };
+  const days = Number.parseInt(q.get("days") || "", 10);
+  return { days: Number.isFinite(days) && days > 0 ? days : 90, start: null, end: null };
+}
+function urlFromState() {
+  const q = state.start && state.end
+    ? `?start=${encodeURIComponent(state.start)}&end=${encodeURIComponent(state.end)}`
+    : `?days=${state.days}`;
+  if (location.search !== q) history.pushState(null, "", q);
+}
+let state = { ...stateFromUrl(), doc: null, views: {} };
+
+const fmt = (v, digits = 1) =>
+  v === null || v === undefined || Number.isNaN(v)
+    ? "—"
+    : Number(v).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const compact = (v) => {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const n = Number(v);
+  if (Math.abs(n) >= 10000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return n.toLocaleString(undefined, { maximumFractionDigits: Math.abs(n) < 10 ? 2 : 1 });
+};
+const pct = (v) => (v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${fmt(v, 1)}%`);
+// A nonzero value must never print as "0.00": this project's whole discipline is
+// that a measured zero and a small number are different facts.
+const kwh = (v) => {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  if (n === 0) return "0";
+  if (Math.abs(n) < 0.01) return "<0.01";
+  return fmt(n, Math.abs(n) < 10 ? 2 : 1);
+};
+const shortDay = (iso) => (iso || "").slice(5);
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// "Jul", and "Jul 2026" on the first month of a year so the axis is unambiguous.
+const monthLabel = (ym, withYear) => {
+  const [y, m] = String(ym).split("-");
+  const name = MONTHS[Number(m) - 1] || ym;
+  return withYear ? `${name} ${y}` : name;
+};
+// Every label here comes from the API. Insert as text, never as markup.
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+};
+const svgEl = (tag, attrs = {}) => {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) node.setAttribute(k, v);
+  return node;
+};
+function niceTicks(max, count = 4) {
+  if (!(max > 0)) return [0];
+  const raw = max / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || 10 * mag;
+  const out = [];
+  for (let v = 0; v <= max * 1.0001; v += step) out.push(Number(v.toFixed(6)));
+  return out;
+}
+
+// ----------------------------------------------------------------- tooltip
+const tip = $("tip");
+function showTip(evt, title, rows, foot) {
+  tip.replaceChildren();
+  tip.appendChild(el("div", "t", title));
+  for (const r of rows) {
+    const line = el("div", "r");
+    const left = el("span", "s");
+    if (r.color) {
+      const k = el("span", "k");
+      k.style.background = r.color;
+      left.appendChild(k);
+    }
+    left.appendChild(el("span", null, r.label));
+    line.appendChild(left);
+    line.appendChild(el("span", "n", r.value));
+    tip.appendChild(line);
+  }
+  if (foot) tip.appendChild(el("div", "foot", foot));
+  tip.classList.add("on");
+  tip.setAttribute("aria-hidden", "false");
+  moveTip(evt);
+}
+function moveTip(evt) {
+  const pad = 14, box = tip.getBoundingClientRect();
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + box.width > window.innerWidth - 8) x = evt.clientX - box.width - pad;
+  if (y + box.height > window.innerHeight - 8) y = evt.clientY - box.height - pad;
+  tip.style.left = Math.max(8, x) + "px";
+  tip.style.top = Math.max(8, y) + "px";
+}
+function hideTip() {
+  tip.classList.remove("on");
+  tip.setAttribute("aria-hidden", "true");
+  document.querySelectorAll("figure.hovering").forEach((f) => f.classList.remove("hovering"));
+  document.querySelectorAll(".mark.on").forEach((m) => m.classList.remove("on"));
+}
+document.addEventListener("scroll", hideTip, true);
+
+// --------------------------------------------------------------- section UI
+function card(title, blurb, tools) {
+  const wrap = el("section", "block");
+  const c = el("div", "card");
+  const head = el("div", "head");
+  const left = el("div");
+  left.appendChild(el("h2", null, title));
+  if (blurb) left.appendChild(el("p", null, blurb));
+  head.appendChild(left);
+  if (tools) head.appendChild(tools);
+  c.appendChild(head);
+  const body = el("div", "body");
+  c.appendChild(body);
+  wrap.appendChild(c);
+  return { wrap, body, head };
+}
+function toggle(name, options, initial, onPick) {
+  const seg = el("div", "seg");
+  seg.setAttribute("role", "group");
+  seg.setAttribute("aria-label", name);
+  const buttons = [];
+  options.forEach((opt) => {
+    const b = el("button", null, opt.label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(opt.value === initial));
+    b.addEventListener("click", () => {
+      buttons.forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      onPick(opt.value);
+    });
+    buttons.push(b);
+    seg.appendChild(b);
+  });
+  const tools = el("div", "tools");
+  tools.appendChild(seg);
+  return tools;
+}
+function legend(items) {
+  const box = el("div", "legend");
+  items.forEach((it) => {
+    const item = el("span", "item");
+    const mark = el("span", it.line ? "key" : "swatch");
+    mark.style.background = it.color;
+    item.appendChild(mark);
+    item.appendChild(el("span", null, it.label));
+    box.appendChild(item);
+  });
+  return box;
+}
+function tableOf(caption, headers, rows) {
+  const scroll = el("div", "scroll");
+  const t = el("table");
+  if (caption) t.appendChild(el("caption", null, caption));
+  const thead = el("thead"), hr = el("tr");
+  headers.forEach((h) => hr.appendChild(el("th", null, h)));
+  thead.appendChild(hr);
+  t.appendChild(thead);
+  const tb = el("tbody");
+  rows.forEach((cells) => {
+    const tr = el("tr");
+    cells.forEach((cell) => {
+      const td = el("td");
+      if (cell && typeof cell === "object") {
+        if (cell.color) {
+          const sw = el("span", "swatch-cell");
+          sw.style.background = cell.color;
+          td.appendChild(sw);
+        }
+        td.appendChild(document.createTextNode(String(cell.text ?? "")));
+        if (cell.dim) td.className = "dim";
+      } else {
+        td.textContent = cell === null || cell === undefined ? "—" : String(cell);
+      }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  scroll.appendChild(t);
+  return scroll;
+}
+function empty(message) { return el("div", "empty", message); }
+
+// ============================================================ 1. circuits
+function renderCircuits(doc, body) {
+  const block = doc.circuits;
+  if (!block || !block.rows.length) return body.appendChild(empty("No circuit data in this range."));
+  const levels = block.levels.filter((l) => l.kwh !== null);
+  let level = (levels.find((l) => l.level === "branch") || levels[0] || {}).level;
+  let mode = "chart";
+
+  const tools = el("div", "tools");
+  tools.appendChild(toggle("Level", levels.map((l) => ({ label: l.level, value: l.level })), level, (v) => { level = v; draw(); }).firstChild);
+  tools.appendChild(toggle("View", [{ label: "Chart", value: "chart" }, { label: "Table", value: "table" }], "chart", (v) => { mode = v; draw(); }).firstChild);
+
+  const host = el("div");
+  body.appendChild(host);
+
+  function draw() {
+    host.replaceChildren();
+    const lvl = block.levels.find((l) => l.level === level) || {};
+    const rows = block.rows
+      .filter((r) => r.level === level && r.kwh !== null)
+      .sort((a, b) => b.kwh - a.kwh);
+    host.appendChild(el("div", "note", `${lvl.note || ""} ${rows.length} series, ${fmt(lvl.kwh, 1)} kWh totalled within this level.`));
+    if (!rows.length) return host.appendChild(empty("Nothing at this level."));
+    const moved = rows.filter((r) => r.kwh > 0);
+    const idle = rows.length - moved.length;
+    if (mode === "table") {
+      return host.appendChild(tableOf(
+        "Every value on the chart, plus coverage.",
+        ["Circuit", "kWh", "Peak W", "Coverage", "Days", "Panel", "First seen"],
+        rows.map((r) => [
+          { text: r.label, dim: !r.mapped },
+          kwh(r.kwh), fmt(r.peak_w, 0),
+          r.coverage_pct === null ? "—" : fmt(r.coverage_pct, 1) + "%",
+          r.days_seen, r.panel || "—", r.first_day || "—",
+        ])
+      ));
+    }
+    // Ranked horizontal bars. ONE series, so one hue (slot 1) for every bar and
+    // no legend: a value-ramp here would double-encode length as colour.
+    if (!moved.length) return host.appendChild(empty("Every circuit at this level reported 0.00 kWh."));
+    const max = Math.max(...moved.map((r) => r.kwh));
+    // Axis band sized to hold the ticks AND the unit caption, so neither relies
+    // on overflow to be visible.
+    const rowH = 30, padL = 190, padR = 74, padT = 8, axisH = 44;
+    const h = padT + moved.length * rowH + axisH, w = 900;
+    const plotW = w - padL - padR;
+    const x = (v) => (max > 0 ? (v / max) * plotW : 0);
+    const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, role: "img",
+      "aria-label": `Energy by circuit at the ${level} level, ranked` });
+    const fig = el("figure");
+
+    niceTicks(max).forEach((t) => {
+      svg.appendChild(svgEl("line", { class: "gridline", x1: padL + x(t), x2: padL + x(t), y1: padT, y2: padT + moved.length * rowH }));
+      const lab = svgEl("text", { class: "tick", x: padL + x(t), y: h - 26, "text-anchor": "middle" });
+      lab.textContent = compact(t);
+      svg.appendChild(lab);
+    });
+    svg.appendChild(svgEl("line", { class: "axisline", x1: padL, x2: padL, y1: padT, y2: padT + moved.length * rowH }));
+    const unit = svgEl("text", { class: "tick", x: padL + plotW / 2, y: h - 8, "text-anchor": "middle" });
+    unit.textContent = "kWh";
+    svg.appendChild(unit);
+
+    moved.forEach((r, i) => {
+      const barH = Math.min(24, rowH - 8);
+      const y = padT + i * rowH + (rowH - barH) / 2;
+      const bw = Math.max(x(r.kwh), 2);
+      const g = svgEl("g", { class: "mark" });
+      g.appendChild(svgEl("rect", {
+        x: padL, y, width: bw, height: barH, fill: cssv("--series-1"),
+        rx: 4, ry: 4,
+      }));
+      // Square off the baseline end: rounded both ends reads as a pill.
+      g.appendChild(svgEl("rect", { x: padL, y, width: Math.min(4, bw), height: barH, fill: cssv("--series-1") }));
+      const name = svgEl("text", { class: "catlabel", x: padL - 10, y: y + barH / 2 + 4, "text-anchor": "end" });
+      name.textContent = r.short_label;
+      g.appendChild(name);
+      // Value outside the bar end — never inside, where it would clip.
+      const val = svgEl("text", { class: "datalabel", x: padL + bw + 8, y: y + barH / 2 + 4 });
+      val.textContent = kwh(r.kwh);
+      g.appendChild(val);
+      const hit = svgEl("rect", { class: "hit", x: 0, y: padT + i * rowH, width: w, height: rowH });
+      const enter = (ev) => {
+        fig.classList.add("hovering"); g.classList.add("on");
+        showTip(ev, r.label, [
+          { label: "Energy", value: kwh(r.kwh) + " kWh", color: cssv("--series-1") },
+          { label: "Peak", value: fmt(r.peak_w, 0) + " W" },
+          { label: "Coverage", value: r.coverage_pct === null ? "—" : fmt(r.coverage_pct, 1) + "%" },
+          { label: "Days seen", value: String(r.days_seen) },
+        ], r.mapped ? `${r.channel_id} · ${r.panel ? "panel " + r.panel : r.level}` : `${r.channel_id} — not in channel_map`);
+      };
+      hit.addEventListener("pointerenter", enter);
+      hit.addEventListener("pointermove", moveTip);
+      hit.addEventListener("pointerleave", () => { g.classList.remove("on"); fig.classList.remove("hovering"); hideTip(); });
+      g.appendChild(hit);
+      svg.appendChild(g);
+    });
+    fig.appendChild(svg);
+    host.appendChild(fig);
+    if (idle) {
+      host.appendChild(el("div", "note",
+        `${idle} more circuit${idle === 1 ? "" : "s"} at this level reported 0.00 kWh over the range `
+        + "and are omitted from the chart — a measured zero, not a gap. They are in the table view."));
+    }
+  }
+  draw();
+  return tools;
+}
+
+// =========================================================== 2. meter
+function renderMeter(doc, body) {
+  const block = doc.meter;
+  if (!block || !block.rows.length) return body.appendChild(empty("No meter data in this range."));
+  const rows = block.rows;
+  let mode = "chart";
+  const host = el("div");
+  body.appendChild(host);
+
+  function draw() {
+    host.replaceChildren();
+    if (mode === "table") {
+      host.appendChild(tableOf(
+        "Every day, including the incomplete ones a delta is withheld for.",
+        ["Day", "Meter kWh", "Panels kWh", "Δ", "Coverage", "Feeds seen", "Complete"],
+        rows.map((r) => [
+          r.local_day, fmt(r.meter_kwh, 2), fmt(r.panel_kwh, 2),
+          r.delta_pct === null ? "—" : pct(r.delta_pct),
+          r.coverage_pct === null ? "—" : fmt(r.coverage_pct, 1) + "%",
+          r.series_seen === null ? "—" : `${r.series_seen}/${r.series_expected}`,
+          r.complete ? "yes" : "no",
+        ])
+      ));
+      block.notes.forEach((n) => host.appendChild(el("div", "note", n)));
+      return;
+    }
+    host.appendChild(legend([
+      { label: "Utility meter", color: cssv("--series-1"), line: true },
+      { label: "Panel feed CTs", color: cssv("--series-2"), line: true },
+    ]));
+    // Two series, same unit (kWh), ONE axis. Never a second y-scale.
+    const w = 900, h = 250, padL = 52, padR = 58, padT = 12, padB = 30;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const max = Math.max(...rows.flatMap((r) => [r.meter_kwh || 0, r.panel_kwh || 0]), 1);
+    const x = (i) => padL + (rows.length === 1 ? plotW / 2 : (i / (rows.length - 1)) * plotW);
+    const y = (v) => padT + plotH - (v / max) * plotH;
+    const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, role: "img",
+      "aria-label": "Utility meter and panel feed energy per day" });
+    const fig = el("figure");
+    niceTicks(max).forEach((t) => {
+      svg.appendChild(svgEl("line", { class: "gridline", x1: padL, x2: padL + plotW, y1: y(t), y2: y(t) }));
+      const lab = svgEl("text", { class: "tick", x: padL - 8, y: y(t) + 4, "text-anchor": "end" });
+      lab.textContent = compact(t);
+      svg.appendChild(lab);
+    });
+    svg.appendChild(svgEl("line", { class: "axisline", x1: padL, x2: padL + plotW, y1: y(0), y2: y(0) }));
+    rows.forEach((r, i) => {
+      if (rows.length > 14 && i % Math.ceil(rows.length / 10) !== 0) return;
+      const lab = svgEl("text", { class: "tick", x: x(i), y: h - 10, "text-anchor": "middle" });
+      lab.textContent = shortDay(r.local_day);
+      svg.appendChild(lab);
+    });
+    // A gap stays a gap: each run of consecutive present points is its own path.
+    [["meter_kwh", "--series-1"], ["panel_kwh", "--series-2"]].forEach(([field, token]) => {
+      let run = [];
+      const flush = () => {
+        if (run.length > 1) {
+          svg.appendChild(svgEl("path", {
+            class: "mark", d: "M" + run.map((p) => `${p[0]},${p[1]}`).join("L"),
+            fill: "none", stroke: cssv(token), "stroke-width": 2,
+            "stroke-linejoin": "round", "stroke-linecap": "round",
+          }));
+        } else if (run.length === 1) {
+          svg.appendChild(svgEl("circle", { class: "mark", cx: run[0][0], cy: run[0][1], r: 4,
+            fill: cssv(token), stroke: cssv("--surface-1"), "stroke-width": 2 }));
+        }
+        run = [];
+      };
+      rows.forEach((r, i) => {
+        const v = r[field];
+        if (v === null || v === undefined) flush();
+        else run.push([x(i), y(v)]);
+      });
+      flush();
+      // Direct-label the last real point of each series.
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i][field] !== null && rows[i][field] !== undefined) {
+          const t = svgEl("text", { class: "datalabel", x: x(i) + 9, y: y(rows[i][field]) + 4 });
+          t.textContent = fmt(rows[i][field], 0);
+          svg.appendChild(t);
+          break;
+        }
+      }
+    });
+    const cross = svgEl("line", { class: "crosshair", y1: padT, y2: padT + plotH, opacity: 0 });
+    svg.appendChild(cross);
+    const surface = svgEl("rect", { class: "hit", x: padL, y: padT, width: plotW, height: plotH });
+    surface.addEventListener("pointermove", (ev) => {
+      const box = svg.getBoundingClientRect();
+      const rel = ((ev.clientX - box.left) / box.width) * w;
+      let best = 0, bestD = Infinity;
+      rows.forEach((_, i) => { const d = Math.abs(x(i) - rel); if (d < bestD) { bestD = d; best = i; } });
+      const r = rows[best];
+      cross.setAttribute("x1", x(best)); cross.setAttribute("x2", x(best)); cross.setAttribute("opacity", 1);
+      showTip(ev, r.local_day, [
+        { label: "Utility meter", value: fmt(r.meter_kwh, 2) + " kWh", color: cssv("--series-1") },
+        { label: "Panel feeds", value: fmt(r.panel_kwh, 2) + " kWh", color: cssv("--series-2") },
+        { label: "Difference", value: r.delta_pct === null ? "withheld" : pct(r.delta_pct) },
+      ], r.complete ? `Complete day · ${fmt(r.coverage_pct, 1)}% coverage`
+                    : `Incomplete (${r.coverage_pct === null ? "no panel data" : fmt(r.coverage_pct, 1) + "% coverage"}) — no delta shown`);
+    });
+    surface.addEventListener("pointerleave", () => { cross.setAttribute("opacity", 0); hideTip(); });
+    svg.appendChild(surface);
+    fig.appendChild(svg);
+    host.appendChild(fig);
+
+    // Δ as a diverging bar: polarity is the job, so blue/red about a zero rule.
+    const complete = rows.filter((r) => r.delta_pct !== null);
+    if (complete.length) {
+      const dh = 154, dpadT = 16, dpadB = 40, dplotH = dh - dpadT - dpadB;
+      const amax = Math.max(...complete.map((r) => Math.abs(r.delta_pct)), 2);
+      const zero = dpadT + dplotH / 2;
+      const dsvg = svgEl("svg", { viewBox: `0 0 ${w} ${dh}`, role: "img",
+        "aria-label": "Panels minus meter, percent, complete days only" });
+      const dfig = el("figure");
+      const bw = Math.min(24, Math.max(6, plotW / Math.max(complete.length, 1) - 8));
+      dsvg.appendChild(svgEl("line", { class: "axisline", x1: padL, x2: padL + plotW, y1: zero, y2: zero }));
+      const zlab = svgEl("text", { class: "tick", x: padL - 8, y: zero + 4, "text-anchor": "end" });
+      zlab.textContent = "0%";
+      dsvg.appendChild(zlab);
+      complete.forEach((r, i) => {
+        const cx = padL + (complete.length === 1 ? plotW / 2 : (i / Math.max(complete.length - 1, 1)) * plotW);
+        const mag = (Math.abs(r.delta_pct) / amax) * (dplotH / 2 - 6);
+        const up = r.delta_pct > 0;
+        const g = svgEl("g", { class: "mark" });
+        g.appendChild(svgEl("rect", {
+          x: cx - bw / 2, y: up ? zero - mag : zero, width: bw, height: Math.max(mag, 2),
+          fill: up ? cssv("--pole-high") : cssv("--pole-low"), rx: 4, ry: 4,
+        }));
+        g.appendChild(svgEl("rect", { x: cx - bw / 2, y: up ? zero - 4 : zero, width: bw, height: 4,
+          fill: up ? cssv("--pole-high") : cssv("--pole-low") }));
+        const lab = svgEl("text", { class: "datalabel", x: cx,
+          y: up ? zero - mag - 6 : zero + mag + 14, "text-anchor": "middle" });
+        lab.textContent = pct(r.delta_pct);
+        g.appendChild(lab);
+        const dl = svgEl("text", { class: "tick", x: cx, y: dh - 6, "text-anchor": "middle" });
+        dl.textContent = shortDay(r.local_day);
+        dsvg.appendChild(dl);
+        const hit = svgEl("rect", { class: "hit", x: cx - Math.max(bw, 24) / 2, y: dpadT,
+          width: Math.max(bw, 24), height: dplotH });
+        hit.addEventListener("pointerenter", (ev) => {
+          dfig.classList.add("hovering"); g.classList.add("on");
+          showTip(ev, r.local_day, [
+            { label: "Panels − meter", value: pct(r.delta_pct) },
+            { label: "Panels", value: fmt(r.panel_kwh, 2) + " kWh" },
+            { label: "Meter", value: fmt(r.meter_kwh, 2) + " kWh" },
+          ], "Negative means the panels read low — sub-metering misses some load.");
+        });
+        hit.addEventListener("pointermove", moveTip);
+        hit.addEventListener("pointerleave", () => { g.classList.remove("on"); dfig.classList.remove("hovering"); hideTip(); });
+        g.appendChild(hit);
+        dsvg.appendChild(g);
+      });
+      dfig.appendChild(dsvg);
+      host.appendChild(el("div", "note",
+        `Panels − meter, on the ${complete.length} fully covered day(s) only. Mean ${pct(block.mean_delta_pct)}.`));
+      host.appendChild(dfig);
+    }
+    block.notes.forEach((n) => host.appendChild(el("div", "note", n)));
+  }
+  draw();
+  return toggle("View", [{ label: "Chart", value: "chart" }, { label: "Table", value: "table" }], "chart", (v) => { mode = v; draw(); });
+}
+
+// ============================================================ 3. HVAC
+function renderHvac(doc, body) {
+  const block = doc.hvac;
+  if (!block || !block.rows.length) return body.appendChild(empty("No HVAC day-grain data in this range."));
+  const comps = block.components.slice(0, 4);
+  const colorOf = (c) => cssv(SERIES[Math.max(0, comps.indexOf(c)) % SERIES.length]);
+  const labelOf = (c) => (block.rows.find((r) => r.component === c) || {}).label || c;
+  let mode = "chart";
+  const host = el("div");
+  body.appendChild(host);
+
+  function draw() {
+    host.replaceChildren();
+    if (mode === "table") {
+      host.appendChild(tableOf("Monthly kWh per component.",
+        ["Month", ...comps.map(labelOf), "Total"],
+        block.months.map((m) => {
+          const vals = comps.map((c) => (block.rows.find((r) => r.month === m && r.component === c) || {}).kwh ?? 0);
+          return [m, ...vals.map((v) => fmt(v, 0)), fmt(vals.reduce((a, b) => a + b, 0), 0)];
+        })
+      ));
+      host.appendChild(el("div", "note", block.note));
+      return;
+    }
+    host.appendChild(legend(comps.map((c) => ({ label: labelOf(c), color: colorOf(c) }))));
+    const months = block.months;
+    const totals = months.map((m) => comps.reduce((sum, c) =>
+      sum + ((block.rows.find((r) => r.month === m && r.component === c) || {}).kwh || 0), 0));
+    const max = Math.max(...totals, 1);
+    const w = 900, h = 300, padL = 52, padR = 20, padT = 12, padB = 34;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const band = plotW / Math.max(months.length, 1);
+    const bw = Math.min(44, band - 14);
+    const y = (v) => padT + plotH - (v / max) * plotH;
+    const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, role: "img",
+      "aria-label": "HVAC energy by component per month, stacked" });
+    const fig = el("figure");
+    niceTicks(max).forEach((t) => {
+      svg.appendChild(svgEl("line", { class: "gridline", x1: padL, x2: padL + plotW, y1: y(t), y2: y(t) }));
+      const lab = svgEl("text", { class: "tick", x: padL - 8, y: y(t) + 4, "text-anchor": "end" });
+      lab.textContent = compact(t);
+      svg.appendChild(lab);
+    });
+    svg.appendChild(svgEl("line", { class: "axisline", x1: padL, x2: padL + plotW, y1: y(0), y2: y(0) }));
+    months.forEach((m, i) => {
+      const cx = padL + band * i + band / 2;
+      let acc = 0;
+      const parts = comps.map((c) => ({
+        c, v: (block.rows.find((r) => r.month === m && r.component === c) || {}).kwh || 0,
+      })).filter((p) => p.v > 0);
+      parts.forEach((p, k) => {
+        const top = y(acc + p.v), bottom = y(acc);
+        // 2px surface gap between stacked segments — white does the separating,
+        // never a stroke around the mark.
+        const gap = k === parts.length - 1 ? 0 : 2;
+        const segH = Math.max(bottom - top - gap, 1);
+        const g = svgEl("g", { class: "mark" });
+        g.appendChild(svgEl("rect", { x: cx - bw / 2, y: top, width: bw, height: segH,
+          fill: colorOf(p.c), rx: k === parts.length - 1 ? 4 : 0, ry: k === parts.length - 1 ? 4 : 0 }));
+        if (k === parts.length - 1) {
+          g.appendChild(svgEl("rect", { x: cx - bw / 2, y: top + Math.min(4, segH), width: bw,
+            height: Math.max(segH - 4, 0), fill: colorOf(p.c) }));
+        }
+        const hit = svgEl("rect", { class: "hit", x: cx - Math.max(bw, 24) / 2, y: top,
+          width: Math.max(bw, 24), height: Math.max(segH, 24) });
+        hit.addEventListener("pointerenter", (ev) => {
+          fig.classList.add("hovering"); g.classList.add("on");
+          showTip(ev, m, comps.map((c) => ({
+            label: labelOf(c), color: colorOf(c),
+            value: fmt((block.rows.find((r) => r.month === m && r.component === c) || {}).kwh || 0, 0) + " kWh",
+          })), `Total ${fmt(totals[i], 0)} kWh · day-grain, from the Carrier cloud`);
+        });
+        hit.addEventListener("pointermove", moveTip);
+        hit.addEventListener("pointerleave", () => { g.classList.remove("on"); fig.classList.remove("hovering"); hideTip(); });
+        g.appendChild(hit);
+        svg.appendChild(g);
+        acc += p.v;
+      });
+      const tot = svgEl("text", { class: "datalabel", x: cx, y: y(acc) - 7, "text-anchor": "middle" });
+      tot.textContent = compact(acc);
+      svg.appendChild(tot);
+      const ml = svgEl("text", { class: "tick", x: cx, y: h - 12, "text-anchor": "middle" });
+      ml.textContent = monthLabel(m, i === 0 || m.slice(0, 4) !== months[i - 1].slice(0, 4));
+      svg.appendChild(ml);
+    });
+    fig.appendChild(svg);
+    host.appendChild(fig);
+    host.appendChild(el("div", "note", block.note));
+    if (block.components_always_zero.length) {
+      host.appendChild(el("div", "note",
+        `Reported 0.0 on every day in range and given no colour: ${block.components_always_zero.join(", ")}. `
+        + "A zero the API actually sent is data — this system has no gas, reheat or loop pump."));
+    }
+  }
+  draw();
+  return toggle("View", [{ label: "Chart", value: "chart" }, { label: "Table", value: "table" }], "chart", (v) => { mode = v; draw(); });
+}
+
+// ======================================================== 4. coverage
+function renderCoverage(doc, body) {
+  const block = doc.coverage;
+  if (!block || !block.cells.length) return body.appendChild(empty("No coverage data in this range."));
+  let mode = "chart";
+  const host = el("div");
+  body.appendChild(host);
+  const byKey = new Map();
+  block.cells.forEach((c) => byKey.set(c.series_key + "|" + c.local_day, c));
+  const LEVEL_ORDER = { feed: 0, subfeed: 1, branch: 2, reference: 3, other: 4 };
+  const seriesSorted = () => block.series.slice().sort((a, b) =>
+    (LEVEL_ORDER[a.level] ?? 9) - (LEVEL_ORDER[b.level] ?? 9)
+    || a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+  // Five ordered bins, five legend keys, one sequential hue light->dark.
+  const BINS = [
+    { label: "<40%",    token: "--seq-2", test: (v) => v < 40 },
+    { label: "40–70%",  token: "--seq-3", test: (v) => v < 70 },
+    { label: "70–90%",  token: "--seq-4", test: (v) => v < 90 },
+    { label: "90–99%",  token: "--seq-5", test: (v) => v < 99 },
+    { label: "≥99%",    token: "--seq-6", test: () => true },
+  ];
+  const binOf = (v) => (v === null || v === undefined ? -1 : BINS.findIndex((b) => b.test(v)));
+
+  function draw() {
+    host.replaceChildren();
+    if (mode === "table") {
+      host.appendChild(tableOf("One row per series: how many days reached full coverage.",
+        ["Series", "Level", "Days with data", "Full days", "Mean coverage"],
+        seriesSorted().map((s) => {
+          const mine = block.cells.filter((c) => c.series_key === s.series_key);
+          const full = mine.filter((c) => (c.coverage_pct || 0) >= 99).length;
+          const mean = mine.length ? mine.reduce((a, c) => a + (c.coverage_pct || 0), 0) / mine.length : null;
+          return [s.label, s.level, mine.length, full, mean === null ? "—" : fmt(mean, 1) + "%"];
+        })
+      ));
+      host.appendChild(el("div", "note", block.note));
+      return;
+    }
+    host.appendChild(legend([
+      { label: "no data", color: "var(--surface-2)" },
+      ...BINS.map((b) => ({ label: b.label, color: cssv(b.token) })),
+    ]));
+    const days = block.days, series = seriesSorted();
+    const cw = Math.max(7, Math.min(22, 700 / Math.max(days.length, 1)));
+    const ch = 19, padL = 190, padT = 4;
+    const w = padL + days.length * cw + 20, h = padT + series.length * ch + 30;
+    const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, role: "img",
+      "aria-label": "Sample coverage per series per day" });
+    const fig = el("figure");
+    series.forEach((s, r) => {
+      const lab = svgEl("text", { class: "catlabel", x: padL - 10, y: padT + r * ch + ch / 2 + 4, "text-anchor": "end" });
+      lab.textContent = s.label;
+      svg.appendChild(lab);
+      days.forEach((d, c) => {
+        const cell = byKey.get(s.series_key + "|" + d);
+        const b = binOf(cell ? cell.coverage_pct : null);
+        const g = svgEl("g", { class: "mark" });
+        g.appendChild(svgEl("rect", {
+          x: padL + c * cw, y: padT + r * ch, width: cw - 2, height: ch - 2, rx: 2, ry: 2,
+          fill: b < 0 ? "var(--surface-2)" : cssv(BINS[b].token),
+        }));
+        const hit = svgEl("rect", { class: "hit", x: padL + c * cw - 2, y: padT + r * ch - 2,
+          width: Math.max(cw + 2, 24), height: Math.max(ch + 2, 24) });
+        hit.addEventListener("pointerenter", (ev) => {
+          fig.classList.add("hovering"); g.classList.add("on");
+          showTip(ev, `${s.label} · ${d}`, cell ? [
+            { label: "Coverage", value: fmt(cell.coverage_pct, 1) + "%" },
+            { label: "Samples", value: `${cell.samples.toLocaleString()} of ${cell.expected.toLocaleString()}` },
+            { label: "Hours seen", value: `${cell.hours_present} of ${cell.hours_expected}` },
+          ] : [{ label: "Coverage", value: "no data" }],
+            cell ? null : "No rows recorded — the collector was down or this channel did not exist yet. Not a zero.");
+        });
+        hit.addEventListener("pointermove", moveTip);
+        hit.addEventListener("pointerleave", () => { g.classList.remove("on"); fig.classList.remove("hovering"); hideTip(); });
+        g.appendChild(hit);
+        svg.appendChild(g);
+      });
+    });
+    days.forEach((d, c) => {
+      if (days.length > 20 && c % Math.ceil(days.length / 14) !== 0) return;
+      const lab = svgEl("text", { class: "tick", x: padL + c * cw + cw / 2, y: h - 12, "text-anchor": "middle" });
+      lab.textContent = shortDay(d);
+      svg.appendChild(lab);
+    });
+    fig.appendChild(svg);
+    const sc = el("div", "scroll");
+    sc.appendChild(fig);
+    host.appendChild(sc);
+    host.appendChild(el("div", "note", block.note));
+  }
+  draw();
+  return toggle("View", [{ label: "Chart", value: "chart" }, { label: "Table", value: "table" }], "chart", (v) => { mode = v; draw(); });
+}
+
+// ------------------------------------------------------------------- shell
+function renderKpis(doc) {
+  const host = $("kpis");
+  host.replaceChildren();
+  const order = ["house_kwh", "top_circuit", "meter_delta_pct", "days_with_data"];
+  const units = { house_kwh: "kWh", top_circuit: "kWh", meter_delta_pct: "%", days_with_data: "" };
+  order.forEach((key, i) => {
+    const k = (doc.kpi || {})[key];
+    if (!k) return;
+    const c = el("div", "card kpi" + (i === 0 ? " hero" : ""));
+    c.appendChild(el("div", "label", k.label));
+    const v = el("div", "value");
+    v.appendChild(document.createTextNode(
+      key === "meter_delta_pct" ? (k.value === null ? "—" : pct(k.value)) : compact(k.value)));
+    if (units[key] && k.value !== null && key !== "meter_delta_pct") {
+      v.appendChild(el("span", "unit", units[key]));
+    }
+    c.appendChild(v);
+    c.appendChild(el("div", "detail", k.detail));
+    host.appendChild(c);
+  });
+}
+
+const SECTIONS = [
+  ["Circuits", "Energy per circuit over the range, ranked. Levels are never added together — a branch breaker's watts are also inside its panel's feed CT.", renderCircuits],
+  ["Meter reconciliation", "The LG&E revenue meter against the summed panel feed CTs, day by day. A difference is only shown for days where every feed reported.", renderMeter],
+  ["HVAC seasonality", "Bryant day-grain energy by component. The only source that can separate the air-handler blower from the electric strip heat.", renderHvac],
+  ["Coverage", "sample_count per series per day, against what each local day expects. An absent cell means nothing was recorded — not that the load was off.", renderCoverage],
+];
+
+function render(doc) {
+  state.doc = doc;
+  const errs = $("errors");
+  errs.replaceChildren();
+  (doc.errors || []).forEach((message) => {
+    const box = el("div", "err");
+    box.appendChild(el("b", null, "Could not load: "));
+    box.appendChild(document.createTextNode(message));
+    errs.appendChild(box);
+  });
+  renderKpis(doc);
+  const host = $("blocks");
+  host.replaceChildren();
+  SECTIONS.forEach(([title, blurb, fn]) => {
+    const c = card(title, blurb, null);
+    const tools = fn(doc, c.body);
+    if (tools) c.head.appendChild(tools);
+    host.appendChild(c.wrap);
+  });
+  const r = doc.range || {};
+  $("stamp").textContent =
+    `${r.start} → ${r.end} · ${r.days} day(s) · built ${doc.generated_utc}`
+    + (doc.cached ? " · served from cache" : "")
+    + (doc.source ? ` · ${doc.source.bucket}` : "");
+  if (doc.range) { $("from").value = r.start; $("to").value = r.end; }
+}
+
+async function load() {
+  document.body.classList.add("loading");
+  const q = state.start && state.end
+    ? `start=${state.start}&end=${state.end}`
+    : `days=${state.days}`;
+  try {
+    const res = await fetch(`/ui/history/data?${q}`, { headers: { accept: "application/json" } });
+    const doc = await res.json();
+    if (!res.ok) {
+      $("errors").replaceChildren();
+      const box = el("div", "err");
+      box.appendChild(el("b", null, `HTTP ${res.status}: `));
+      box.appendChild(document.createTextNode(doc.error || "request rejected"));
+      $("errors").appendChild(box);
+      return;
+    }
+    render(doc);
+  } catch (err) {
+    const box = el("div", "err");
+    box.appendChild(el("b", null, "Network: "));
+    box.appendChild(document.createTextNode(String(err)));
+    $("errors").replaceChildren(box);
+  } finally {
+    document.body.classList.remove("loading");
+  }
+}
+
+function buildPresets() {
+  const host = $("presets");
+  PRESETS.forEach((p) => {
+    const b = el("button", "preset", p.label);
+    b.type = "button";
+    b.dataset.days = String(p.days);
+    b.setAttribute("aria-pressed", String(p.days === state.days));
+    b.addEventListener("click", () => {
+      state.days = p.days; state.start = state.end = null;
+      host.querySelectorAll(".preset").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      urlFromState();
+      load();
+    });
+    host.appendChild(b);
+  });
+}
+$("apply").addEventListener("click", () => {
+  const from = $("from").value, to = $("to").value;
+  if (!from || !to) return;
+  state.start = from; state.end = to; state.days = null;
+  $("presets").querySelectorAll(".preset").forEach((x) => x.setAttribute("aria-pressed", "false"));
+  urlFromState();
+  load();
+});
+$("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.getAttribute("data-theme") === "dark"
+    || (!root.hasAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+  try { localStorage.setItem("energycap-theme", dark ? "light" : "dark"); } catch (e) { /* private mode */ }
+  if (state.doc) render(state.doc);
+});
+// ?theme=light|dark forces a mode for this load, so a link can carry it and a
+// screenshot can pin it. Otherwise: the saved choice, else the OS setting.
+const urlTheme = new URLSearchParams(location.search).get("theme");
+if (urlTheme === "light" || urlTheme === "dark") {
+  document.documentElement.setAttribute("data-theme", urlTheme);
+} else {
+  try {
+    const saved = localStorage.getItem("energycap-theme");
+    if (saved) document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) { /* private mode: fall through to the OS setting */ }
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (!document.documentElement.hasAttribute("data-theme") && state.doc) render(state.doc);
+});
+
+window.addEventListener("popstate", () => {
+  Object.assign(state, stateFromUrl());
+  syncPresets();
+  load();
+});
+
+function syncPresets() {
+  $("presets").querySelectorAll(".preset").forEach((b) =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.days) === state.days)));
+}
+
+buildPresets();
+syncPresets();
+load();
+</script>

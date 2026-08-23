@@ -144,6 +144,8 @@ __all__ = [
     "GAP_INTERVAL_FACTOR",
     "HOURLY_WINDOW_HOURS",
     "KWH_FORMULA",
+    "UI_HISTORY_DATA_PATH",
+    "UI_HISTORY_PAGE_PATH",
     "UI_HVAC_PAGE_PATH",
     "UI_HVAC_DATA_PATH",
     "handle_ui_hvac",
@@ -181,8 +183,20 @@ UI_DATA_PATH: str = "/ui/data"
 #: it answers one question and wants the whole width to do it (``hvacview``).
 UI_HVAC_PAGE_PATH: str = "/ui/hvac"
 UI_HVAC_DATA_PATH: str = "/ui/hvac/data"
+
+#: The archive view. Unlike the two above it reads S3, not the spool — the spool
+#: is a 7-day window by construction, so history has to come from somewhere else.
+UI_HISTORY_PAGE_PATH: str = "/ui/history"
+UI_HISTORY_DATA_PATH: str = "/ui/history/data"
 UI_PATHS: frozenset[str] = frozenset(
-    {UI_PAGE_PATH, UI_DATA_PATH, UI_HVAC_PAGE_PATH, UI_HVAC_DATA_PATH}
+    {
+        UI_PAGE_PATH,
+        UI_DATA_PATH,
+        UI_HVAC_PAGE_PATH,
+        UI_HVAC_DATA_PATH,
+        UI_HISTORY_PAGE_PATH,
+        UI_HISTORY_DATA_PATH,
+    }
 )
 
 PAGE_CONTENT_TYPE: str = "text/html; charset=utf-8"
@@ -194,6 +208,7 @@ PAGE_CONTENT_TYPE: str = "text/html; charset=utf-8"
 _PAGE_PACKAGE: str = "energy_capture"
 _PAGE_RESOURCE: str = "static/dashboard.html"
 _HVAC_PAGE_RESOURCE: str = "static/hvac.html"
+_HISTORY_PAGE_RESOURCE: str = "static/history.html"
 
 #: How far apart two consecutive samples may be before the line BREAKS. 1.5x the
 #: poll interval: one missed cycle is already a gap, and half an interval of
@@ -371,6 +386,7 @@ def _chart_points_sql(channels: int) -> str:
 
 _page_cache: str | None = None
 _hvac_page_cache: str | None = None
+_history_page_cache: str | None = None
 _page_lock = threading.Lock()
 
 
@@ -405,12 +421,63 @@ def render_hvac_page() -> str:
         return _hvac_page_cache
 
 
+def render_history_page() -> str:
+    """``static/history.html``, read once and cached — see :func:`render_page`."""
+    global _history_page_cache
+    with _page_lock:
+        if _history_page_cache is None:
+            _history_page_cache = (
+                resources.files(_PAGE_PACKAGE)
+                .joinpath(_HISTORY_PAGE_RESOURCE)
+                .read_text(encoding="utf-8")
+            )
+        return _history_page_cache
+
+
 def reset_page_cache() -> None:
     """Drop the cached pages (tests; and a dev editing the HTML in place)."""
-    global _page_cache, _hvac_page_cache
+    global _page_cache, _hvac_page_cache, _history_page_cache
     with _page_lock:
         _page_cache = None
         _hvac_page_cache = None
+        _history_page_cache = None
+
+
+def handle_ui_history(
+    store: StatusStore | None = None,
+    target: str | None = None,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """``(status, document)`` for ``GET /ui/history/data``.
+
+    A bad range is a **400** with a message, unlike ``/ui/hvac/data`` which falls
+    back to its default window: a history chart silently answering a different
+    question than the URL asked is worse than an error, because the reader has no
+    way to notice.
+
+    ``store`` is accepted and unused — this route reads S3, never the spool or
+    ``status.json`` — so the health server can dispatch every UI route the same
+    way.
+    """
+    from energy_capture import historyview
+
+    params = _query_params(target)
+    try:
+        rng = historyview.parse_range(params)
+    except historyview.RangeError as exc:
+        return 400, {"error": str(exc), "range": None, "errors": [str(exc)]}
+    return 200, historyview.build_document(rng, settings=settings, now=now)
+
+
+def _query_params(target: str | None) -> dict[str, str]:
+    """Parse ``?a=1&b=2`` out of a request target. Unknown keys are ignored."""
+    if not target or "?" not in target:
+        return {}
+    from urllib.parse import parse_qsl
+
+    return {k: v for k, v in parse_qsl(target.split("?", 1)[1], keep_blank_values=False)}
 
 
 def handle_ui_hvac(

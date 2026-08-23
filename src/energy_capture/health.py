@@ -775,15 +775,30 @@ class HealthServer:
                 )
             except Exception as exc:
                 return self._ui_error("hvac page could not be read", exc)
+        if path == dashboard.UI_HISTORY_PAGE_PATH:
+            try:
+                return (
+                    200,
+                    dashboard.render_history_page().encode("utf-8"),
+                    dashboard.PAGE_CONTENT_TYPE,
+                )
+            except Exception as exc:
+                return self._ui_error("history page could not be read", exc)
         for route, handler in (
             (dashboard.UI_DATA_PATH, dashboard.handle_ui_data),
             (dashboard.UI_HVAC_DATA_PATH, dashboard.handle_ui_hvac),
+            # Reads S3 through DuckDB rather than the spool, so it is the
+            # slowest route here by far -- which is exactly why the dispatch
+            # below hands every one of them to a worker thread.
+            (dashboard.UI_HISTORY_DATA_PATH, dashboard.handle_ui_history),
         ):
             if path != route:
                 continue
             try:
-                # Both read the spool and both are called from the loop that also
-                # runs the poll loops, so neither may block it.
+                # These are called from the loop that also runs the poll loops,
+                # so none of them may block it. The history route reads S3 and
+                # can take seconds; a blocked loop would stall the 50s Leviton
+                # keepalive and drop the hub.
                 status, snapshot = await asyncio.to_thread(handler, self._store, target)
             except Exception as exc:
                 return self._ui_error(f"{route} failed", exc)
