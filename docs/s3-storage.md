@@ -173,16 +173,22 @@ spool means the whole chain held. After a few clean days the job split unblocks.
 
 ## 10. Two things worth knowing before committing to this
 
-**PLAN.md's "tens of MB/year" is stale.** It was written for 14 channels. The panel retrofit
-took the collector to ~65 rows/cycle ≈ **187k rows/day**. At the ~10 bytes/row the existing
-Parquet files actually achieve (`meter/lge-202608.parquet` is 51 KB for 4,398 rows;
-`daily/bryant-202608.parquet` is 3.1 KB for ~460), that is **~2 MB/day ≈ 0.7–1.5 GB/year**
-for `raw_30s` — about 30× the spec's assumption.
+**PLAN.md's "tens of MB/year" is right, and the estimate that replaced it was wrong.**
+This section originally projected 0.7–1.5 GB/year for `raw_30s`, from ~10 bytes/row. Phase 1
+measured the real thing and it is **1.1–1.5 bytes/row** — zstd over long-format data is
+extraordinarily effective, because every column except `value` and `ts_utc` is a small
+repeating vocabulary that dictionary-encodes almost to nothing.
 
-It is still trivial money: **under $1/month** all in (storage in pennies, ~12k
-requests/month ≈ $0.06, and Athena scans fractions of a cent per query with partition
-projection). But it is why the 40 GB spool disk *needed* S3 rather than merely wanting it,
-and it is the number to use when sizing anything downstream.
+The measured numbers, from 140 real hourly parts: **694,557 rows in 1,251,413 bytes.** At the
+post-retrofit rate (~242k rows/day across 32 Leviton + 2 Bryant channel pairs) that is
+**~270 KB/day ≈ 100 MB/year**. So the spec's original order of magnitude stands and the
+correction was the error — worth stating plainly, because it is the number everything
+downstream gets sized against.
+
+Cost is therefore even less than "trivial": storage is cents per year, and the whole archive
+is smaller than the 1 GB per-query Athena scan cap. The reason the 40 GB spool disk needed S3
+was never volume — it was that nothing purges until rows are uploaded, so an unuploaded row
+is immortal.
 
 **Rollup rewrites the whole local day's file every hour** — by design, to avoid intra-day
 merge logic. With versioning on that is ~24 versions/day of a ~20 KB object. Harmless, and
@@ -251,3 +257,65 @@ until the versions go too. Confirmed: 0 versions, 0 delete markers.
 Also, for anyone driving the CLI here: `.env` exports `AWS_PROFILE=` (empty), which makes
 every `aws` call fail with `The config profile () could not be found`. `unset AWS_PROFILE`
 after sourcing any creds file.
+
+### Phase 1 — drain the backlog · **done 2026-08-23**
+
+**140 hours, 0 failed, 0 skipped, 694,557 rows, 65.6 seconds.** One scheduler firing at
+15:05Z, no manual intervention, no second spool writer.
+
+```
+upload_start  bucket=ericpullen-energycap hours=140 force=false
+upload_done   hours_uploaded=140 hours_failed=0 hours_skipped=0
+              rows=694557 marked=694557 last_hour_uploaded=2026-08-23T10 duration_s=65.59
+```
+
+| | before | after |
+|---|---|---|
+| `spool.pending_rows` | 687,585 | **1,008** (only the still-open hour, oldest `15:00:13Z`) |
+| `uploader.last_success_utc` | `null` since the instance was built | `2026-08-23T15:06:05Z` |
+| objects under `energy/raw_30s/` | 0 | **140** parts, 1,251,413 bytes total |
+| objects stranded in `energy/_tmp/` | — | **0** |
+
+#### What was verified, independently of the stage's own logging
+
+Read back from S3 with DuckDB `httpfs` under the `energycap-batch` key — which also
+pre-validates Phase 2's read path:
+
+- **694,557 rows in S3, and 694,557 distinct `(ts_utc, source, device_id, channel_id, metric)`
+  tuples.** Zero duplicates across 140 separately-written files.
+- **Local-date partitioning holds exactly**: 0 rows where `ts_local`'s date disagrees with the
+  `part-{YYYYMMDD}T{HH}` stamp of the file containing it. CLAUDE.md rule 4, confirmed on real
+  data rather than in a test.
+- **Rule 6 holds**: no day-grain metric and no `kWh` unit anywhere in `raw_30s`.
+- Partitions run `day=17` through `day=23`, and day 17 begins at `part-20260817T15.parquet` —
+  15:00 *local*, which is the 19:22Z first spool row. The partition boundary is the local one.
+- Split by source: leviton 511,279 + bryant 183,278 = 694,557.
+
+#### The poll loops never noticed
+
+This was the one real risk and it is now measured, not reasoned about. Across the 65-second
+upload the Leviton keepalive held `consecutive_failures: 0` with `connected_hubs: 2`, and both
+pollers kept their success stamps current. `runtime._call`'s `asyncio.to_thread` is doing
+exactly what its docstring claims, and a 140-hour catch-up is no threat to the 50-second
+keepalive that would drop the hub.
+
+`docker compose stop` also proved the clean-shutdown contract on the way in: the 4 MB `-wal`
+and the `-shm` were checkpointed fully into `spool.db` and removed, so nothing was recovered
+on restart.
+
+#### A query trap the verification turned up — for the UI work next
+
+**Never count or group Leviton channels by `channel_id` alone.** A naive
+`count(DISTINCT channel_id)` returns **24** where `/healthz` says 32, because eight
+`channel_id` values exist on *both* hubs — `breaker_p1`, `breaker_p10`, `breaker_p14`,
+`breaker_p26`, `ct_1_a`, `ct_1_b`, `panel_leg_a`, `panel_leg_b`. Both panels have a position 1.
+
+`count(DISTINCT (device_id, channel_id))` returns **32**, matching `channels_seen` and the 32
+mapped entries in `channel_map.json`. The canonical dedupe key includes `device_id` precisely
+for this reason, so the archive is correct — but any query, chart or dashboard that groups by
+`channel_id` will silently merge two circuits on different panels. Join through `dim_channel`,
+or group on the pair.
+
+Also visible in the first real archive: the retrofit is legible in the data. 10 channel pairs
+a day through 2026-08-21, 27 on the 22nd, 32 from the 23rd — ~97,900 rows/day before, ~242,000
+after.

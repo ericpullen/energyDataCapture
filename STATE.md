@@ -1,4 +1,4 @@
-# Where this project is — handoff, updated 2026-08-22
+# Where this project is — handoff, updated 2026-08-23
 
 A snapshot for picking the work back up. `PLAN.md` is still the spec of record and
 `DEVIATIONS.md` (163+ entries) is still the record of every departure from it; this file
@@ -54,11 +54,12 @@ A ~19-hour continuous run in the container (2026-08-17 19:22Z → 2026-08-18 14:
 
 ## What is still NOT proven
 
-1. **Nothing has ever touched AWS.** No `S3_BUCKET` is set. `upload`, `compact-daily`,
-   `rollup`, `build-dim`, `create-glue-tables` and `backfill` have never run against a real
-   bucket, so `PLAN.md` §16's "full manual cycle" is outstanding, and the Athena side of the
-   README is desk-checked rather than executed. Splitting the poller from the batch stages
-   forces this one, since S3 becomes the handoff between the two hosts.
+1. ~~**Nothing has ever touched AWS.**~~ — **partly resolved 2026-08-23.** `S3_BUCKET` is
+   set, `s3://ericpullen-energycap` exists, and **`upload` has run for real**: 140 hours,
+   694,557 rows, 0 failed. `docs/s3-storage.md` is the plan and the log. What is *still*
+   unproven is the rest of `PLAN.md` §16's cycle — `compact-daily`, `rollup`, `build-dim`,
+   `create-glue-tables` and `backfill` have not yet run against the bucket, and the Athena
+   side of the README is still desk-checked rather than executed.
    (LG&E is the exception: `fetch-greenbutton` and `compare-meter` are local-only by design
    and have both run against real data.)
 2. **The LaunchAgent has never been loaded** — KeepAlive, ThrottleInterval and reboot
@@ -581,6 +582,55 @@ another day), and `deviceHistory`'s `point` vocabulary is unexplored. Also worth
 next time: these input types are **non-null** (`GetRuntimeUsageInput!`), and a nullable
 declaration is a 400 with a validation message.
 
+## The archive exists — 2026-08-23
+
+The oldest gap in this project is closed. `docs/s3-storage.md` is the plan and the running
+record; this is the short version.
+
+**`s3://ericpullen-energycap`** (`us-east-1`), versioned, SSE-S3, all public access blocked,
+five lifecycle rules. **Two scoped IAM users** — `energycap-collector` on the instance
+(`PutObject`/`GetObject`/`DeleteObject` on `raw_30s/`, `daily/`, `meter/`, `_tmp/` and nothing
+else) and `energycap-batch` on the Mac (whole bucket + Glue + Athena). Creds at
+`~/code/energycap{Collector,Batch}Role.sh`, mode 600, outside the repo. The collector's
+denials on `energy/hourly/` and `glue:GetDatabases` are confirmed against the real API, so the
+always-on internet-facing box cannot touch derived data or the catalog. An `energycap` Athena
+workgroup, not `primary`, with a 1 GB per-query scan cap.
+
+**The first upload: 140 hours, 694,557 rows, 0 failed, 65.6 seconds**, in one scheduler firing
+with no manual intervention. `spool.pending_rows` went 687,585 → 1,008 (just the open hour).
+Verified by reading S3 back with DuckDB rather than trusting the stage's own counters:
+694,557 rows and **694,557 distinct dedupe tuples** across 140 separately-written files;
+**0 rows** where `ts_local`'s date disagrees with its file's `part-{YYYYMMDD}` stamp; no
+day-grain metric anywhere in `raw_30s`. Nothing stranded in `energy/_tmp/`.
+
+**The poll loops never noticed the 65-second upload** — keepalive `consecutive_failures: 0`,
+`connected_hubs: 2` throughout. `runtime._call`'s `asyncio.to_thread` is load-bearing and now
+measured rather than argued.
+
+### Three things worth carrying forward
+
+1. **`AWS_PROFILE=` is not "no profile".** It is a profile *named* empty string, and botocore
+   raises `ProfileNotFound` on every client build with perfectly valid static keys present —
+   `get_settings()` even reports `aws_profile = None`, because pydantic coerces it away.
+   Passing no `profile_name` does not help; botocore re-reads the variable itself. Caught in
+   pre-flight, or the first firing would have failed 140 hours. Fixed in `.env.example` and
+   defensively in `s3io._drop_empty_aws_profile()`. DEVIATIONS #176.
+2. **Never group Leviton channels by `channel_id` alone.** `count(DISTINCT channel_id)` gives
+   **24**; the truth is **32**. Eight ids exist on *both* hubs — `breaker_p1`, `breaker_p10`,
+   `breaker_p14`, `breaker_p26`, `ct_1_a`, `ct_1_b`, `panel_leg_a`, `panel_leg_b` — because
+   both panels have a position 1. The dedupe key carries `device_id` so the archive is right,
+   but any chart grouping on `channel_id` silently merges two circuits on different panels.
+   **This one matters most for the UI work next.**
+3. **The volume estimate was wrong by 10× and PLAN.md was right.** zstd achieves
+   **1.1–1.5 bytes/row** on long-format data, not the ~10 assumed mid-plan: 694,557 rows in
+   1,251,413 bytes. Post-retrofit that is ~270 KB/day ≈ **100 MB/year** for `raw_30s`. The
+   whole year's archive is smaller than one Athena scan cap. The spool disk needed S3 because
+   unuploaded rows never purge, not because of volume.
+
+**Next:** `compact-daily` → `rollup` → `build-dim` → `create-glue-tables` over
+2026-08-17..22, then `energy_meter` (the fifth Glue table, never built) and the mirror of the
+nine local day-grain month files. `docs/s3-storage.md` §6–§8.
+
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep
@@ -655,16 +705,16 @@ to be the always-on host, so it stays untested and no longer matters much.
 
 ## Also open
 
-- **Nothing has ever written to S3.** Still the biggest gap and now the blocker for the job
-  split above: `upload`, `compact-daily`, `rollup`, `build-dim`, `create-glue-tables` and
-  `backfill` have never run against a real bucket. `PLAN.md` §16's "full manual cycle" is
-  the next piece of work. (The account is `603071433332`; credentials via
-  `source ~/code/bryantDeployerRole.sh`, IAM user `bryantDataCollectorDeployer`, whose
-  Lightsail permissions are confirmed but whose S3/Glue permissions are not yet.)
-- **The Lightsail spool is now the only live copy of the history** (the Mac's stopped
-  `data/spool.db` is a static backup as of 2026-08-19 15:55Z). Nothing is uploaded, so
-  nothing purges and it just grows — ~35 MB/day against 40 GB. Getting S3 working is what
-  turns this from "one disk" into a real archive.
+- ~~**Nothing has ever written to S3.**~~ — **the archive is live as of 2026-08-23.** See
+  "The archive exists" below and `docs/s3-storage.md`. The remaining batch stages
+  (`compact-daily`, `rollup`, `build-dim`, `create-glue-tables`, `backfill`) are the next
+  piece of work, and they no longer block on infrastructure.
+- ~~**The Lightsail spool is the only live copy of the history**~~ — no longer true. Every
+  closed hour is in S3 within the hour. The purge is now *unblocked* but has not yet run:
+  it needs uploaded **and** older than `SPOOL_RETENTION_DAYS=7`, and the oldest rows are from
+  2026-08-17, so the first rows become eligible on **2026-08-24**. Watch the 01:30 job then —
+  a shrinking spool is the end-to-end proof. The Mac's stopped `data/spool.db` remains the
+  pre-migration backup from 2026-08-19 15:55Z.
 - ~~**New Leviton breakers** arriving ~2026-08-21~~ — **installed and mapped 2026-08-22.**
   See "The panel went almost fully smart" below. Both priority circuits from the first load
   analysis now have their own channel: **A-1-3 (dryer)** and **A-10-12** (kitchen
