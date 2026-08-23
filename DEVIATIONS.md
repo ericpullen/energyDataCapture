@@ -3497,6 +3497,46 @@ fix is harmless if the real cause was different, and change (1) means the next o
 arrives with its reason attached instead of as another silence.
 
 
+## 178. `dim_channel` gains a 14th column, `is_primary` — PLAN.md §9 lists thirteen
+
+§9 enumerates `dim_channel.parquet`'s columns and this is not among them. It is added anyway,
+because a comment shipped in Phase 3 promises it.
+
+`energy_meter`'s table description tells a reader: *"dim_channel marks the house primary — join
+it rather than hardcoding an id."* That sentence was written to stop the single most dangerous
+mistake available in that dataset — summing the house meter and the barn's EV charging as if they
+were one service. When it was written, `dim_channel` **did not have the column**, so the advice
+pointed at nothing. Either the comment was wrong or the schema was incomplete; the schema was.
+
+`primary` was already in `ENTRY_KEYS` and on `ChannelEntry`, already set in
+`config/channel_map.json` (`1308468`, the house), and already read by `meterview.primary_meter`
+— which loads `channel_map.json` directly for exactly this one fact. So the value existed and was
+in use; only the *published* semantic layer omitted it, which meant any consumer reading S3 alone
+— Athena, an LLM, the new history UI — had to hardcode a meter id or invent a heuristic ("the
+bigger one is the house"). That is precisely the knowledge §9 says belongs in the map rather than
+in code.
+
+Resolved to `bool`, non-nullable, defaulting `False`, taken from the entry and deliberately
+**not** inheritable from the blackstart inventory: a panel device knows nothing about which
+utility meter is the house. It sits beside `blackstart_device_id`, before `updated_at`, so the
+timestamp stays last.
+
+**Named `is_primary`, not `primary`, and that is not a style preference.** `PRIMARY` is a
+reserved SQL word — DuckDB refuses `SELECT ... primary FROM ...` outright with a parser error, so
+the column would have needed `"primary"` quoting in every query forever. The whole purpose of
+this layer is that a human or an LLM reads the comments and writes working SQL; a column you
+cannot name without quoting defeats that. The first build shipped as `primary` and the very first
+real query against it failed, which is how this was caught. The hand-edited `channel_map.json`
+key stays `primary` — it is JSON, never SQL — so the map reads naturally and only the published
+column carries the `is_` prefix.
+
+Consequences accepted: `DIM_SCHEMA` is a column wider, `build-dim` must be re-run before any
+consumer sees it (done, 46 rows), `create-glue-tables` must re-publish the table (done, updated
+in place), and the tests pinning "exactly §9's list" now pin fourteen columns with a pointer
+here. `meterview.primary_meter` is left reading `channel_map.json` — it runs beside the map on
+the Mac and does not need S3 — but it is no longer the *only* way to learn the fact.
+
+
 The remaining open questions — Okta token lifetimes and whether the refresh token rotates,
 whether the spoofed `Origin`/`Referer`/`Mobile-App-Brand` headers are load-bearing, the
 real domain of `status.mode`, the exact shape of `getInfinityEnergy`, the units behind

@@ -686,6 +686,8 @@ def _dim_table() -> pa.Table:
         "priority": "critical",
         "estimated_watts": 5000.0,
         "blackstart_device_id": "A-1-3",
+        # Non-nullable: a breaker is simply not the primary meter (#178).
+        "is_primary": False,
         "updated_at": utc(2026, 8, 16, 12),
     }
     return pa.Table.from_pylist([row], schema=glue.DIM_CHANNEL_SCHEMA)
@@ -772,6 +774,7 @@ def test_dim_channel_columns_are_exactly_plan_section_9s_list() -> None:
         "priority",
         "estimated_watts",
         "blackstart_device_id",
+        "is_primary",
         "updated_at",
     ]
 

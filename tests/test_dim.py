@@ -1049,7 +1049,13 @@ def test_the_cli_entrypoint_matches_this_module() -> None:
     assert callable(dim.build)
 
 
-def test_the_dim_columns_are_exactly_plan_9s_list() -> None:
+def test_the_dim_columns_are_plan_9s_list_plus_primary() -> None:
+    """PLAN.md §9 lists thirteen columns; `primary` is a deliberate 14th.
+
+    energy_meter's table comment tells readers "dim_channel marks the house
+    primary — join it rather than hardcoding an id", and that was a promise the
+    file could not keep. DEVIATIONS.md #178.
+    """
     assert dim.DIM_COLUMNS == (
         "source",
         "device_id",
@@ -1063,6 +1069,7 @@ def test_the_dim_columns_are_exactly_plan_9s_list() -> None:
         "priority",
         "estimated_watts",
         "blackstart_device_id",
+        "is_primary",
         "updated_at",
     )
     assert dim.DIM_COLUMNS[:3] == model.DIM_KEY

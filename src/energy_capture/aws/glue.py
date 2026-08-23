@@ -852,6 +852,12 @@ _DIM_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
         "config/channel_map.json overrides it."
     ),
     "short_label": "Compact form of label, for chart axes and narrow tables.",
+    "is_primary": (
+        "TRUE for the one channel a whole-system comparison should use where a "
+        "source exposes several. Only energy_meter needs it: 1308468 is the "
+        "HOUSE, 1326254 the separately metered BARN. Join on this rather than "
+        "hardcoding a meter id; never sum the two."
+    ),
     "panel": (
         "Which load center the channel belongs to, as the blackstart inventory "
         "names it (e.g. 'A', 'B'). NULL for channels that are not breakers."

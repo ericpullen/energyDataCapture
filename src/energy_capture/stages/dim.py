@@ -245,6 +245,17 @@ DIM_SCHEMA: pa.Schema = pa.schema(
         pa.field("priority", pa.string(), nullable=True),
         pa.field("estimated_watts", pa.float64(), nullable=True),
         pa.field("blackstart_device_id", pa.string(), nullable=True),
+        # Which channel a whole-system comparison should use when one source
+        # exposes several. Two LG&E meters exist -- the house and a separately
+        # metered barn -- and only the house has panel CTs to compare against.
+        # It was already in ENTRY_KEYS and on ChannelEntry; it was never written
+        # to the Parquet, so energy_meter's table comment ("dim_channel marks
+        # the house primary -- join it rather than hardcoding an id") was a
+        # promise the file could not keep. DEVIATIONS.md #178.
+        # `is_primary`, not `primary`: PRIMARY is a reserved SQL word and DuckDB
+        # rejects it unquoted, which would make every query through this layer
+        # need `"primary"`. The hand-edited channel_map.json key stays `primary`.
+        pa.field("is_primary", pa.bool_(), nullable=False),
         pa.field("updated_at", pa.timestamp("us", tz="UTC"), nullable=False),
     ]
 )
@@ -854,6 +865,10 @@ class DimRow:
     estimated_watts: float | None
     blackstart_device_id: str | None
     updated_at: datetime
+    #: Last so it can carry a default: almost no channel is primary, and
+    #: `build_table` maps fields to columns BY NAME, so this ordering is
+    #: independent of DIM_SCHEMA's (where it precedes `updated_at`).
+    is_primary: bool = False
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -927,6 +942,7 @@ def _resolve_entry(
         priority=pick("priority"),
         estimated_watts=pick("estimated_watts"),
         blackstart_device_id=entry.blackstart_device_id,
+        is_primary=entry.primary,
         updated_at=entry.updated_at or default_updated_at,
     )
 

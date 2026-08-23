@@ -757,8 +757,12 @@ def _dim_table() -> pa.Table:
         ("bryant", SERIAL, "eheat", "Electric strips", "Strips",
          None, None, "hvac", None, None, None, None),
     ]
-    columns = dict(zip(dim.DIM_COLUMNS[:-1], zip(*records), strict=True))
+    # The tuples above cover every column except the two trailing ones set
+    # below: `primary` (#178) and `updated_at`. None of these fixtures is the
+    # primary meter -- they are breakers and Bryant components.
+    columns = dict(zip(dim.DIM_COLUMNS[:-2], zip(*records), strict=True))
     data = {name: list(values) for name, values in columns.items()}
+    data["is_primary"] = [False] * len(records)
     data["updated_at"] = [updated] * len(records)
     return pa.table(data, schema=dim.DIM_SCHEMA)
 
