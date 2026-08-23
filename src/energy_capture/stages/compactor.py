@@ -282,7 +282,7 @@ def compact_day(
             duplicates_dropped=input_rows - rows,
             parts=len(part_keys),
             rewrote=not unchanged,
-            pass_=attempt,
+            compaction_pass=attempt,
         )
 
         if part_keys:
@@ -315,7 +315,7 @@ def compact_day(
             "compact_parts_reappeared",
             local_day=local_day.isoformat(),
             keys=remaining,
-            pass_=attempt,
+            compaction_pass=attempt,
         )
 
     raise CompactionError(

@@ -627,9 +627,36 @@ measured rather than argued.
    whole year's archive is smaller than one Athena scan cap. The spool disk needed S3 because
    unuploaded rows never purge, not because of volume.
 
-**Next:** `compact-daily` → `rollup` → `build-dim` → `create-glue-tables` over
-2026-08-17..22, then `energy_meter` (the fifth Glue table, never built) and the mirror of the
-nine local day-grain month files. `docs/s3-storage.md` §6–§8.
+### Phase 2 also done — the batch stages ran against the bucket
+
+`compact-daily` (6 days, 583,677 rows, 129 parts archived, 0 duplicates), `rollup` (4,979
+rows) and `build-dim` (46 rows, `unmapped_count: 0`) have all now run for real. PLAN.md §16's
+manual cycle is complete except `create-glue-tables`.
+
+- **The no-double-count invariant holds structurally**: days 17–22 have exactly one day file
+  and zero parts, day 23 has 11 parts and no day file, no day has both. 694,557 rows before
+  compaction, 694,557 after, 694,557 distinct dedupe tuples.
+- **The kWh math re-derives to 4.4e-16** from outside the SQL, no non-`watts` row carries a
+  `kwh`, and `sum(sample_count)` reconciles to the raw row count with **difference 0**.
+- **It reproduces a pre-S3 measurement**: the feed CT pairs give **75.19 kWh** for 2026-08-18
+  where the live dashboard recorded **75.186** off the spool. Spool → part → day file → rollup
+  is lossless to three decimals.
+- `compact-daily` re-run over the same range is a verified no-op (`rewrote: false` everywhere).
+
+Two more UI-relevant facts: **`panel_leg_a`/`panel_leg_b` carry only `hz` and `volts`**, no
+watts and therefore no kWh — the house total is the feed CT pairs. And **never `sum(kwh)`
+across all channels**: the hierarchy nests, so a breaker's watts are also inside its panel's
+feed CT.
+
+Also fixed: `compact_day_verified` logged `pass_=1`, which the scrubber redacted because
+`_normalise_key` maps `pass_` → `pass` ∈ `SECRET_KEY_NAMES`. Renamed to `compaction_pass`; the
+scrubber was deliberately left greedy, and a new test walks the AST of every `log.*()` call in
+`src/` to catch the next collision.
+
+**Next:** `create-glue-tables`, plus `energy_meter` — the fifth table PLAN.md §13 specifies and
+`aws/glue.py:1195` documents, which has never been built. Then the mirror of the nine local
+day-grain month files (`energy/daily/` and `energy/meter/` are still empty in S3).
+`docs/s3-storage.md` §7–§8.
 
 ## Still ahead: split the poller from the batch stages
 

@@ -149,6 +149,11 @@ activemq-data/
 
 # Environments
 .env
+# Every .env variant, so a backup/copy can never be staged. `.env.example` is the
+# one committed file and is re-included below. (A `.env.bak-*` holding live
+# LEVITON/CARRIER/LGE credentials was staged once; caught before any push.)
+.env.*
+!.env.example
 .envrc
 .venv
 env/

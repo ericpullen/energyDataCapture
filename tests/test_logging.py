@@ -784,3 +784,61 @@ def test_a_reloaded_config_credential_is_picked_up(
     doc = only(stream)
     assert_absent(stream, new_password)
     assert doc["detail"] == f"leviton uses {REDACTED}"
+
+
+# ------------------------------------------------- diagnostic-vs-secret collisions
+
+
+def test_the_scrubber_still_redacts_pass_underscore() -> None:
+    """`pass_` must keep redacting — the scrubber is meant to be greedy.
+
+    `_normalise_key` strips non-alphanumerics, so `pass_` normalises to `pass`,
+    which is in `SECRET_KEY_NAMES`. That is the correct trade: a field the
+    scrubber over-redacts costs a diagnostic, while one it under-redacts costs a
+    credential. The fix for a collision belongs in the *caller's* field name, not
+    here — see the next test.
+    """
+    assert ec_logging.scrub({"pass_": 3}) == {"pass_": REDACTED}
+    assert ec_logging.scrub({"passwd": "x"}) == {"passwd": REDACTED}
+
+
+def test_no_log_call_in_src_uses_a_field_name_the_scrubber_will_eat() -> None:
+    """A diagnostic silently redacted is a diagnostic you do not have.
+
+    `stages/compactor.py` logged its compaction-pass counter as `pass_=` and it
+    came out as `***REDACTED***` in the first real S3 run, which is how this was
+    found. Renaming it to `compaction_pass` fixed it; this test stops the next
+    one. It deliberately scans the whole package rather than that one call, since
+    `auth=`, `token=` and `credentials=` are equally easy to reach for.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "src" / "energy_capture"
+    # Keys whose values genuinely ARE secrets are exempt: redaction is the point.
+    intentional = {"password", "passwd", "token", "authorization", "auth"}
+    offenders: list[str] = []
+
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # log.info(...) / log.warning(...) / self._log.error(...)
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr in {"debug", "info", "warning", "error", "critical"}
+            ):
+                continue
+            for kw in node.keywords:
+                if kw.arg is None:
+                    continue
+                normalised = ec_logging._normalise_key(kw.arg)
+                if normalised in ec_logging.SECRET_KEY_NAMES and normalised not in intentional:
+                    offenders.append(f"{path.name}:{node.lineno} {kw.arg}= -> '{normalised}'")
+
+    assert not offenders, (
+        "these log fields normalise onto SECRET_KEY_NAMES and will be redacted:\n  "
+        + "\n  ".join(offenders)
+    )

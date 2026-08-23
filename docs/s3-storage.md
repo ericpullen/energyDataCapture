@@ -319,3 +319,79 @@ or group on the pair.
 Also visible in the first real archive: the retrofit is legible in the data. 10 channel pairs
 a day through 2026-08-21, 27 on the 22nd, 32 from the 23rd — ~97,900 rows/day before, ~242,000
 after.
+
+### Phase 2 — compact, roll up, dim · **done 2026-08-23**
+
+Run from the Mac under `energycap-batch`. These stages read S3 and never touch the spool,
+which is what makes the Mac safe for them.
+
+| stage | result |
+|---|---|
+| `compact-daily 2026-08-17..22` | 6 days, **583,677 rows**, 129 parts archived, **0 duplicates dropped**, 0 failed |
+| `rollup 2026-08-17..22` | 6 days, **4,979 rows**, hours 9/24/24/24/24/24, every write verified |
+| `build-dim` | **46 rows**, 0 placeholders, 24 from blackstart, `live_channels: 32`, `unmapped_count: 0` |
+
+Bucket after: `raw_30s/` 17 objects (6 day files + 11 parts for the open day),
+`raw_30s_parts_archive/` 129, `hourly/` 6, `dim_channel/` 1, `_tmp/` **0**.
+
+#### The no-double-count invariant holds
+
+PLAN.md §10's whole reason for the archive prefix. Verified structurally, not assumed:
+days 17–22 have **exactly one day file each and zero parts**, day 23 has **11 parts and no day
+file**, and **no day has both**. The archive prefix holds the 129 moved parts — 583,677 rows,
+a strict duplicate of the day files rather than extra data, and it is not covered by any Glue
+table location.
+
+Row count through compaction: **694,557 before, 694,557 after, 694,557 distinct dedupe
+tuples.** Nothing lost, nothing duplicated.
+
+#### The kWh math, re-derived from outside the SQL
+
+- `kwh` recomputed independently as `mean * sample_count * 30 / 3.6e6` over all 1,274 watt
+  rows: **max absolute error 4.4e-16**. The rollup SQL is doing exactly what §2.5 specifies.
+- **0** non-`watts` rows carry a `kwh` — observed-time-only, watts only.
+- `sum(sample_count)` over the rolled-up hours = **583,677** = the raw row count for those
+  days, **difference 0**. This is the gap-accounting contract: `sample_count` is what
+  distinguishes "the load was off" from "the collector was down", and it reconciles exactly.
+- 24 physical hours per full local day (no DST in this range), 9 for the partial first day.
+
+**And it reproduces a number measured independently, before S3 existed.** The two panel feed
+CT pairs sum to **75.19 kWh for 2026-08-18**; the live dashboard, computing from the spool at
+the time, recorded **75.186** against a meter reading of 77.614 (−3.1%). The full chain —
+spool → hourly part → day file → rollup — returns the same answer to three decimal places.
+
+#### `dim_channel` joins, and the two rows that do not
+
+34 of the rollup's 36 `(source, device_id, channel_id)` series join. The two that do not are
+**`breaker_p0` on both hubs**, one hour each, 38 samples apiece — the phantom un-positioned
+breaker of DEVIATIONS #171. That is the designed outcome, not a defect: the rows stay in raw
+because rule 2 says record what the API said, and they are absent from `dim_channel` because
+the channel is a fiction. A UI must choose deliberately between a LEFT JOIN (two unlabelled
+series) and an INNER JOIN (two silently dropped).
+
+#### Two things for the UI work
+
+- **`panel_leg_a`/`panel_leg_b` carry only `hz` and `volts`** — no `watts`, so no `kwh`. They
+  are a voltage/frequency reference, not an energy series. The house total is the **feed CT
+  pairs** (`ct_1_a`/`ct_1_b` across both hubs), which is what matches the meter.
+- **Never `sum(kwh)` across all channels.** The hierarchy nests — a breaker's watts are also
+  inside its panel's feed CT — so an unqualified total double-counts. Pick a level.
+
+#### A redaction false positive, found by reading the real logs
+
+`compact_day_verified` logged `pass_=1` and it came out as `"pass_": "***REDACTED***"`.
+`logging._normalise_key` strips non-alphanumerics, so `pass_` normalises to `pass`, which is in
+`SECRET_KEY_NAMES`. The scrubber is right and was left alone — over-redacting costs a
+diagnostic, under-redacting costs a credential, and that trade should not be reversed. The
+field was renamed to `compaction_pass`, which logs as a number.
+
+Two tests were added: one pinning that `pass_` *still* redacts (so nobody "fixes" this by
+weakening the scrubber), and one that walks the AST of every `log.*()` call in
+`src/energy_capture/` and fails if any keyword normalises onto `SECRET_KEY_NAMES`. `pass_` was
+the only offender; `auth=`, `token=` and `credentials=` are equally easy to reach for.
+
+#### Idempotency, proven rather than assumed
+
+`compact-daily` re-run over the identical range: every day `rewrote: false`, `parts: 0`,
+`parts_archived: 0`, `duplicates_dropped: 0`, same 583,677 rows. A second run is a no-op that
+still verifies.
