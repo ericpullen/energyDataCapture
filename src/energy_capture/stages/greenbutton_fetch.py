@@ -167,6 +167,17 @@ def run(
         parsed, destination, source=source, dry_run=dry_run
     )
 
+    # A SCHEDULED fetch mirrors automatically when a bucket exists — the same
+    # rule `fetch-daily` follows (stages/daily.py, and stages/dailystore's
+    # docstring). Without this the nightly `greenbutton_daily` job passed no
+    # bucket and the meter dataset never reached S3 at all even with S3_BUCKET
+    # set, which is exactly the failure DEVIATIONS.md #173 describes for Bryant.
+    # `import-greenbutton` deliberately does NOT do this: an import is a manual
+    # act on a file a human just downloaded, and it must not fan out by surprise.
+    from energy_capture.aws import s3io  # local: keeps boto3 off the import path
+
+    target_bucket = bucket if bucket is not None else s3io.configured_bucket()
+
     summary: dict[str, Any] = {
         "fetched_at": timeutil.format_utc(datetime.now(UTC)),
         "start": start.isoformat(),
@@ -175,6 +186,12 @@ def run(
         "dry_run": dry_run,
         **parsed.to_dict(),
     }
-    if bucket and not dry_run:
-        summary["s3"] = greenbutton._upload_months(destination, written, bucket, source)
+    if target_bucket and not dry_run:
+        summary["s3"] = greenbutton._upload_months(
+            destination, written, target_bucket, source
+        )
+    elif dry_run:
+        summary["s3"] = "dry run"
+    else:
+        summary["s3"] = "no bucket configured (local only)"
     return summary

@@ -692,9 +692,59 @@ Test table counts are now derived from `ALL_TABLES`, and
 double counts — which is why `interval_s` is in this table's dedupe key and no other's. And the
 two meters (house `1308468`, barn `1326254`) must never be summed.
 
-**Next:** Phase 4 — mirror the nine local day-grain month files. `energy/daily/` and
-`energy/meter/` are created but **empty**, and `greenbutton_daily` still passes no bucket
-(`runtime.py:554`). `docs/s3-storage.md` §8.
+### Phase 4 done — all five datasets hold data. 174 objects, 2.15 MB
+
+`backfill` ran against real DynamoDB and S3 for the first time: **3,728 rows, 233 days, 8
+months, 0 failed** (`2026-01-02..08-22`). Athena agrees with the pre-S3 figures — hpheat 2,954
+kWh, cooling 2,464, fan 1,727, eheat 1,277. The 3,728 vs STATE's earlier 3,712 is one extra day
+(`08-22`), not a discrepancy. The batch key gained read-only DynamoDB on the one legacy table;
+the collector key still has none.
+
+`energy/meter/` holds **4,598 rows** — both meters, both interval series, `08-01..08-20`, no
+retired ids — pushed through the production writer and verified in S3.
+
+**The meter trap, now measured rather than asserted.** House meter `1308468` reads **1578.69
+kWh** as a 900s series and **1577.74 kWh** as a 3600s series: the same energy, 0.06% apart,
+published twice. `SELECT sum(value) FROM energy_meter` returns **3,113 kWh for 2,056 kWh of real
+consumption**, and it looks entirely plausible. Pin `interval_s`, always. And never sum house +
+barn.
+
+**`greenbutton_fetch` now mirrors by default** (`s3io.configured_bucket()`, the line
+`daily.py:838` always had). Before this the nightly job passed no bucket, so `energy/meter/`
+would have stayed empty forever even with `S3_BUCKET` set — DEVIATIONS #173's failure in the one
+dataset that had not yet hit it. `import-greenbutton` still does **not** mirror: an import is a
+manual act and must not fan out by surprise. Two tests pin the asymmetry.
+
+### ACTION NEEDED: the LG&E authorisation has lapsed
+
+`{SPOOL_DIR}/tokens/lge.json` is **gone**. LG&E rejected the refresh grant sometime after
+2026-08-20 and `lge_auth.py:488` cleared the cache deliberately — presenting a rejected
+credential is how a registration gets disabled. Meter data stops at 08-20, which dates it.
+
+What hid it: `_job_greenbutton_daily` returns `{"skipped": "not_authorized"}` **quietly** by
+design, so an unauthorised deployment does not log a failure every morning. Right default,
+and the reason three days passed unnoticed. The earlier "registered, approved, authorised and
+fetching" note above was true when written and is now stale.
+
+Fixing it is a browser round trip only the owner can do:
+
+```bash
+ssh -i ~/.ssh/energycap-lightsail.pem ubuntu@13.219.164.226
+cd ~/energyDataCapture
+docker compose exec energycap energycap greenbutton-authorize     # open the URL, consent
+docker compose exec energycap energycap greenbutton-authorize --code "<code>" --state "<state>"
+docker compose exec energycap energycap fetch-greenbutton --start 2026-08-15 --end 2026-08-23
+```
+
+Worth building afterwards: a `/healthz` staleness field for the meter, because a quiet skip is
+indistinguishable from a healthy system from outside.
+
+**Also open:** the instance still runs `f786dfb`, so the nightly meter mirror needs this branch
+deployed. And **`backfill` has no `--dry-run`**, which DEVIATIONS #75 tells you to use — the
+spec and the CLI disagree.
+
+**Next:** Phase 5 — confirm the spool purges. The first rows cross the 7-day floor on
+2026-08-24; watch the 01:30 job. `docs/s3-storage.md` §9.
 
 ## Still ahead: split the poller from the batch stages
 

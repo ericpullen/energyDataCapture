@@ -23,6 +23,8 @@ import httpx
 import pyarrow.parquet as pq
 import pytest
 
+from tests.conftest import BUCKET
+
 from energy_capture import timeutil
 from energy_capture.config import Settings
 from energy_capture.sources.lge_auth import (
@@ -201,13 +203,15 @@ def test_a_fetch_lands_the_same_rows_a_download_would(
     greenbutton.run(path=downloaded, out_dir=tmp_path / "via_file")
 
     client, _ = transport(lambda r: httpx.Response(200, text=document))
-    greenbutton_fetch.run(
+    summary = greenbutton_fetch.run(
         start=date(2026, 8, 16),
         end=date(2026, 8, 16),
         out_dir=tmp_path / "via_api",
         auth=authorized,
         client=client,
+        bucket="",  # local only: a fetch now mirrors whenever S3_BUCKET is set
     )
+    assert summary["s3"] == "no bucket configured (local only)"
 
     by_file = pq.read_table(tmp_path / "via_file" / "lge-202608.parquet")
     by_api = pq.read_table(tmp_path / "via_api" / "lge-202608.parquet")
@@ -224,12 +228,12 @@ def test_refetching_an_overlapping_range_corrects_rather_than_duplicates(
     client, _ = transport(lambda r: httpx.Response(200, text=espi([(start, 900, 400)])))
     greenbutton_fetch.run(
         start=date(2026, 8, 16), end=date(2026, 8, 16),
-        out_dir=out, auth=authorized, client=client,
+        out_dir=out, auth=authorized, client=client, bucket="",
     )
     client, _ = transport(lambda r: httpx.Response(200, text=espi([(start, 900, 550)])))
     greenbutton_fetch.run(
         start=date(2026, 8, 16), end=date(2026, 8, 16),
-        out_dir=out, auth=authorized, client=client,
+        out_dir=out, auth=authorized, client=client, bucket="",
     )
 
     table = pq.read_table(out / "lge-202608.parquet")
@@ -244,7 +248,7 @@ def test_an_empty_range_writes_nothing_rather_than_an_empty_file(
     client, _ = transport(lambda r: httpx.Response(200, text=espi([])))
     summary = greenbutton_fetch.run(
         start=date(2026, 8, 16), end=date(2026, 8, 16),
-        out_dir=tmp_path / "meter", auth=authorized, client=client,
+        out_dir=tmp_path / "meter", auth=authorized, client=client, bucket="",
     )
     assert summary["rows"] == 0
     assert summary["files"] == []
@@ -294,3 +298,53 @@ def test_the_window_uses_the_only_filter_format_lge_accepts(
         assert value.endswith("Z"), f"{value!r} without a Z is a 400"
         assert "." not in value, f"{value!r} carries microseconds"
         assert not value.isdigit(), "epoch seconds are rejected by LG&E"
+
+
+def test_a_scheduled_fetch_mirrors_to_s3_without_being_told_to(
+    settings: Settings, authorized: LgeAuth, tmp_path: Path, s3
+) -> None:
+    """The gap this closes: `greenbutton_daily` passed no bucket, so the meter
+    dataset never reached S3 even with S3_BUCKET set — `energy/meter/` stayed
+    empty while `energy/daily/` filled up. Same failure DEVIATIONS.md #173
+    describes for Bryant, and the same fix: a SCHEDULED stage mirrors when a
+    bucket exists, rather than requiring --bucket every night.
+    """
+    from energy_capture.aws import s3io
+
+    start = int(datetime(2026, 8, 16, 16, tzinfo=UTC).timestamp())
+    client, _ = transport(
+        lambda r: httpx.Response(200, text=espi([(start, 900, 412)]))
+    )
+
+    summary = greenbutton_fetch.run(
+        start=date(2026, 8, 16),
+        end=date(2026, 8, 16),
+        out_dir=tmp_path / "meter",
+        auth=authorized,
+        client=client,
+    )
+
+    key = s3io.meter_key(date(2026, 8, 1))
+    assert summary["s3"] == [key]
+    assert s3io.key_exists(BUCKET, key, client=s3)
+    assert s3io.parquet_row_count(BUCKET, key, client=s3) == 1
+
+
+def test_an_import_never_fans_out_to_s3_on_its_own(
+    settings: Settings, tmp_path: Path, s3
+) -> None:
+    """The deliberate asymmetry. An import is a manual act on a file a human just
+    downloaded; it must not push to the archive by surprise. Only the scheduled
+    fetch does that.
+    """
+    from energy_capture.aws import s3io
+    from energy_capture.stages import greenbutton
+
+    start = int(datetime(2026, 8, 16, 16, tzinfo=UTC).timestamp())
+    path = tmp_path / "gb.xml"
+    path.write_text(espi([(start, 900, 412)]))
+
+    summary = greenbutton.run(path=path, out_dir=tmp_path / "meter")
+
+    assert "not uploaded" in str(summary["s3"])
+    assert not s3io.key_exists(BUCKET, s3io.meter_key(date(2026, 8, 1)), client=s3)

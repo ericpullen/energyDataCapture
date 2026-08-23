@@ -870,7 +870,13 @@ def fetch_greenbutton_cmd(
     ] = None,
     bucket: Annotated[
         str | None,
-        typer.Option("--bucket", help="Also mirror the month files to this S3 bucket."),
+        typer.Option(
+            "--bucket",
+            help=(
+                "Also mirror the month files to this S3 bucket. Defaults to "
+                "S3_BUCKET when one is configured, like fetch-daily."
+            ),
+        ),
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Fetch and report; write nothing.")

@@ -467,3 +467,111 @@ and does not build" line now names the built table and repeats the `interval_s` 
 `tests/test_docs.py` enforces that seam, and caught both the omission and — when the fix
 mentioned `energy_meter` in backticks inside the metric cell — a table name being parsed as a
 metric name.
+
+### Phase 4 — the day-grain datasets · **done 2026-08-23, with one thing blocked on you**
+
+All five datasets now hold data. **174 objects, 2.15 MB** total.
+
+| prefix | objects | bytes |
+|---|---|---|
+| `energy/raw_30s/` | 17 | 934,790 |
+| `energy/raw_30s_parts_archive/` | 129 | 1,127,722 |
+| `energy/hourly/` | 6 | 115,019 |
+| `energy/daily/` | **8** | 27,937 |
+| `energy/meter/` | **1** | 38,959 |
+| `energy/dim_channel/` | 1 | 6,345 |
+| `energy/_tmp/` | **0** | 0 |
+
+#### Bryant day-grain: `backfill` executed against real DynamoDB and S3
+
+**3,728 rows, 233 days, 8 months, 0 failed** — `2026-01-02..2026-08-22`, the whole history the
+old Lambda ever wrote. This is another never-executed stage now proven end to end.
+
+`records: 235` = 233 from DynamoDB + 2 legacy JSON, and `rows_from_legacy_json: 0` because the
+DynamoDB rows superseded them on the dedupe key.
+
+STATE.md recorded 3,712 rows from the instance's earlier local-only run; this is **3,728**
+because that run ended at `08-21` and this one includes `08-22` — one more day at 16
+component-metrics. Not a discrepancy.
+
+Athena agrees with the numbers recorded before S3 existed: hpheat 2,954 kWh, cooling 2,464,
+fan 1,727, eheat 1,277 over 233 days. `reheat`, `fangas`, `gas` and `looppump` are 0.0 on all
+233 days — the components this house does not have, written as zeros by `backfill` because,
+as the table comment says, we cannot know retroactively which components were disabled.
+
+The batch key gained **read-only DynamoDB on the single table** `bryant-energy-data`
+(`Scan`/`Query`/`DescribeTable`, policy v3). `backfill` is a batch stage and belongs on the
+Mac; the collector key still has no DynamoDB access at all.
+
+Worth noting against DEVIATIONS #75, which says to run the first backfill with `--dry-run` and
+read the diagnostic counters first: **`backfill` has no `--dry-run` option.** The advice cannot
+be followed as written. It was safe to skip — the stage writes local-first, regenerates whole
+months, and is byte-identical on a re-run — but the spec and the CLI disagree.
+
+#### LG&E meter: mirrored, and the authorisation has lapsed
+
+`energy/meter/` now holds the **4,598 rows** already on the instance's disk — both meters, both
+interval series, `2026-08-01..08-20`, no retired ids. Pushed through the production writer
+(`greenbutton._upload_months` → `s3io.write_table_atomic`), verified at 4,598 rows in S3.
+
+**But `fetch-greenbutton` cannot fetch anything new: `{SPOOL_DIR}/tokens/lge.json` is gone.**
+LG&E rejected the refresh grant at some point after 2026-08-20, and `lge_auth.py:488` cleared
+the cache on purpose — "continuing to present a credential the custodian has rejected is how a
+registration gets disabled". The data stopping at 08-20 dates it.
+
+**What hid it:** `_job_greenbutton_daily` returns `{"skipped": "not_authorized"}` when the token
+file is absent — quietly, by design, so an unauthorised deployment does not accumulate a
+failing job every morning. That is the right default and it is also why nobody noticed for
+three days. STATE.md's "fetching, all on 2026-08-18" was true when written and is now stale.
+
+**This needs you**: `energycap greenbutton-authorize` is a browser round trip nobody can do on
+your behalf.
+
+```bash
+ssh -i ~/.ssh/energycap-lightsail.pem ubuntu@13.219.164.226
+cd ~/energyDataCapture
+docker compose exec energycap energycap greenbutton-authorize
+# open the URL it prints, consent, then:
+docker compose exec energycap energycap greenbutton-authorize --code "<code>" --state "<state>"
+docker compose exec energycap energycap fetch-greenbutton --start 2026-08-15 --end 2026-08-23
+```
+
+Worth considering afterwards: a `/healthz` field or an alert for "meter data is more than N
+days stale", since a quiet skip is indistinguishable from a working system from the outside.
+
+#### The nightly meter mirror is fixed in code
+
+`greenbutton_fetch.run` now defaults its bucket to `s3io.configured_bucket()`, the same line
+`stages/daily.py:838` has always had. Before this, `_job_greenbutton_daily` passed **no bucket
+at all**, so `energy/meter/` would have stayed empty forever even with `S3_BUCKET` set — the
+exact failure DEVIATIONS #173 records for Bryant, in the one dataset that had not yet hit it.
+
+The asymmetry is deliberate and now pinned by two tests: a **scheduled fetch** mirrors when a
+bucket exists; `import-greenbutton` does **not**, because an import is a manual act on a file a
+human just downloaded and must not fan out to the archive by surprise.
+
+Making a fetch mirror by default also broke three tests that had been quietly relying on
+`run()` never touching S3 — the outbound-network guard caught them attempting a real upload to
+the conftest bucket. They now say `bucket=""` explicitly, which is more honest than the
+implicit local-only they depended on.
+
+**The instance is still running the old code** (`f786dfb`), so the nightly job will not mirror
+until this branch is deployed. The mirror above was done with an explicit `--bucket`.
+
+#### The meter trap, demonstrated rather than asserted
+
+The warning written into `energy_meter`'s comment in Phase 3, now measured in Athena:
+
+| device_id | interval_s | kWh | rows |
+|---|---|---|---|
+| 1308468 (house) | 900 | **1578.69** | 1,843 |
+| 1308468 (house) | 3600 | **1577.74** | 460 |
+| 1326254 (barn) | 900 | 478.35 | 1,836 |
+| 1326254 (barn) | 3600 | 479.10 | 459 |
+
+The same energy, 0.06% apart, published twice. `SELECT sum(value) FROM energy_meter` returns
+**3,113 kWh for 2,056 kWh of actual consumption** — and it looks perfectly reasonable. This is
+the single easiest way to be badly wrong with this data, and it is why `interval_s` is in this
+table's dedupe key and in its column comment.
+
+One more thing not summed: house + barn. They are separate services.
