@@ -351,3 +351,111 @@ def test_the_callback_path_matches_the_button_on_the_published_page() -> None:
         / "site" / "greenbutton" / "callback" / "index.html"
     ).read_text(encoding="utf-8")
     assert greenbutton_auth.CALLBACK_PATH in page
+
+
+# =========================================================================
+# Proactive refresh: exercise the refresh token daily, not every other day
+# =========================================================================
+
+
+def _token(lifetime_h: float, age_h: float) -> tuple[LgeToken, datetime]:
+    obtained = datetime(2026, 8, 23, 15, 50, tzinfo=UTC)
+    token = LgeToken(
+        access_token="a",
+        refresh_token="r",
+        obtained_at=obtained,
+        expires_at=obtained + timedelta(hours=lifetime_h),
+    )
+    return token, obtained + timedelta(hours=age_h)
+
+
+def test_the_refresh_threshold_scales_with_the_tokens_own_lifetime() -> None:
+    """LG&E issues a 24h access token; a flat 300s margin never fires.
+
+    `greenbutton_daily` runs once a day, so with a 300s margin it always found
+    the token already dead and refreshed *reactively* — leaving the refresh token
+    unused for nearly two days at a stretch. A third of the lifetime means a
+    daily job refreshes daily.
+    """
+    token, _ = _token(lifetime_h=24, age_h=0)
+    assert token.lifetime_s() == pytest.approx(24 * 3600)
+    assert token.refresh_threshold_s() == pytest.approx(8 * 3600)
+
+
+def test_a_daily_job_now_refreshes_a_24_hour_token_every_day() -> None:
+    """The concrete regression: 21.4h old (09:15 local, authorised 15:50Z)."""
+    token, now = _token(lifetime_h=24, age_h=21.4)
+    assert token.is_fresh(now) is False, "the daily job must refresh here"
+
+    token, now = _token(lifetime_h=24, age_h=1)
+    assert token.is_fresh(now) is True, "a fresh token must not be churned"
+
+
+def test_a_short_token_still_gets_the_flat_floor() -> None:
+    """A third of 10 minutes is 200s — below the floor, so the floor wins.
+
+    Without the floor a very short-lived token would be considered stale the
+    moment it was issued, and every call would refresh.
+    """
+    token, _ = _token(lifetime_h=10 / 60, age_h=0)
+    assert token.refresh_threshold_s() == pytest.approx(300.0)
+
+
+def test_a_token_with_no_stated_expiry_is_always_fresh() -> None:
+    token = LgeToken(access_token="a", refresh_token="r", obtained_at=datetime.now(UTC))
+    assert token.expires_at is None
+    assert token.is_fresh(datetime.now(UTC)) is True
+    assert token.refresh_threshold_s() == pytest.approx(300.0)
+
+
+def test_an_explicit_margin_still_overrides(settings: Settings) -> None:
+    """Tests pin exact boundaries; production callers pass nothing."""
+    token, now = _token(lifetime_h=24, age_h=21.4)
+    assert token.is_fresh(now, margin=60.0) is True
+
+
+# =========================================================================
+# A revoked authorisation must be distinguishable from one never granted
+# =========================================================================
+
+
+def test_clearing_a_real_token_leaves_a_revocation_breadcrumb(tmp_path: Path) -> None:
+    """Deleting the token silently made revoked indistinguishable from absent.
+
+    `_job_greenbutton_daily` skips the never-authorised case QUIETLY on purpose,
+    so a revocation vanished into that same silence for three days.
+    """
+    cache = LgeTokenCache(tmp_path / "lge.json")
+    cache.save(LgeToken(access_token="a", refresh_token="r", obtained_at=datetime.now(UTC)))
+
+    cache.clear("LG&E rejected the refresh_token grant with HTTP 400")
+
+    assert not cache.path.exists()
+    marker = cache.revoked()
+    assert marker is not None
+    assert "HTTP 400" in marker["reason"]
+    assert marker["revoked_at"]
+    # The breadcrumb must never carry credential material.
+    raw = cache.revoked_path.read_text()
+    assert "\"r\"" not in raw and "access_token" not in raw
+    assert stat.S_IMODE(cache.revoked_path.stat().st_mode) == 0o600
+
+
+def test_a_deployment_that_never_authorised_leaves_no_breadcrumb(tmp_path: Path) -> None:
+    """Otherwise every fresh install would shout about a revocation it never had."""
+    cache = LgeTokenCache(tmp_path / "lge.json")
+    cache.clear("nothing to clear")
+    assert cache.revoked() is None
+    assert not cache.revoked_path.exists()
+
+
+def test_reauthorising_retires_the_breadcrumb(tmp_path: Path) -> None:
+    """The cure retires the alarm; otherwise one old revocation shouts forever."""
+    cache = LgeTokenCache(tmp_path / "lge.json")
+    cache.save(LgeToken(access_token="a", refresh_token="r", obtained_at=datetime.now(UTC)))
+    cache.clear("rejected")
+    assert cache.revoked() is not None
+
+    cache.save(LgeToken(access_token="a2", refresh_token="r2", obtained_at=datetime.now(UTC)))
+    assert cache.revoked() is None
+    assert not cache.revoked_path.exists()

@@ -116,6 +116,51 @@ _TEMP_PREFIX = ".status-"
 _TEMP_SUFFIX = ".json.tmp"
 
 
+
+def _meter_freshness(doc: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    """How stale the LG&E meter dataset is, measured on the DATA not the job.
+
+    ``last_success_utc`` is the wrong signal here: a fetch that succeeds and
+    returns nothing new looks perfectly healthy, which is precisely the state the
+    meter dataset sat in from 2026-08-20 while its authorisation was revoked
+    (DEVIATIONS.md #177). So this measures the age of the newest interval START
+    actually held.
+
+    **Deliberately does not flip ``ok`` or produce a 503.** The lag here is the
+    UTILITY's -- LG&E publishes days late and revises -- so it is not a fault of
+    this container and must not mark it unhealthy or invite a restart. It is
+    reported so a human or a dashboard can see it. What *is* loud is a revoked
+    authorisation, which fails ``greenbutton_daily`` and shows up in
+    ``consecutive_failures``.
+
+    Returns ``None`` when Green Button has never been fetched, so a deployment
+    that does not use it grows no permanently-stale field.
+    """
+    section = doc.get("greenbutton")
+    if not isinstance(section, dict):
+        return None
+    raw = section.get("newest_interval_utc")
+    newest = _parse_utc(raw) if isinstance(raw, str) else None
+    if newest is None:
+        return None
+    from energy_capture.config import get_settings  # lazy, as elsewhere here
+
+    threshold_days = max(0, int(get_settings().meter_stale_after_days))
+    age_s = (now - newest).total_seconds()
+    age_days = age_s / 86400.0
+    return {
+        "newest_interval_utc": raw,
+        "age_days": round(age_days, 3),
+        "stale_after_days": threshold_days,
+        "stale": age_days > threshold_days,
+        "note": (
+            "Staleness here is LG&E's publication lag, not collector downtime, "
+            "so it never fails /healthz. A REVOKED authorisation is what fails "
+            "the greenbutton_daily job."
+        ),
+    }
+
+
 def default_status_document() -> dict[str, Any]:
     """A fresh document with every PLAN.md §11 section present and empty.
 
@@ -413,13 +458,17 @@ class StatusStore:
                 }
             )
 
-        doc[HEALTH_SECTION] = {
+        health: dict[str, Any] = {
             "ok": ok,
             "now_utc": format_utc(now),
             "started_utc": format_utc(started),
             "stale_after_intervals": STALE_INTERVAL_MULTIPLIER,
             "checks": checks,
         }
+        meter = _meter_freshness(doc, now)
+        if meter is not None:
+            health["meter"] = meter
+        doc[HEALTH_SECTION] = health
         return (200 if ok else 503, doc)
 
     # ---------------------------------------------------------------- internals

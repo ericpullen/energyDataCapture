@@ -55,6 +55,22 @@ log = get_logger("lge_auth")
 #: only cost of being early is a refresh grant nobody notices.
 REFRESH_MARGIN_S: Final[float] = 300.0
 
+#: Refresh once the token is inside its final third, not its final five minutes.
+#:
+#: LG&E issues a **24-hour** access token, and `greenbutton_daily` fires once a
+#: day. With a flat 300s margin the job essentially never lands inside the
+#: refresh window, so it finds the token already dead and refreshes *reactively*
+#: -- which means the refresh token sits unused for nearly two days at a stretch.
+#: The 2026-08-20 lapse is consistent with that: the grant was rejected and
+#: `lge_auth` correctly dropped it (see `LgeTokenCache.clear`), and the most
+#: likely reason a refresh token goes stale is not being exercised.
+#:
+#: A fraction of the token's own lifetime scales to whatever the custodian
+#: issues: 8h for a 24h token (so a daily job always refreshes), still 300s for
+#: anything under ~15 minutes. Refreshing early is cheap and idempotent; the
+#: rotation is persisted before use either way.
+REFRESH_FRACTION: Final[float] = 1.0 / 3.0
+
 #: Assumed lifetime when the custodian states none. Short on purpose: guessing
 #: long means using a dead token and reporting a confusing 401.
 UNKNOWN_TOKEN_LIFETIME_S: Final[float] = 900.0
@@ -117,9 +133,38 @@ class LgeToken:
             return None
         return (self.expires_at - now).total_seconds()
 
-    def is_fresh(self, now: datetime, *, margin: float = REFRESH_MARGIN_S) -> bool:
+    def lifetime_s(self) -> float | None:
+        """Total issued lifetime, or ``None`` when the custodian stated neither end."""
+        if self.expires_at is None or self.obtained_at is None:
+            return None
+        span = (self.expires_at - self.obtained_at).total_seconds()
+        return span if span > 0 else None
+
+    def refresh_threshold_s(self) -> float:
+        """Seconds-remaining at or below which this token should be refreshed.
+
+        :data:`REFRESH_FRACTION` of the issued lifetime, floored at
+        :data:`REFRESH_MARGIN_S` so a very short token is not refreshed on every
+        single call.
+        """
+        lifetime = self.lifetime_s()
+        if lifetime is None:
+            return REFRESH_MARGIN_S
+        return max(REFRESH_MARGIN_S, lifetime * REFRESH_FRACTION)
+
+    def is_fresh(self, now: datetime, *, margin: float | None = None) -> bool:
+        """Whether the token is good enough to use without refreshing first.
+
+        ``margin`` overrides the computed threshold; tests use it to pin exact
+        boundaries. Left unset -- which is every production caller -- the
+        threshold scales with the token's own lifetime
+        (:meth:`refresh_threshold_s`).
+        """
         remaining = self.seconds_remaining(now)
-        return remaining is None or remaining > margin
+        if remaining is None:
+            return True
+        threshold = self.refresh_threshold_s() if margin is None else margin
+        return remaining > threshold
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -250,6 +295,9 @@ class LgeTokenCache:
         if state is not None:
             payload["pending_state"] = state
         self._write(payload)
+        # Re-authorising (or a successful refresh) is the cure, so it retires the
+        # breadcrumb. Otherwise a single old revocation would shout forever.
+        self.revoked_path.unlink(missing_ok=True)
 
     def save_state(self, state: str) -> None:
         payload = self._read() or {}
@@ -265,9 +313,56 @@ class LgeTokenCache:
         self._write(payload)
         return state if isinstance(state, str) else None
 
-    def clear(self) -> None:
-        """A token the custodian rejected is worse than no token at all."""
+    @property
+    def revoked_path(self) -> Path:
+        """Breadcrumb marking that a credential was REVOKED, not merely absent.
+
+        Sits beside the token cache and deliberately outlives it.
+        """
+        return self.path.with_name(f"{self.path.stem}-revoked.json")
+
+    def clear(self, reason: str = "the custodian rejected the credential") -> None:
+        """A token the custodian rejected is worse than no token at all.
+
+        Deleting the token is right, but deleting it *silently* made a revoked
+        authorisation indistinguishable from one that was never set up — and
+        ``_job_greenbutton_daily`` skips the never-set-up case quietly on purpose,
+        so a revocation vanished into that same silence for three days
+        (DEVIATIONS.md #177). So the deletion leaves a breadcrumb.
+
+        The marker holds **no credential material** — just when and why.
+        """
+        existed = self.path.exists()
         self.path.unlink(missing_ok=True)
+        if not existed:
+            return
+        try:
+            self.revoked_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=".lge-revoked-", suffix=".json.tmp", dir=str(self.revoked_path.parent)
+            )
+            tmp = Path(tmp_name)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"revoked_at": _iso(datetime.now(UTC)), "reason": reason},
+                    handle,
+                    sort_keys=True,
+                )
+            os.replace(tmp, self.revoked_path)
+        except OSError as exc:
+            # Losing the breadcrumb must never turn a handled rejection into a
+            # crash; the raised LgeAuthError still carries the detail.
+            log.warning("lge_revocation_marker_unwritable", error=str(exc))
+        log.error("lge_authorization_revoked", reason=reason, marker=str(self.revoked_path))
+
+    def revoked(self) -> dict[str, Any] | None:
+        """The revocation breadcrumb, if this deployment ever had one."""
+        try:
+            payload = json.loads(self.revoked_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     # ------------------------------------------------------------- internals
     def _read(self) -> dict[str, Any] | None:
@@ -485,7 +580,10 @@ class LgeAuth:
             # has rejected is how a registration gets disabled.
             if what == "refresh_token":
                 assert self.cache is not None
-                self.cache.clear()
+                self.cache.clear(
+                    f"LG&E rejected the refresh_token grant with HTTP "
+                    f"{response.status_code}"
+                )
             raise LgeAuthError(
                 f"LG&E rejected the {what} grant "
                 f"({response.status_code}): {_detail(response)}. "

@@ -516,6 +516,14 @@ async def _job_bryant_daily(
     return await _call(entry, start=start, end=end, now=fetch_at)
 
 
+class GreenbuttonAuthorizationRevoked(RuntimeError):
+    """LG&E revoked a working authorisation — loud on purpose.
+
+    Distinct from "never authorised", which is a quiet skip. Only a human with a
+    browser can fix this, so it has to reach `/healthz` rather than the log floor.
+    """
+
+
 async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
     """Fetch the LG&E meter series for the last few local days (PLAN.md §13).
 
@@ -545,8 +553,26 @@ async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
     settings = get_settings()
     if not settings.lge_client_id or not settings.lge_client_secret.get_secret_value():
         return {"skipped": "not_configured"}
-    token_cache = settings.spool_dir / "tokens" / "lge.json"
-    if not token_cache.exists():
+
+    from energy_capture.sources.lge_auth import LgeTokenCache
+
+    cache = LgeTokenCache(settings.spool_dir / "tokens" / "lge.json")
+    if not cache.path.exists():
+        # A deployment that never authorised skips QUIETLY -- that is the whole
+        # point, and it must stay that way. But an authorisation that was
+        # REVOKED is a different event with the same symptom, and treating the
+        # two alike is what hid the 2026-08-20 lapse for three days: the job
+        # returned "not_authorized" every morning and nobody was meant to care.
+        # A revocation now fails loudly, so it lands in job_failed,
+        # consecutive_failures and /healthz. DEVIATIONS.md #177.
+        revoked = cache.revoked()
+        if revoked:
+            raise GreenbuttonAuthorizationRevoked(
+                "LG&E authorisation was revoked at "
+                f"{revoked.get('revoked_at', 'an unknown time')} "
+                f"({revoked.get('reason', 'no reason recorded')}). Meter data has "
+                "stopped. Re-authorise: `energycap greenbutton-authorize`."
+            )
         return {"skipped": "not_authorized"}
 
     today = timeutil.local_date_of(now)

@@ -3436,6 +3436,67 @@ Worth knowing for anyone driving the AWS CLI in this repo: the same empty variab
 AWS_PROFILE` after sourcing a credentials file.
 
 
+## 177. The LG&E authorisation lapsed, and three things made it invisible
+
+Observed 2026-08-23, while filling `energy/meter/` in the S3 rollout
+(`docs/s3-storage.md` §8). `{SPOOL_DIR}/tokens/lge.json` was **gone**, meter data stopped at
+**2026-08-20**, and nothing anywhere said so. Re-authorising needs a browser, so this cost the
+owner a manual round trip. Not one of the three causes is a bug on its own; together they made a
+dead data feed indistinguishable from a healthy one.
+
+**1. The deletion was correct and silent.** `lge_auth.py` clears the token cache when LG&E
+rejects the refresh grant, and the comment is right: "continuing to present a credential the
+custodian has rejected is how a registration gets disabled." But `clear()` just unlinked the
+file, and a missing token file is *also* the normal state of a deployment that never clicked
+through consent.
+
+**2. So the job reported an ordinary skip.** `_job_greenbutton_daily` returns
+`{"skipped": "not_authorized"}` when the file is absent — quietly, deliberately, because "a
+scheduled job that errors daily on a perfectly normal configuration is noise, and noise is what
+teaches an operator to stop reading the log" (its own test says so). Exactly the right default,
+and it swallowed a revocation for three days.
+
+`clear()` now leaves a breadcrumb — `lge-revoked.json`, mode 600, holding *only*
+`revoked_at` and `reason`, never credential material — and only when a token actually existed, so
+a fresh install stays quiet. A successful `save()` retires it, because re-authorising is the cure
+and one old revocation must not shout forever. With a breadcrumb present the job raises
+`GreenbuttonAuthorizationRevoked` instead of skipping, so it lands in `job_failed`,
+`consecutive_failures` and `/healthz`, and the message names the fix.
+
+**3. `/healthz` had no way to see it, and `last_success_utc` would have lied.** The natural
+check is the wrong one: a fetch can *succeed* and return nothing new, which is precisely what a
+revoked feed looks like from the job's side. So the new `health.meter` block measures the age of
+the **newest interval actually held** (`newest_interval_utc`, recorded by the fetch), not the age
+of the last successful run.
+
+It reports and **never 503s**, which is a deliberate asymmetry: LG&E publishes days late and
+revises, so staleness here is the *utility's* lag, not this container's fault, and marking the
+container unhealthy for it would be wrong — and with a healthcheck in `docker-compose.yml`,
+actively harmful. `METER_STALE_AFTER_DAYS` (default 3) sets the reporting threshold. The block is
+absent entirely until Green Button has been fetched once, so a deployment that does not use it
+grows no permanently-stale field.
+
+### And the likely reason it lapsed at all
+
+`REFRESH_MARGIN_S` was a flat **300 seconds** while LG&E issues a **24-hour** access token, and
+`greenbutton_daily` fires **once a day**. Those three numbers do not fit: the job essentially
+never lands inside a 5-minute window at the end of 24 hours, so it always found the token already
+dead and refreshed *reactively* — leaving the refresh token unexercised for nearly two days at a
+stretch. Refresh tokens go stale when they are not used.
+
+The threshold is now `max(REFRESH_MARGIN_S, lifetime × 1/3)`, computed from the token's own
+issued lifetime (`obtained_at`..`expires_at`). For a 24h token that is 8h, so the daily job
+refreshes every day: at 09:15 local on a token issued 15:50Z the previous day, 2.6h remain
+against an 8h threshold. The flat 300s floor still governs anything short-lived, so a
+15-minute token is not churned on every call. Refreshing early is cheap, and the rotation was
+already persisted before use.
+
+This is a hypothesis about LG&E's side, not a proven cause — the container logs that would have
+carried the rejection had already rotated. It is the only mechanism on our side that fits, the
+fix is harmless if the real cause was different, and change (1) means the next occurrence
+arrives with its reason attached instead of as another silence.
+
+
 The remaining open questions — Okta token lifetimes and whether the refresh token rotates,
 whether the spoofed `Origin`/`Referer`/`Mobile-App-Brand` headers are load-bearing, the
 real domain of `status.mode`, the exact shape of `getInfinityEnergy`, the units behind

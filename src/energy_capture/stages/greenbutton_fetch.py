@@ -186,6 +186,20 @@ def run(
         "dry_run": dry_run,
         **parsed.to_dict(),
     }
+    if not dry_run:
+        # `last_ts_utc` is the newest interval START we now hold -- the only
+        # honest freshness signal for this dataset. A successful fetch that
+        # returns nothing new leaves it unchanged, which is exactly the state
+        # that used to look healthy while meter data quietly stopped.
+        from energy_capture.health import get_status_store
+
+        get_status_store().record_success(
+            "greenbutton",
+            rows=parsed.rows,
+            newest_interval_utc=summary["last_ts_utc"],
+            meters=sorted(parsed.meters),
+        )
+
     if target_bucket and not dry_run:
         summary["s3"] = greenbutton._upload_months(
             destination, written, target_bucket, source

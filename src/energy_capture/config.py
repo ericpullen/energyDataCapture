@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     aws_profile: str | None = None
     glue_database: str = "energy"
 
+    #: How many days the newest LG&E meter interval may age before /healthz
+    #: reports the meter dataset stale. Generous because the staleness is the
+    #: UTILITY's publication lag, not ours -- LG&E publishes days late and
+    #: revises. It is reported, never 503: see StatusStore.health_report.
+    meter_stale_after_days: int = 3
+
     # ----------------------------------------------------------------- Leviton
     leviton_username: str = ""
     leviton_password: SecretStr = SecretStr("")

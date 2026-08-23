@@ -575,3 +575,34 @@ the single easiest way to be badly wrong with this data, and it is why `interval
 table's dedupe key and in its column comment.
 
 One more thing not summed: house + barn. They are separate services.
+
+### The LG&E lapse, hardened · 2026-08-23
+
+Re-authorised by the owner; the fetch caught up (**2,018 new rows → 5,358** in the month file,
+mirrored and verified, current through `2026-08-23T14:45Z`). The new grant reports a 24-hour
+access token, `refreshable: yes`, `HistoryLength=63072000` — normal, not a short grant.
+
+Three changes so this cannot hide again. Full reasoning in DEVIATIONS #177.
+
+1. **A revocation leaves a breadcrumb.** `LgeTokenCache.clear()` writes `lge-revoked.json`
+   (mode 600, `revoked_at` + `reason`, never credential material), only when a token existed;
+   `save()` retires it. `_job_greenbutton_daily` then **raises** instead of skipping, reaching
+   `job_failed` / `consecutive_failures` / `/healthz` with the fix named. "Never authorised"
+   still skips quietly — that was always correct.
+2. **`health.meter`** reports the age of the **newest interval held**, not the last successful
+   run — a fetch can succeed and return nothing new, which is what a revoked feed looks like
+   from the job's side. `METER_STALE_AFTER_DAYS` (default 3). It **reports and never 503s**: the
+   lag is the utility's, and compose runs a healthcheck, so a 503 here would be actively
+   harmful.
+3. **Proactive refresh.** `REFRESH_MARGIN_S` was a flat 300s against a 24-hour token with a
+   once-daily job — the job never landed in that window, so it always refreshed *reactively* and
+   the refresh token went unexercised for nearly two days. Now
+   `max(300s, lifetime × 1/3)` from the token's own issued lifetime: 8h for a 24h token, so a
+   daily job refreshes daily. The 300s floor still governs short-lived tokens.
+
+Change 3 is the likely cause and is a **hypothesis, not proof** — the logs that carried the
+rejection had rotated. It is the only mechanism on our side that fits, it is harmless if the real
+cause was different, and change 1 means the next occurrence arrives with its reason attached.
+
+14 new tests, including that a stale meter still returns HTTP 200, that freshness is measured on
+the data rather than the job, and that a re-authorised deployment stops shouting.

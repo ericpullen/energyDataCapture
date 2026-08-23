@@ -560,3 +560,64 @@ def test_status_file_is_written_under_spool_dir(spool_dir: Path) -> None:
     store.record_success("rollup", last_day_rolled="2026-08-16", rows=1152)
     assert os.path.exists(spool_dir / "status.json")
     assert read_doc(spool_dir / "status.json")["rollup"]["rows"] == 1152
+
+
+# =========================================================================
+# Meter freshness: measured on the DATA, and never a 503
+# =========================================================================
+
+
+def _store_with_meter(tmp_path: Path, newest_age: timedelta | None):
+    store = health.StatusStore(path=tmp_path / "status.json")
+    if newest_age is not None:
+        store.record_success(
+            "greenbutton",
+            rows=2018,
+            newest_interval_utc=(datetime.now(UTC) - newest_age).isoformat(),
+            meters=["1308468", "1326254"],
+        )
+    return store
+
+
+def test_meter_freshness_is_absent_until_green_button_is_actually_used(
+    tmp_path: Path,
+) -> None:
+    """A deployment that does not use Green Button grows no permanently-stale field."""
+    _, doc = _store_with_meter(tmp_path, None).health_report()
+    assert "meter" not in doc[health.HEALTH_SECTION]
+
+
+def test_a_fresh_meter_reports_its_age_and_is_not_stale(tmp_path: Path) -> None:
+    code, doc = _store_with_meter(tmp_path, timedelta(hours=3)).health_report()
+    meter = doc[health.HEALTH_SECTION]["meter"]
+    assert code == 200
+    assert meter["stale"] is False
+    assert meter["age_days"] == pytest.approx(0.125, abs=0.01)
+    assert meter["stale_after_days"] == 3
+
+
+def test_a_stale_meter_is_reported_but_never_fails_healthz(tmp_path: Path) -> None:
+    """The lag is LG&E's, not ours.
+
+    A utility that publishes late must not mark this container unhealthy or
+    invite a restart. What IS loud is a revoked authorisation, which fails the
+    greenbutton_daily job and lands in consecutive_failures. DEVIATIONS.md #177.
+    """
+    code, doc = _store_with_meter(tmp_path, timedelta(days=5)).health_report()
+    meter = doc[health.HEALTH_SECTION]["meter"]
+    assert meter["stale"] is True
+    assert meter["age_days"] == pytest.approx(5.0, abs=0.01)
+    assert code == 200, "utility publication lag must not produce a 503"
+
+
+def test_meter_freshness_measures_the_data_not_the_job(tmp_path: Path) -> None:
+    """The failure mode this exists for: a fetch that SUCCEEDS and returns nothing.
+
+    `last_success_utc` is stamped now, so a job-based check would call this
+    perfectly healthy while the newest interval it holds is a week old — which is
+    exactly the state the meter dataset sat in while its token was revoked.
+    """
+    store = _store_with_meter(tmp_path, timedelta(days=7))
+    _, doc = store.health_report()
+    assert doc["greenbutton"]["last_success_utc"], "the job did succeed"
+    assert doc[health.HEALTH_SECTION]["meter"]["stale"] is True

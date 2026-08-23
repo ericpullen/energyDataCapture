@@ -1772,3 +1772,81 @@ def test_greenbutton_daily_reads_back_far_enough_to_catch_a_revision(
     assert captured["end"] == today
     assert captured["start"] == today - timedelta(days=runtime.GREENBUTTON_LOOKBACK_DAYS)
     assert runtime.GREENBUTTON_LOOKBACK_DAYS >= 2, "one day cannot catch a revision"
+
+
+async def _awaitable(value):
+    """Minimal stand-in for `runtime._call`'s awaitable result."""
+    return value
+
+
+def test_greenbutton_daily_fails_loudly_when_the_authorisation_was_revoked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Revoked and never-authorised have the same symptom and opposite meanings.
+
+    A missing token file is an ordinary state for a deployment that never
+    clicked through the consent flow, and it skips quietly on purpose. But when
+    LG&E *rejects* a working credential, `lge_auth` deletes the same file — so
+    from 2026-08-20 the job reported the same benign `not_authorized` every
+    morning while meter data had silently stopped. Nobody noticed for three days.
+
+    The breadcrumb `LgeTokenCache.clear` leaves is what separates the two, and a
+    revocation now raises, so it reaches job_failed, consecutive_failures and
+    /healthz. DEVIATIONS.md #177.
+    """
+    from energy_capture.config import Settings
+    from energy_capture.sources.lge_auth import LgeToken, LgeTokenCache
+
+    cache = LgeTokenCache(tmp_path / "tokens" / "lge.json")
+    cache.save(LgeToken(access_token="a", refresh_token="r", obtained_at=timeutil.now_utc()))
+    cache.clear("LG&E rejected the refresh_token grant with HTTP 400")
+    assert not cache.path.exists()
+
+    monkeypatch.setattr(
+        runtime,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            spool_dir=tmp_path,
+            lge_client_id="gbc_test",
+            lge_client_secret="s3cret-value",
+        ),
+    )
+
+    with pytest.raises(runtime.GreenbuttonAuthorizationRevoked) as caught:
+        asyncio.run(runtime._job_greenbutton_daily(timeutil.now_utc()))
+
+    message = str(caught.value)
+    assert "HTTP 400" in message
+    assert "greenbutton-authorize" in message, "must say how to fix it"
+
+
+def test_a_revoked_then_reauthorised_deployment_stops_shouting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Re-authorising is the cure, so the job must go back to normal."""
+    from energy_capture.config import Settings
+    from energy_capture.sources.lge_auth import LgeToken, LgeTokenCache
+
+    cache = LgeTokenCache(tmp_path / "tokens" / "lge.json")
+    cache.save(LgeToken(access_token="a", refresh_token="r", obtained_at=timeutil.now_utc()))
+    cache.clear("rejected")
+    cache.save(LgeToken(access_token="a2", refresh_token="r2", obtained_at=timeutil.now_utc()))
+
+    monkeypatch.setattr(
+        runtime,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            spool_dir=tmp_path,
+            lge_client_id="gbc_test",
+            lge_client_secret="s3cret-value",
+        ),
+    )
+    # Gets past the authorisation gate and on to the real fetch, which is what
+    # the other tests in this file cover.
+    monkeypatch.setattr(
+        runtime, "_call", lambda func, **kw: _awaitable({"rows": 0, **kw})
+    )
+    result = asyncio.run(runtime._job_greenbutton_daily(timeutil.now_utc()))
+    assert "skipped" not in result

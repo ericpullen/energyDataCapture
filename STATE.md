@@ -715,7 +715,7 @@ would have stayed empty forever even with `S3_BUCKET` set — DEVIATIONS #173's 
 dataset that had not yet hit it. `import-greenbutton` still does **not** mirror: an import is a
 manual act and must not fan out by surprise. Two tests pin the asymmetry.
 
-### ACTION NEEDED: the LG&E authorisation has lapsed
+### The LG&E authorisation lapsed — re-authorised, and hardened so it cannot hide again
 
 `{SPOOL_DIR}/tokens/lge.json` is **gone**. LG&E rejected the refresh grant sometime after
 2026-08-20 and `lge_auth.py:488` cleared the cache deliberately — presenting a rejected
@@ -726,18 +726,45 @@ design, so an unauthorised deployment does not log a failure every morning. Righ
 and the reason three days passed unnoticed. The earlier "registered, approved, authorised and
 fetching" note above was true when written and is now stale.
 
-Fixing it is a browser round trip only the owner can do:
+If it ever recurs, re-authorising is a browser round trip only the owner can do:
 
 ```bash
 ssh -i ~/.ssh/energycap-lightsail.pem ubuntu@13.219.164.226
 cd ~/energyDataCapture
 docker compose exec energycap energycap greenbutton-authorize     # open the URL, consent
 docker compose exec energycap energycap greenbutton-authorize --code "<code>" --state "<state>"
-docker compose exec energycap energycap fetch-greenbutton --start 2026-08-15 --end 2026-08-23
+docker compose exec energycap energycap fetch-greenbutton --start <recent> --end <today>
 ```
 
-Worth building afterwards: a `/healthz` staleness field for the meter, because a quiet skip is
-indistinguishable from a healthy system from outside.
+**Re-authorised by the owner on 2026-08-23**, and the fetch caught up: 2,018 new rows merged to
+**5,358** in the month file, mirrored and verified, current through `2026-08-23T14:45Z`.
+
+The new authorisation reported a **24-hour** access token with `refreshable: yes` and
+`HistoryLength=63072000` (two years) — normal, not a short grant.
+
+**Three hardening changes, DEVIATIONS #177.** None of the three causes was a bug alone; together
+they made a dead feed look healthy.
+
+1. **A revocation now leaves a breadcrumb.** `LgeTokenCache.clear()` writes
+   `lge-revoked.json` (mode 600, `revoked_at` + `reason` only, never credential material) and
+   only when a token actually existed, so fresh installs stay quiet. A successful `save()`
+   retires it. With a breadcrumb present `_job_greenbutton_daily` raises
+   `GreenbuttonAuthorizationRevoked` instead of skipping — so it reaches `job_failed`,
+   `consecutive_failures` and `/healthz`, with the fix named in the message. "Never authorised"
+   still skips quietly, which was always right.
+2. **`/healthz` gained a `health.meter` block** measuring the age of the **newest interval
+   held**, not the last successful run — because a fetch can succeed and return nothing new,
+   which is exactly what a revoked feed looks like from the job's side. It **reports and never
+   503s**: the lag is LG&E's, not ours, and with a healthcheck in compose a 503 would be
+   actively harmful. `METER_STALE_AFTER_DAYS` (default 3). Absent until Green Button is used
+   once.
+3. **The refresh is now proactive.** `REFRESH_MARGIN_S` was a flat **300s** against a **24-hour**
+   token with a **once-daily** job — those three numbers never fit, so the job always found the
+   token already dead and refreshed reactively, leaving the refresh token unexercised for nearly
+   two days. The threshold is now `max(300s, lifetime × 1/3)` from the token's own issued
+   lifetime: 8h for a 24h token, so a daily job refreshes daily. This is the likely cause of the
+   lapse and is a hypothesis, not proof — the logs had rotated — but it is the only mechanism on
+   our side that fits, and change (1) means the next occurrence arrives with its reason attached.
 
 **Also open:** the instance still runs `f786dfb`, so the nightly meter mirror needs this branch
 deployed. And **`backfill` has no `--dry-run`**, which DEVIATIONS #75 tells you to use — the
