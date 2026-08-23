@@ -329,6 +329,18 @@ def test_a_scheduled_fetch_mirrors_to_s3_without_being_told_to(
     assert s3io.key_exists(BUCKET, key, client=s3)
     assert s3io.parquet_row_count(BUCKET, key, client=s3) == 1
 
+    # ...and it records the freshness signal /healthz reports on. In production
+    # this runs inside the collector process, which owns status.json; a stage run
+    # from the CLI writes the section and the collector's next whole-document
+    # rewrite clobbers it, which is pre-existing StatusStore behaviour (the same
+    # is true of `energycap upload`), not specific to this stage.
+    from energy_capture.health import get_status_store
+
+    section = get_status_store().section("greenbutton")
+    assert section["newest_interval_utc"] == summary["last_ts_utc"]
+    assert section["rows"] == 1
+    assert section["consecutive_failures"] == 0
+
 
 def test_an_import_never_fans_out_to_s3_on_its_own(
     settings: Settings, tmp_path: Path, s3

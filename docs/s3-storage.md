@@ -606,3 +606,38 @@ cause was different, and change 1 means the next occurrence arrives with its rea
 
 14 new tests, including that a stale meter still returns HTTP 200, that freshness is measured on
 the data rather than the job, and that a re-authorised deployment stops shouting.
+
+### Deployed · 2026-08-23
+
+`main` fast-forwarded to `33e3f6c` (six commits) and pushed; the instance pulled, rebuilt and
+recreated. Image built clean on x86_64.
+
+Verified live on the box:
+
+| | |
+|---|---|
+| new settings/constants present | `meter_stale_after_days=3`, `REFRESH_FRACTION=0.333`, `LgeTokenCache.revoked` |
+| Glue specs | all five, `energy_meter` included |
+| spool across the restart | `oldest_pending_utc` unchanged — nothing lost |
+| pollers | Leviton and Bryant current, `consecutive_failures: 0`, 2 hubs connected |
+| `/healthz` | 200, `ok: true`, container `healthy` |
+| **hourly upload, unattended** | the 16:05 job ran on its own: 10,080 rows, 1 hour — the scheduler works without the catch-up |
+| **`fetch-greenbutton` with NO `--bucket`** | mirrored anyway: `energy/meter/year=2026/lge-202608.parquet`, 5,358 rows. The nightly path is fixed and proven. |
+
+#### One thing that does not work the way it looks
+
+`health.meter` stayed `null` after a **CLI** fetch, and that is not a bug in the freshness block.
+`StatusStore` keeps the whole document in memory and rewrites it wholesale, so a stage run via
+`docker compose exec` writes its section and the collector's very next write clobbers it —
+`updated_utc` was the collector's, moments later. This is pre-existing behaviour that applies
+equally to `energycap upload` from the CLI; it is not specific to this stage or this change.
+
+The scheduled `greenbutton_daily` job runs **inside** the collector process, whose `StatusStore`
+owns the file, so it populates correctly — pinned offline by
+`test_a_scheduled_fetch_mirrors_to_s3_without_being_told_to`, which now asserts the recorded
+`newest_interval_utc` as well as the mirror. `health.meter` will appear on the box after the
+09:15 local job.
+
+Worth knowing for any future operator: **status written by a CLI-invoked stage does not survive
+while the collector is running.** Judge a CLI run by its exit code and its log, not by
+`status.json`.

@@ -766,9 +766,18 @@ they made a dead feed look healthy.
    lapse and is a hypothesis, not proof — the logs had rotated — but it is the only mechanism on
    our side that fits, and change (1) means the next occurrence arrives with its reason attached.
 
-**Also open:** the instance still runs `f786dfb`, so the nightly meter mirror needs this branch
-deployed. And **`backfill` has no `--dry-run`**, which DEVIATIONS #75 tells you to use — the
-spec and the CLI disagree.
+**Deployed 2026-08-23.** `main` is at `33e3f6c` and the instance is running it. Verified live:
+the spool survived the restart with `oldest_pending_utc` unchanged, both pollers at
+`consecutive_failures: 0`, `/healthz` 200, and **`fetch-greenbutton` with no `--bucket` mirrored
+anyway** — the nightly path is fixed in production. The 16:05 hourly upload had already run
+unattended (10,080 rows), so the scheduler works outside the catch-up.
+
+Two things a future operator should know. **`health.meter` only populates from the scheduled
+job**, not a CLI run: `StatusStore` rewrites the whole document from memory, so a stage invoked
+through `docker compose exec` has its section clobbered by the collector's next write. That is
+pre-existing behaviour (`energycap upload` from the CLI is the same) — judge a CLI run by its
+exit code and log, not by `status.json`. And **`backfill` has no `--dry-run`**, which
+DEVIATIONS #75 tells you to use: the spec and the CLI disagree.
 
 **Next:** Phase 5 — confirm the spool purges. The first rows cross the 7-day floor on
 2026-08-24; watch the 01:30 job. `docs/s3-storage.md` §9.
