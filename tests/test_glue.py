@@ -57,12 +57,16 @@ from tests.conftest import BUCKET, utc
 
 DATABASE = "energy_test"
 
+#: How many tables `create-glue-tables` manages. Derived from the tuple below so
+#: adding a sixth table cannot leave a count asserting the old number.
 ALL_TABLES = (
     glue.TABLE_ENERGY_RAW_30S,
     glue.TABLE_ENERGY_HOURLY,
     glue.TABLE_ENERGY_DAILY,
+    glue.TABLE_ENERGY_METER,
     glue.TABLE_DIM_CHANNEL,
 )
+_ALL_TABLES = len(ALL_TABLES)
 
 #: Text that betrays an unwritten comment. A comment is only useful if somebody
 #: actually wrote it; "TODO" in a table an LLM is reading is worse than nothing.
@@ -216,10 +220,10 @@ def run(client: FakeGlue, **kwargs: Any) -> dict[str, Any]:
 # ===========================================================================
 
 
-def test_a_first_run_creates_the_database_and_the_four_tables(fake_glue: FakeGlue) -> None:
+def test_a_first_run_creates_the_database_and_the_five_tables(fake_glue: FakeGlue) -> None:
     summary = run(fake_glue)
 
-    assert summary["created"] == 4
+    assert summary["created"] == _ALL_TABLES
     assert summary["updated"] == 0
     assert summary["unchanged"] == 0
     assert summary["database_created"] is True
@@ -236,7 +240,7 @@ def test_an_existing_database_is_used_and_never_modified(fake_glue: FakeGlue) ->
     assert summary["database_created"] is False
     assert fake_glue.databases[DATABASE]["Description"] == "hand-made"
     assert fake_glue.operations("create_database") == []
-    assert summary["created"] == 4
+    assert summary["created"] == _ALL_TABLES
 
 
 def test_a_second_run_changes_nothing_and_issues_no_writes(fake_glue: FakeGlue) -> None:
@@ -250,7 +254,7 @@ def test_a_second_run_changes_nothing_and_issues_no_writes(fake_glue: FakeGlue) 
     assert fake_glue.definitions() == first, "a re-run rewrote the definitions"
     assert summary["created"] == 0
     assert summary["updated"] == 0
-    assert summary["unchanged"] == 4
+    assert summary["unchanged"] == _ALL_TABLES
     assert fake_glue.operations("create_table", "update_table", "create_database") == []
 
 
@@ -260,7 +264,7 @@ def test_a_third_run_is_still_a_no_op(fake_glue: FakeGlue) -> None:
     first = fake_glue.definitions()
     summary = run(fake_glue)
     assert fake_glue.definitions() == first
-    assert summary["unchanged"] == 4
+    assert summary["unchanged"] == _ALL_TABLES
 
 
 def test_an_existing_table_is_updated_in_place_never_duplicated(fake_glue: FakeGlue) -> None:
@@ -277,16 +281,16 @@ def test_an_existing_table_is_updated_in_place_never_duplicated(fake_glue: FakeG
 
     assert summary["updated"] == 1
     assert summary["updated_tables"] == [glue.TABLE_ENERGY_RAW_30S]
-    assert summary["created"] == 3
-    assert len(fake_glue.get_tables(DatabaseName=DATABASE)["TableList"]) == 4
+    assert summary["created"] == _ALL_TABLES - 1
+    assert len(fake_glue.get_tables(DatabaseName=DATABASE)["TableList"]) == _ALL_TABLES
     fixed = fake_glue.definitions()[glue.TABLE_ENERGY_RAW_30S]
     assert fixed["StorageDescriptor"]["Location"] == f"s3://{BUCKET}/energy/raw_30s/"
     assert fixed["Parameters"]["projection.day.range"] == glue.PROJECTION_DAY_RANGE
     assert fixed["Description"] == glue.table_input(glue.table_specs()[0], BUCKET)["Description"]
+    # Creation order is table_specs() order, minus the one that already existed.
     assert fake_glue.operations("create_table") == [
-        ("create_table", glue.TABLE_ENERGY_HOURLY),
-        ("create_table", glue.TABLE_ENERGY_DAILY),
-        ("create_table", glue.TABLE_DIM_CHANNEL),
+        ("create_table", name) for name in ALL_TABLES
+        if name != glue.TABLE_ENERGY_RAW_30S
     ]
 
 
@@ -342,7 +346,7 @@ def test_a_parameter_athena_adds_on_its_own_does_not_trigger_an_update(
 
     summary = run(fake_glue)
 
-    assert summary["unchanged"] == 4
+    assert summary["unchanged"] == _ALL_TABLES
     assert fake_glue.operations("update_table") == []
 
 
@@ -350,7 +354,7 @@ def test_dry_run_reads_but_never_writes(fake_glue: FakeGlue) -> None:
     summary = run(fake_glue, dry_run=True)
 
     assert summary["dry_run"] is True
-    assert summary["created"] == 4
+    assert summary["created"] == _ALL_TABLES
     assert fake_glue.databases == {}
     assert fake_glue.tables == {}
     assert fake_glue.operations("create_database", "create_table", "update_table") == []
@@ -359,7 +363,7 @@ def test_dry_run_reads_but_never_writes(fake_glue: FakeGlue) -> None:
 def test_dry_run_against_an_existing_catalog_reports_no_change(fake_glue: FakeGlue) -> None:
     run(fake_glue)
     summary = run(fake_glue, dry_run=True)
-    assert summary["unchanged"] == 4
+    assert summary["unchanged"] == _ALL_TABLES
     assert summary["created"] == 0
 
 
@@ -387,7 +391,7 @@ def test_a_lost_race_on_the_database_is_not_a_failure(fake_glue: FakeGlue) -> No
 
     fake_glue.create_database = racing_create  # type: ignore[method-assign]
     summary = run(fake_glue)
-    assert summary["created"] == 4
+    assert summary["created"] == _ALL_TABLES
     assert summary["database_created"] is False
 
 
@@ -519,6 +523,7 @@ def test_locations_match_the_s3io_prefixes() -> None:
         glue.TABLE_ENERGY_RAW_30S: s3io.RAW_30S_PREFIX,
         glue.TABLE_ENERGY_HOURLY: s3io.HOURLY_PREFIX,
         glue.TABLE_ENERGY_DAILY: s3io.DAILY_PREFIX,
+        glue.TABLE_ENERGY_METER: s3io.METER_PREFIX,
         glue.TABLE_DIM_CHANNEL: s3io.DIM_CHANNEL_PREFIX,
     }
     for spec in glue.table_specs():
@@ -533,6 +538,7 @@ def test_locations_match_the_layout_pinned_in_plan_section_4() -> None:
         glue.TABLE_ENERGY_RAW_30S: f"s3://{BUCKET}/energy/raw_30s/",
         glue.TABLE_ENERGY_HOURLY: f"s3://{BUCKET}/energy/hourly/",
         glue.TABLE_ENERGY_DAILY: f"s3://{BUCKET}/energy/daily/",
+        glue.TABLE_ENERGY_METER: f"s3://{BUCKET}/energy/meter/",
         glue.TABLE_DIM_CHANNEL: f"s3://{BUCKET}/energy/dim_channel/",
     }
 
@@ -923,6 +929,16 @@ def test_every_table_comment_says_gaps_mean_downtime_not_zero_load(table: str) -
         # Not time series: its version of the rule is "a missing mapping must
         # never drop a measurement".
         assert "left join" in text and "coverage is not guaranteed" in text.lower()
+        return
+    if table == glue.TABLE_ENERGY_METER:
+        # Rule 1's intent is universal; "collector downtime" is not. We do not
+        # collect this series -- the utility publishes it days late and revises
+        # it -- so a gap here means LG&E has not published, and saying
+        # "collector downtime" would send a reader to check our own uptime.
+        # What must still be true is that absence is never read as zero.
+        assert "publication lag" in text and "not collector downtime" in text
+        assert "an absent interval is not zero consumption" in text
+        assert "interpolated" in text and "zero-filled" in text
         return
     assert "gaps mean collector downtime, never zero load" in text
     assert "interpolated" in text and "zero-filled" in text
@@ -1575,6 +1591,7 @@ _TABLES_WITH_METRICS = (
     glue.TABLE_ENERGY_RAW_30S,
     glue.TABLE_ENERGY_HOURLY,
     glue.TABLE_ENERGY_DAILY,
+    glue.TABLE_ENERGY_METER,
 )
 
 
@@ -1864,9 +1881,22 @@ def test_the_future_meter_table_needs_no_new_machinery() -> None:
     assert list(columns) == list(model.METER_SCHEMA.names)
 
 
-def test_the_meter_table_is_not_created_yet() -> None:
-    """PLAN.md §13 is design-only: nothing may create it before it is built."""
-    assert "energy_meter" not in {spec.name for spec in glue.table_specs()}
+def test_the_meter_table_exists_and_carries_interval_s() -> None:
+    """PLAN.md §13, built 2026-08-23. Was: "nothing may create it before it is built".
+
+    The whole point of the dataset variant is `interval_s`, and the whole danger
+    is that the same energy is published as both a 900s and a 3600s series — so
+    the column has to be there and the warning has to be in the comment.
+    """
+    spec = {s.name: s for s in glue.table_specs()}["energy_meter"]
+    assert "interval_s" in spec.schema.names
+    assert spec.partition_keys == ("year",)
+    comment = spec.comment_for("interval_s")
+    assert "900" in comment and "3600" in comment
+    assert "never sum" in comment.lower()
+    # The two-meter trap belongs in the description, where there is room for it.
+    assert "1308468" in spec.description and "1326254" in spec.description
+    assert "NEVER sum" in spec.description
 
 
 # ===========================================================================
@@ -1892,12 +1922,12 @@ def test_moto_glue_backend_behaves_the_same() -> None:
         first = glue.create_or_update_tables(
             database=DATABASE, bucket=BUCKET, client=client
         )
-        assert first["created"] == 4
+        assert first["created"] == _ALL_TABLES
 
         second = glue.create_or_update_tables(
             database=DATABASE, bucket=BUCKET, client=client
         )
-        assert second["unchanged"] == 4
+        assert second["unchanged"] == _ALL_TABLES
         assert second["created"] == 0
         assert second["updated"] == 0
 

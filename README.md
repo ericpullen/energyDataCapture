@@ -57,7 +57,7 @@ Every dataset shares the same eight columns. A new sensor adds **rows, never col
 | `source` | string | `leviton`, `bryant`, or `lge` (designed for, not yet collected). |
 | `device_id` | string | Leviton hub id (= panel serial), Bryant system serial, LG&E meter id. |
 | `channel_id` | string | Leviton: `breaker_p{position}` (a 2-pole breaker is **one** channel), `ct_{channel}_{a,b}`, `panel_leg_{a,b}`. Bryant: `system`, `zone_{n}`, and the lowercase energy components (`cooling`, `hpheat`, `eheat`, `fan`, `fangas`, `looppump`, `gas`, `reheat`). |
-| `metric` | string | `watts`, `amps`, `volts`, `hz`, `indoor_temp_f`, `outdoor_temp_f`, `setpoint_heat_f`, `setpoint_cool_f`, `humidity_pct`, `mode`, `stage`, `stage_pct`, `fan`, `blower_rpm`, `cfm`, `compressor_rpm`, `outdoor_coil_temp_f`, `static_pressure`, `idu_cfm`, `idu_iducfm`, `odu_iducfm`, `op_status`, `odu_mode`, `idu_status`, `kwh_day`, `cost_day_usd`, and — designed but not yet collected — `kwh_interval`, `ccf_interval`. The Glue metric column comment no longer lists all of them (28 names overflow the 255-character limit); SELECT DISTINCT on this column is the authoritative enumeration. |
+| `metric` | string | `watts`, `amps`, `volts`, `hz`, `indoor_temp_f`, `outdoor_temp_f`, `setpoint_heat_f`, `setpoint_cool_f`, `humidity_pct`, `mode`, `stage`, `stage_pct`, `fan`, `blower_rpm`, `cfm`, `compressor_rpm`, `outdoor_coil_temp_f`, `static_pressure`, `idu_cfm`, `idu_iducfm`, `odu_iducfm`, `op_status`, `odu_mode`, `idu_status`, `kwh_day`, `cost_day_usd`, `kwh_interval`, `ccf_interval`. The Glue metric column comment no longer lists all of them (28 names overflow the 255-character limit); SELECT DISTINCT on this column is the authoritative enumeration. The last two live only in the meter table, and LG&E Connect has only ever served electric — so the gas one has a table and a unit but no rows yet. |
 | `value` | double | The number. Enum metrics store a small integer code — see [the decodes](#enum-decodes-mode-stage-fan). |
 | `unit` | string | `W`, `A`, `V`, `Hz`, `degF`, `rpm`, `CFM`, `inwc`, `pct`, `enum`, `kWh`, `USD`, `CCF`. Constant per metric. |
 
@@ -75,7 +75,9 @@ one). **Three airflow numbers exist and disagree** — `idu_cfm` (500),
 recorded under the field it came from; `cfm` is an older blended pick, kept for
 archive continuity. `blower_rpm` / `cfm` are Bryant air-handler
 telemetry on `channel_id = 'system'`; `kwh_interval` / `ccf_interval` and `CCF` belong to
-the LG&E `energy/meter` dataset that PLAN.md §13 designs and does not build.
+the LG&E `energy/meter` dataset, built 2026-08-23 as the `energy_meter` table.
+**Never sum `energy_meter.value` without pinning `interval_s`** — every meter
+publishes the same energy as both a 900s and a 3600s series.
 
 **`stage` and `stage_pct` are two mutually exclusive renderings of one field** — the
 outdoor unit's `odu.opstat` — and which one a system emits is fixed by its hardware.

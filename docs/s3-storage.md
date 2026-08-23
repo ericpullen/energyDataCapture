@@ -395,3 +395,75 @@ the only offender; `auth=`, `token=` and `credentials=` are equally easy to reac
 `compact-daily` re-run over the identical range: every day `rewrote: false`, `parts: 0`,
 `parts_archived: 0`, `duplicates_dropped: 0`, same 583,677 rows. A second run is a no-op that
 still verifies.
+
+### Phase 3 — the query surface · **done 2026-08-23**
+
+`energy_meter` is built — PLAN.md §13's fifth table, designed 2026-08-18 and never
+implemented — and `create-glue-tables` has run against the real catalog for the first time.
+
+```
+glue_tables_done database=energy database_created=true tables=5 created=5 updated=0
+created_tables=[energy_raw_30s, energy_hourly, energy_daily, energy_meter, dim_channel]
+```
+
+- **Idempotent**: a second run reports `unchanged: 5`, `created: 0`, and issues no writes.
+- **Update-in-place works too** (a different code path): correcting one comment and re-running
+  reported `updated: 5`, `created: 0` — five tables amended, none duplicated.
+- **Partition projection landed**: `projection.enabled=true`, `year` 2024–2035, `month`/`day`
+  2-digit, and `storage.location.template` pointing at the real bucket. No crawler, no
+  `MSCK REPAIR`, no partition ever registered by hand.
+
+`energy_daily` and `energy_meter` are created over prefixes that are still **empty** — Phase 4
+mirrors the nine local month files. The tables are correct; they just have no rows yet.
+
+#### Athena, executed rather than desk-checked
+
+A dedicated workgroup (`energycap`, not `primary`), results to `athena-results/` with a 7-day
+lifecycle, 1 GB per-query scan cap.
+
+| query | result |
+|---|---|
+| `count(*)` for one projected partition | **97,920** — identical to DuckDB, 0 bytes scanned (Parquet metadata) |
+| `SHOW TABLES IN energy` | all five |
+| hourly kWh by label, joined to `dim_channel`, with `sample_count` (README ex. 2) | Panel A feed A 164.88 kWh … Water heater 40.15 — **19,856 bytes scanned** |
+| gap finder, `sample_count < 118` (README ex. 3) | **38 hours**, worst 1 sample, best 115 |
+
+The gap finder returning 38 is the honest answer, not a fault: the partial first day, the
+retrofit day where new channels began mid-hour, and `breaker_p0`'s single hour. That is exactly
+what the column comment exists to make legible.
+
+#### Three things the fifth table forced
+
+1. **A latent comment bug, surfaced by a test rather than by a reader.**
+   `_CATALOG_METRICS` is built from metric groups *that have a table*. Giving `ccf_interval` a
+   table put **CCF into the shared vocabulary**, and `energy_raw_30s` — the one table with no
+   `unit` override — started advertising a unit it can never hold.
+   `test_a_unit_comment_names_no_unit_that_cannot_appear_there` caught it immediately. Both
+   `energy_raw_30s` and `energy_meter` now carry `unit` comments scoped to their own metrics,
+   the pattern `energy_daily` already used. Left alone, this would have told an LLM that a
+   30-second watt-sample table might contain cubic feet of gas.
+
+2. **Rule 1's intent is universal; its wording is not.** Every table description must warn that
+   a gap is not zero load, and the test demanded the literal phrase "gaps mean collector
+   downtime, never zero load". For `energy_meter` that is simply false — we do not collect this
+   series; LG&E publishes it days late and revises it, so a gap means the utility has not
+   published, and blaming collector downtime would send a reader to check our own uptime. The
+   table now gets its own branch of the test, asserting the meter-appropriate form: publication
+   lag, *not* collector downtime, and **an absent interval is not zero consumption**, nothing
+   interpolated or zero-filled.
+
+3. **The description hit the 2048-character ceiling twice** and `_fit` refused both times
+   rather than truncating — which is the whole point of that guard, since a warning cut off
+   mid-sentence is worse than no warning. Trimmed to 2035 by cutting prose, never a warning.
+
+Test counts are now derived from `ALL_TABLES` rather than hardcoded, so a sixth table cannot
+leave assertions quietly checking the old number. `test_the_meter_table_is_not_created_yet`
+became `test_the_meter_table_exists_and_carries_interval_s`, pinning that the `900`/`3600`
+double-publication warning is actually in the shipped comment.
+
+The README's metric catalog was updated in the same breath: `kwh_interval` and `ccf_interval`
+are no longer "designed but not yet collected", and the stale "the dataset PLAN.md §13 designs
+and does not build" line now names the built table and repeats the `interval_s` warning.
+`tests/test_docs.py` enforces that seam, and caught both the omission and — when the fix
+mentioned `energy_meter` in backticks inside the metric cell — a table name being parsed as a
+metric name.

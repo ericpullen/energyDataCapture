@@ -135,6 +135,7 @@ __all__ = [
     "TABLE_DIM_CHANNEL",
     "TABLE_ENERGY_DAILY",
     "TABLE_ENERGY_HOURLY",
+    "TABLE_ENERGY_METER",
     "TABLE_ENERGY_RAW_30S",
     "TableSpec",
     "arrow_to_glue_type",
@@ -155,6 +156,7 @@ log = get_logger("create_glue_tables")
 TABLE_ENERGY_RAW_30S: Final[str] = "energy_raw_30s"
 TABLE_ENERGY_HOURLY: Final[str] = "energy_hourly"
 TABLE_ENERGY_DAILY: Final[str] = "energy_daily"
+TABLE_ENERGY_METER: Final[str] = "energy_meter"
 TABLE_DIM_CHANNEL: Final[str] = "dim_channel"
 
 #: Hive/Athena plumbing for Parquet. Spelled out rather than crawler-inferred.
@@ -478,11 +480,12 @@ _METRIC_GROUPS: Final[tuple[_MetricGroup, ...]] = (
         tables=frozenset({TABLE_ENERGY_DAILY}),
     ),
     _MetricGroup(
-        # PLAN.md §13: designed, no dataset and no table yet, so these are named
-        # here purely so the coverage check below can account for them.
-        label="lge meter, designed but not collected",
+        # PLAN.md §13, built 2026-08-23. ccf_interval stays listed because the
+        # gas vocabulary is real in model.UNIT_FOR_METRIC even though LG&E
+        # Connect has only ever served electric; the coverage check needs it.
+        label="lge meter, energy_meter only",
         metrics=frozenset({"kwh_interval", "ccf_interval"}),
-        tables=frozenset(),
+        tables=frozenset({TABLE_ENERGY_METER}),
     ),
 )
 
@@ -646,8 +649,8 @@ CANONICAL_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
     ),
     "source": (
         "Where the row came from: 'leviton' (LWHEM-2 load centers), 'bryant' "
-        "(Carrier Infinity HVAC), 'lge' (utility meter, designed for but not yet "
-        "collected). Part of the dim_channel join key."
+        "(Carrier Infinity HVAC), 'lge' (LG&E utility revenue meter, in "
+        "energy_meter only). Part of the dim_channel join key."
     ),
     "device_id": (
         "The physical device: for leviton the hub id, which is the panel serial; "
@@ -990,6 +993,80 @@ _DAILY_DESCRIPTION = _paragraphs(
     "components were disabled.",
 )
 
+_METER_DESCRIPTION = _paragraphs(
+    "GRAIN: one row per (interval START, meter, metric, interval length) — "
+    "utility revenue-meter energy from LG&E Green Button Connect (ESPI). "
+    "ts_utc is the interval's START, never its midpoint or end; interval_s is "
+    "how long it covers.",
+    "READ THIS BEFORE YOU SUM ANYTHING. Every meter publishes the SAME energy "
+    "twice, as a 900s series AND a 3600s series. Summing value without "
+    "pinning interval_s DOUBLE COUNTS. Filter to one interval_s; never add "
+    "two together. That is why interval_s is in this table's dedupe key and "
+    "no other's.",
+    "TWO METERS, separate services, NEVER sum them: device_id 1308468 is the "
+    "HOUSE (~74-99 kWh/day), 1326254 is the BARN (~100% EV charging, 3.6-40 "
+    "kWh/day). dim_channel marks the house primary — join it rather than "
+    "hardcoding an id. device_id 944006 and 944401 are RETIRED house ids "
+    "republishing 1308468's own energy: duplicates, not extra consumption.",
+    "channel_id is electric_main (or gas_main); metric is kwh_interval (kWh) "
+    "or ccf_interval (CCF). Only electric has ever been served.",
+    f"{_local_partition_clause(('year',), 'ts_local')} No month or day "
+    "column, so a WHERE on one is COLUMN_NOT_FOUND: filter the rest of the "
+    "date on ts_local or ts_utc.",
+    "Dedupe key: (ts_utc, source, device_id, channel_id, metric, "
+    "interval_s) — the canonical key PLUS interval_s.",
+    "This is the UTILITY's measurement and the independent check on our "
+    "sub-metering (`energycap compare-meter`, which reads ~3.4% high). "
+    "NOT interchangeable with energy_raw_30s or energy_hourly: "
+    "those are watts we sample every 30s, this is billed interval energy, and "
+    "the two never share a timestamp.",
+    "Gaps here are the utility's publication lag, NOT collector downtime: "
+    "LG&E publishes days late and revises, so recent days may be absent or "
+    "may change. But rule 1 still holds — AN ABSENT INTERVAL IS NOT ZERO "
+    "CONSUMPTION, and nothing here is interpolated or zero-filled. "
+    "Reverse-flow (net-generation) readings emit no row.",
+)
+
+_METER_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
+    "unit": (
+        # Scoped to this table's two metrics, like energy_daily's. The canonical
+        # comment names every unit any table can hold, which here would advertise
+        # W, A, rpm and CFM in a table that only ever holds interval energy.
+        "Unit of value: kWh for metric='kwh_interval', CCF for "
+        "metric='ccf_interval'. Constant per metric (model.UNIT_FOR_METRIC); no "
+        "other unit occurs in this table and no row here carries an integer "
+        "code. Energy PER INTERVAL, not a rate and not a register total."
+    ),
+    "interval_s": (
+        "Length in seconds of the metering interval this row covers; ts_utc "
+        "is the interval START. 900 and 3600 both occur FOR THE SAME ENERGY "
+        "— filter to one, never sum across them. Part of this table's dedupe "
+        "key for exactly that reason."
+    ),
+    "device_id": (
+        "The utility meter id. 1308468 = HOUSE, 1326254 = BARN (mostly EV "
+        "charging) — separate services, NEVER sum them. 944006/944401 are "
+        "retired ids republishing the house's own energy. Join dim_channel "
+        "on (source, device_id, channel_id)."
+    ),
+    "metric": (
+        "kwh_interval (unit kWh) or ccf_interval (unit CCF). Interval energy "
+        "for the period starting at ts_utc — NOT a meter register reading and "
+        "not an instantaneous rate. No enum metrics in this table."
+    ),
+    "value": (
+        "Energy consumed during the interval, in the row's unit, with the "
+        "ESPI powerOfTenMultiplier already applied. A 0.0 is a real measured "
+        "zero. Reverse-flow readings are skipped rather than stored negative."
+    ),
+    "channel_id": (
+        "electric_main or gas_main. Only electric_main has ever been served "
+        "by LG&E Connect. Join dim_channel on (source, device_id, "
+        "channel_id)."
+    ),
+}
+
+
 _DIM_DESCRIPTION = _paragraphs(
     "GRAIN: one row per channel — (source, device_id, channel_id). The semantic "
     "layer: what each Leviton breaker/CT and each Bryant channel actually is. "
@@ -1187,7 +1264,7 @@ def _dim_channel_prefix(_local_day: date) -> str:
 
 
 def table_specs() -> tuple[TableSpec, ...]:
-    """The four tables of PLAN.md §12, in creation order.
+    """The five tables of PLAN.md §12 and §13, in creation order.
 
     Specs are bucket-independent — a bucket is supplied when a location is
     rendered (:meth:`TableSpec.location`, :func:`table_input`).
@@ -1213,6 +1290,22 @@ def table_specs() -> tuple[TableSpec, ...]:
             prefix_builder=s3io.raw_30s_day_prefix,
             partition_keys=("year", "month", "day"),
             description=_RAW_30S_DESCRIPTION,
+            column_comments={
+                "unit": (
+                    # Scoped to THIS table's metrics, not the whole catalog.
+                    # The canonical comment lists every unit any table can hold,
+                    # which was fine while that set happened to match raw_30s's.
+                    # Building energy_meter added CCF to the catalog and the
+                    # canonical comment started advertising a unit that cannot
+                    # occur here -- caught by
+                    # test_a_unit_comment_names_no_unit_that_cannot_appear_there.
+                    "Unit of value: "
+                    f"{_unit_list_text(_metrics_for_table(TABLE_ENERGY_RAW_30S))}. "
+                    "Constant per metric (model.UNIT_FOR_METRIC), never invented "
+                    "at the call site. 'enum' is a small integer CODE, not a "
+                    f"quantity: {_DECODE_POINTER}."
+                ),
+            },
         ),
         TableSpec(
             name=TABLE_ENERGY_HOURLY,
@@ -1259,6 +1352,14 @@ def table_specs() -> tuple[TableSpec, ...]:
                     "Join dim_channel on (source, device_id, channel_id)."
                 ),
             },
+        ),
+        TableSpec(
+            name=TABLE_ENERGY_METER,
+            schema=model.METER_SCHEMA,
+            prefix_builder=s3io.meter_year_prefix,
+            partition_keys=("year",),
+            description=_METER_DESCRIPTION,
+            column_comments=_METER_COLUMN_COMMENTS,
         ),
         TableSpec(
             name=TABLE_DIM_CHANNEL,

@@ -653,10 +653,48 @@ Also fixed: `compact_day_verified` logged `pass_=1`, which the scrubber redacted
 scrubber was deliberately left greedy, and a new test walks the AST of every `log.*()` call in
 `src/` to catch the next collision.
 
-**Next:** `create-glue-tables`, plus `energy_meter` — the fifth table PLAN.md §13 specifies and
-`aws/glue.py:1195` documents, which has never been built. Then the mirror of the nine local
-day-grain month files (`energy/daily/` and `energy/meter/` are still empty in S3).
-`docs/s3-storage.md` §7–§8.
+### Phase 3 done — the catalog exists and Athena works
+
+`energy_meter` is **built** (PLAN.md §13's fifth table, designed 2026-08-18, never
+implemented) and `create-glue-tables` has run for real: database `energy`, five tables,
+partition projection live, no crawler and no `MSCK REPAIR` ever. A second run reports
+`unchanged: 5`; correcting one comment reported `updated: 5, created: 0`, so both the create
+and the update paths are proven.
+
+**Athena is executed now, not desk-checked.** Workgroup `energycap` (not `primary`), results
+to `athena-results/` on a 7-day lifecycle, 1 GB per-query scan cap. `count(*)` on a projected
+partition returns **97,920**, identical to DuckDB. The `dim_channel` join with `sample_count`
+scans 19,856 bytes. The gap finder reports **38 hours** below full coverage — honest, not
+faulty: the partial first day, the retrofit day, and `breaker_p0`'s one hour.
+
+Three things the fifth table forced, all worth remembering:
+
+1. **A latent comment bug the tests caught.** `_CATALOG_METRICS` is built from metric groups
+   *that have a table*, so giving `ccf_interval` a table put **CCF into the shared vocabulary**
+   and `energy_raw_30s` — the only table without a `unit` override — began advertising a unit it
+   can never hold. Left alone it would have told an LLM that a 30-second watt table might
+   contain cubic feet of gas. `energy_raw_30s` and `energy_meter` now scope `unit` to their own
+   metrics, as `energy_daily` always did.
+2. **Rule 1's intent is universal, its wording is not.** The blanket test demanded the literal
+   "gaps mean collector downtime, never zero load"; for the meter that is false — LG&E publishes
+   days late and revises, so a gap is *publication lag* and blaming our uptime misleads. The
+   table has its own branch asserting the right form, including **an absent interval is not zero
+   consumption**.
+3. **The description hit the 2048-char ceiling twice** and `_fit` refused rather than
+   truncating, which is exactly why that guard exists.
+
+Test table counts are now derived from `ALL_TABLES`, and
+`test_the_meter_table_is_not_created_yet` became
+`test_the_meter_table_exists_and_carries_interval_s`, pinning that the 900/3600 warning ships.
+
+**The single most important thing in the new table's comments:** every LG&E meter publishes the
+**same energy as both a 900s and a 3600s series**, so `sum(value)` without pinning `interval_s`
+double counts — which is why `interval_s` is in this table's dedupe key and no other's. And the
+two meters (house `1308468`, barn `1326254`) must never be summed.
+
+**Next:** Phase 4 — mirror the nine local day-grain month files. `energy/daily/` and
+`energy/meter/` are created but **empty**, and `greenbutton_daily` still passes no bucket
+(`runtime.py:554`). `docs/s3-storage.md` §8.
 
 ## Still ahead: split the poller from the batch stages
 
