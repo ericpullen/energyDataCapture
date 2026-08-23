@@ -47,6 +47,7 @@ check for a table with no time columns (``dim_channel``).
 from __future__ import annotations
 
 import io
+import os
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -364,6 +365,28 @@ def _boto_config() -> BotoConfig:
     )
 
 
+def _drop_empty_aws_profile() -> bool:
+    """Remove a set-but-empty ``AWS_PROFILE`` from the environment.
+
+    ``AWS_PROFILE=`` is not "no profile" to botocore — it is a profile *named*
+    empty string, and every client construction then raises
+    ``ProfileNotFound: The config profile () could not be found``. Passing no
+    ``profile_name`` does not help: botocore re-reads the variable itself when it
+    builds its config store, so the only fix is for the variable not to be there.
+
+    It is an easy trap to fall into because ``env_file`` in compose forwards a
+    bare ``AWS_PROFILE=`` line verbatim, and ``.env.example`` used to ship one
+    (DEVIATIONS.md #176). It cost the first S3 deployment a cycle: the container
+    had valid static keys and still could not build a client.
+
+    Returns whether anything was removed, so the caller can say so once.
+    """
+    if "AWS_PROFILE" in os.environ and not os.environ["AWS_PROFILE"].strip():
+        del os.environ["AWS_PROFILE"]
+        return True
+    return False
+
+
 def get_session() -> boto3.session.Session:
     """Process-wide boto3 session honouring ``AWS_PROFILE`` / ``AWS_REGION``.
 
@@ -372,6 +395,8 @@ def get_session() -> boto3.session.Session:
     """
     global _session
     if _session is None:
+        if _drop_empty_aws_profile():
+            log.warning("aws_profile_empty_ignored")
         settings = get_settings()
         kwargs: dict[str, str] = {}
         if settings.aws_profile:

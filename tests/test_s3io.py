@@ -10,6 +10,7 @@ and that the Glue partition projection templates depend on.
 
 from __future__ import annotations
 
+import os
 import random
 from datetime import date, datetime, timedelta, timezone
 
@@ -507,3 +508,38 @@ def test_get_client_is_lazy_and_cached(s3):
     assert first is s3io.get_client()
     s3io.reset_clients()
     assert s3io.get_client() is not first
+
+
+def test_an_empty_aws_profile_is_treated_as_absent(s3, monkeypatch):
+    """``AWS_PROFILE=`` must not reach botocore.
+
+    An empty value is a profile *named* empty string, so botocore raises
+    ``ProfileNotFound`` on every client build even with valid static keys. This
+    broke the first S3 deployment: compose's ``env_file`` forwards a bare
+    ``AWS_PROFILE=`` line verbatim and ``.env.example`` shipped one
+    (DEVIATIONS.md #176).
+    """
+    monkeypatch.setenv("AWS_PROFILE", "")
+    s3io.reset_clients()
+
+    assert s3io.get_client() is not None
+    assert "AWS_PROFILE" not in os.environ
+
+
+def test_a_whitespace_only_aws_profile_is_also_absent(monkeypatch):
+    """Guard on the value being blank, not merely empty — a stray space is the same trap."""
+    monkeypatch.setenv("AWS_PROFILE", "   ")
+    assert s3io._drop_empty_aws_profile() is True
+    assert "AWS_PROFILE" not in os.environ
+
+
+def test_a_real_aws_profile_is_left_alone(monkeypatch):
+    """The guard must never eat a profile someone deliberately named."""
+    monkeypatch.setenv("AWS_PROFILE", "energycap-batch")
+    assert s3io._drop_empty_aws_profile() is False
+    assert os.environ["AWS_PROFILE"] == "energycap-batch"
+
+
+def test_no_aws_profile_at_all_is_not_an_error(monkeypatch):
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    assert s3io._drop_empty_aws_profile() is False

@@ -3403,6 +3403,39 @@ Do these deliberately, and capture evidence before freezing anything.
    `backfill_unknown_attribute`, `backfill_precision_loss` and `backfill_gas_kwh_nonzero`
    before writing anything.
 
+## 176. `AWS_PROFILE=` is not "no profile" — it is a profile named empty string
+
+`.env.example` shipped a bare `AWS_PROFILE=` under the comment "Optional. Leave unset in the
+container if it uses keys / instance credentials." The comment's advice is right and the line
+below it does the opposite: an empty assignment *is* set, compose's `env_file` forwards it into
+the container verbatim, and botocore then resolves a profile whose name is the empty string and
+raises `ProfileNotFound: The config profile () could not be found` on **every** client build —
+with `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` sitting right there, valid.
+
+This cost the first S3 deployment a cycle. `S3_BUCKET` was set, the collector key was in place,
+`get_settings()` reported `aws_profile = None` (pydantic coerces the empty string away), and
+`s3io.get_client()` still died. Passing no `profile_name` to `boto3.session.Session` does not
+help, which is the counter-intuitive part: botocore re-reads `AWS_PROFILE` from the environment
+itself when it builds its config store, so the variable's *presence* is what matters, not what
+the application chooses to pass. Had it not been caught in pre-flight, `upload_hourly` would
+have swapped one silent failure mode for another — `ProfileNotFound` instead of
+`S3_BUCKET is not configured` — with the 678k-row backlog still stranded.
+
+Two changes, because either alone is insufficient:
+
+- `.env.example` comments the line out and states the trap, so a fresh `cp .env.example .env`
+  cannot reintroduce it.
+- `s3io._drop_empty_aws_profile()` deletes a set-but-blank `AWS_PROFILE` from `os.environ`
+  before the session is built, WARNing `aws_profile_empty_ignored` once. Mutating the
+  environment is heavy-handed and it is the only thing that works, since botocore reads the
+  variable directly. It guards on *blank* rather than empty so a stray space is caught too, and
+  a deliberately named profile is left strictly alone (four tests pin all of it).
+
+Worth knowing for anyone driving the AWS CLI in this repo: the same empty variable breaks every
+`aws` invocation the same way, which is why `docs/s3-storage.md` tells you to `unset
+AWS_PROFILE` after sourcing a credentials file.
+
+
 The remaining open questions — Okta token lifetimes and whether the refresh token rotates,
 whether the spoofed `Origin`/`Referer`/`Mobile-App-Brand` headers are load-bearing, the
 real domain of `status.mode`, the exact shape of `getInfinityEnergy`, the units behind
