@@ -218,9 +218,9 @@ function chart(hv) {
   });
 
   /* Lines break at any bucket with no value — a gap stays a gap. */
-  function path(field, scale) {
+  function path(field, scale, rows) {
     var out = "", pen = false;
-    buckets.forEach(function (b) {
+    (rows || buckets).forEach(function (b) {
       var v = b[field];
       if (v === null || v === undefined) { pen = false; return; }
       out += (pen ? "L" : "M") + X(b.at.utc).toFixed(1) + " " + scale(v).toFixed(1) + " ";
@@ -228,11 +228,12 @@ function chart(hv) {
     });
     return out.trim();
   }
-  function line(field, scale, color, width) {
-    var d = path(field, scale);
+  function line(field, scale, color, width, dashed, points) {
+    var d = path(field, scale, points);
     if (!d) return "";
     return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="' +
-      (width || 1.8) + '" stroke-linejoin="round"></path>';
+      (width || 1.8) + '" stroke-linejoin="round"' +
+      (dashed ? ' stroke-dasharray="5 4"' : "") + "></path>";
   }
 
   var ticks = "";
@@ -259,6 +260,9 @@ function chart(hv) {
     'compressor watts, HVAC feeder watts and Bryant capacity percent over time">' +
     bands + ticks +
     line("feeder_w", YW, "var(--s3)", 1.4) +
+    // DASHED on purpose: this line is modelled, not measured, and the dash is
+    // the first thing that says so before anyone reads the legend.
+    line("modelled_w", YW, "var(--s2)", 1.4, true, (hv.modelled_power || {}).points) +
     line("equipment_w", YW, "var(--s1)") +
     line("capacity_pct", YP, "var(--s2)", 1.6) +
     xlabels + "</svg></figure>" +
@@ -267,7 +271,10 @@ function chart(hv) {
     '<span><i style="background:var(--s3)"></i>HVAC subpanel feeder (W, left)</span>' +
     '<span><i style="background:var(--s2)"></i>Bryant capacity (%, right)</span>' +
     '<span><i style="background:var(--mark-muted);opacity:.35"></i>' +
-    'Bryant reported no capacity &mdash; compressor off</span></p>';
+    'Bryant reported no capacity &mdash; compressor off</span>' +
+    '<span><i style="background:repeating-linear-gradient(90deg,var(--s2) 0 4px,' +
+    'transparent 4px 7px)"></i>Bryant capacity AS WATTS (modelled, not ' +
+    'measured)</span></p>';
 }
 
 /* ----------------------------------------------------------------- verdict */
@@ -379,6 +386,27 @@ function energyCard(hv) {
    and `eheat` are the SAME conductor as far as the panel is concerned and only
    Bryant can separate them. The panel column is shown beside it, and a delta is
    offered only for days the panel actually covered. */
+function modelledPower(hv) {
+  var m = hv.modelled_power || {};
+  if (!m.derived) return "";
+  return "<h2>Bryant capacity as watts <span class=\"n\">modelled</span></h2>" +
+    '<div class="grid">' +
+    stat("bryant", "coefficient", num(m.watts_per_point, 1) + " W/pt",
+      m.fitted ? "fitted from this window (n=" + num(m.fit_n) + ")"
+               : "default " + num(m.default_watts_per_point, 1) +
+                 " W/pt — window too thin to fit") +
+    stat("bryant", "at 100%", num(m.watts_per_point * 100 / 1000, 2) + " kW",
+      "extrapolated, checkable against the nameplate") +
+    stat("panel", "residual", (m.residual.mean_w === null ? "—" :
+      (m.residual.mean_w > 0 ? "+" : "") + num(m.residual.mean_w, 0) + " W"),
+      "measured minus modelled, mean over " + num(m.residual.n) + " buckets") +
+    stat("panel", "worst residual", num(m.residual.max_abs_w, 0) + " W",
+      "largest single-bucket disagreement") +
+    "</div>" +
+    '<div class="note warn"><strong>' + esc(m.model) + ".</strong> " +
+    esc(m.warning) + "</div>";
+}
+
 function bryantEnergy(hv) {
   var be = hv.bryant_energy || {};
   if (!be.available) {
@@ -468,6 +496,7 @@ function render() {
       '<p class="note">' + esc(hv.alignment_note || "") + "</p>" + chart(hv) + "</div>" +
       '<div class="card">' + bandsTable(hv.agreement) + "</div>" +
       '<div class="card">' + feederTable(hv.feeder_profile) + "</div>" +
+      '<div class="card">' + modelledPower(hv) + "</div>" +
       '<div class="card">' + energyCard(hv) + "</div>" +
       '<div class="card">' + bryantEnergy(hv) + "</div>" +
       '<div class="card">' + channelsCard(hv) + "</div>";

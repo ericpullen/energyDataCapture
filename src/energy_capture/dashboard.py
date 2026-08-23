@@ -1710,6 +1710,18 @@ _HVAC_SYSTEM_METRICS: tuple[str, ...] = (
     "stage_pct",
     "blower_rpm",
     "cfm",
+    # Mapped 2026-08-22. compressor_rpm leads because it is the one that pairs
+    # with a metered watts channel; the three airflow numbers are listed
+    # separately because they disagree and the card should show that they do.
+    "compressor_rpm",
+    "outdoor_coil_temp_f",
+    "static_pressure",
+    "idu_cfm",
+    "idu_iducfm",
+    "odu_iducfm",
+    "op_status",
+    "odu_mode",
+    "idu_status",
 )
 _HVAC_ZONE_METRICS: tuple[str, ...] = (
     "indoor_temp_f",

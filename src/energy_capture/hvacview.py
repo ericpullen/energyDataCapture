@@ -66,6 +66,7 @@ from energy_capture import model, timeutil
 
 __all__ = [
     "BRYANT_ENERGY_UNAVAILABLE",
+    "DEFAULT_WATTS_PER_CAPACITY_POINT",
     "DEFAULT_WINDOW_S",
     "HVAC_CATEGORY",
     "MAX_WINDOW_S",
@@ -675,6 +676,8 @@ def hvac_comparison(
         "bryant": expected_bryant,
     }
     block["agreement"] = _agreement(series)
+    # Derived, never stored — see _modelled_power's docstring.
+    block["modelled_power"] = _modelled_power(series, block["agreement"])
     block["off_state"] = _off_state(series)
     block["feeder_profile"] = _feeder_profile(series)
     block["energy"] = _energy(series, bucket_s, poll_interval_s)
@@ -688,6 +691,88 @@ def hvac_comparison(
     )
     block["latest"] = series[-1]
     return block
+
+
+#: Fallback coefficient for the synthesised Bryant-side power, in watts per
+#: capacity point. Measured on 2026-08-22 over 289 one-minute buckets: 29.9 W per
+#: point, sd 1.4, r = 0.976, implying ~2.99 kW at 100% for this 5-ton
+#: variable-speed unit. It is only a fallback — :func:`_modelled_power` prefers
+#: the coefficient fitted from the window on screen, so the model tracks the
+#: machine rather than a number frozen in source.
+DEFAULT_WATTS_PER_CAPACITY_POINT: Final[float] = 29.9
+
+
+def _modelled_power(
+    series: Sequence[Mapping[str, Any]], agreement: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bryant's reported capacity, expressed in watts. **A model, not a reading.**
+
+    What it is: ``capacity_pct x watts_per_point``, evaluated per bucket, giving a
+    30s-resolution power series from a cloud that publishes no power at all —
+    only capacity, and energy at day grain.
+
+    Why it exists: it is the only way to put the two clouds on one axis for the
+    hours before the compressor breaker existed, and the only way to see the
+    residual (measured minus modelled) that says whether the machine is drifting
+    from its own control's account of itself.
+
+    **Why it is never stored.** Cardinal rules 1 and 2: raw_30s holds what the
+    API said, and the API never said this. A modelled watt written to the archive
+    is indistinguishable from a measured one a year later, which is exactly the
+    confusion those rules exist to prevent. So this is computed on read, lives
+    only in the payload, is labelled ``derived`` at every level, and carries the
+    coefficient and provenance that produced it. It must never be added to
+    ``PollCycle``, the spool, a Parquet file or a rollup.
+
+    The coefficient is fitted from the window when the window can support a fit
+    (both channels present, enough spread), and falls back to
+    :data:`DEFAULT_WATTS_PER_CAPACITY_POINT` otherwise — with ``fitted`` saying
+    which happened, because a model quoting a stale constant as if it were
+    measured would be the same dishonesty one level up.
+    """
+    fitted = agreement.get("watts_per_point")
+    usable = bool(fitted) and (agreement.get("n") or 0) >= 30
+    coefficient = float(fitted) if usable else DEFAULT_WATTS_PER_CAPACITY_POINT
+
+    points: list[dict[str, Any]] = []
+    residuals: list[float] = []
+    for bucket in series:
+        capacity = bucket.get("capacity_pct")
+        modelled = round(capacity * coefficient, 1) if capacity is not None else None
+        measured = bucket.get("equipment_w")
+        residual = (
+            round(measured - modelled, 1)
+            if modelled is not None and measured is not None
+            else None
+        )
+        if residual is not None:
+            residuals.append(residual)
+        points.append(
+            {"at": bucket["at"], "modelled_w": modelled, "residual_w": residual}
+        )
+
+    return {
+        "derived": True,
+        "model": "capacity_pct x watts_per_point",
+        "watts_per_point": round(coefficient, 2),
+        "fitted": usable,
+        "fit_n": agreement.get("n") if usable else None,
+        "default_watts_per_point": DEFAULT_WATTS_PER_CAPACITY_POINT,
+        "points": points,
+        "residual": {
+            "n": len(residuals),
+            "mean_w": _mean(residuals),
+            "max_abs_w": round(max((abs(r) for r in residuals), default=0.0), 1),
+        },
+        "warning": (
+            "MODELLED, NOT MEASURED. Bryant publishes no instantaneous power at "
+            "any endpoint — only capacity percent at 30s and energy at day "
+            "grain. This series is that capacity multiplied by a coefficient, "
+            "and it is deliberately never written to the archive: a modelled watt "
+            "stored beside a measured one is indistinguishable a year later, "
+            "which is what cardinal rules 1 and 2 forbid."
+        ),
+    }
 
 
 def _agreement(series: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

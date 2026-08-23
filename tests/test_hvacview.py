@@ -559,6 +559,98 @@ def test_a_day_whose_compressor_channel_did_not_exist_is_not_a_disagreement(
     assert "did not exist yet" in entry["delta_reason"]
 
 
+# ------------------------------------------------- the modelled power series
+
+
+def test_the_modelled_series_is_labelled_derived_and_never_stored(
+    spool: SpoolDB, channel_map: Path, make_obs
+) -> None:
+    """Bryant publishes no instantaneous power, so this series is a MODEL.
+
+    Rules 1 and 2 govern the archive, not the screen: a derived series is fine
+    to compute on read and must never become a row. This asserts both halves —
+    that it is computed and labelled, and that nothing new reached the spool.
+    """
+    capacities = [45.0, 60.0, 75.0]
+    seed(
+        spool, make_obs, start=NOW - timedelta(minutes=30), count=60,
+        capacity_pct=lambda i: capacities[i % 3],
+        compressor_w=lambda i: 30.0 * capacities[i % 3],
+    )
+    before = spool.connect().execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+
+    model_block = block(spool, channel_map, target="/ui/hvac/data?window_s=1800")[
+        "modelled_power"
+    ]
+
+    assert model_block["derived"] is True
+    assert "MODELLED, NOT MEASURED" in model_block["warning"]
+    assert "never written to the archive" in model_block["warning"]
+    assert model_block["model"] == "capacity_pct x watts_per_point"
+
+    after = spool.connect().execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    assert after == before, "reading the screen wrote rows to the spool"
+    metrics = {
+        row[0]
+        for row in spool.connect().execute("SELECT DISTINCT metric FROM observations")
+    }
+    assert "modelled_w" not in metrics and "power_modelled" not in metrics
+
+
+def test_the_coefficient_is_fitted_from_the_window_when_it_can_be(
+    spool: SpoolDB, channel_map: Path, make_obs
+) -> None:
+    """A model quoting a frozen constant as if it were measured is the same lie.
+
+    So the coefficient comes from the data on screen when there is enough of it,
+    and says which of the two it used.
+    """
+    capacities = [45.0, 60.0, 75.0]
+    seed(
+        spool, make_obs, start=NOW - timedelta(minutes=30), count=60,
+        capacity_pct=lambda i: capacities[i % 3],
+        # 40 W per point, deliberately NOT the 29.9 default.
+        compressor_w=lambda i: 40.0 * capacities[i % 3],
+    )
+    model_block = block(spool, channel_map, target="/ui/hvac/data?window_s=1800")[
+        "modelled_power"
+    ]
+
+    assert model_block["fitted"] is True
+    assert model_block["watts_per_point"] == pytest.approx(40.0, abs=0.2)
+    assert model_block["default_watts_per_point"] == hvacview.DEFAULT_WATTS_PER_CAPACITY_POINT
+    # Fitted to the window, so the model tracks the machine: residuals ~0.
+    assert abs(model_block["residual"]["mean_w"]) < 5.0
+
+
+def test_a_thin_window_falls_back_to_the_measured_default_and_says_so(
+    spool: SpoolDB, channel_map: Path, make_obs
+) -> None:
+    seed(spool, make_obs, start=NOW - timedelta(minutes=5), count=6)
+    model_block = block(spool, channel_map, target="/ui/hvac/data?window_s=600")[
+        "modelled_power"
+    ]
+    assert model_block["fitted"] is False
+    assert model_block["fit_n"] is None
+    assert model_block["watts_per_point"] == hvacview.DEFAULT_WATTS_PER_CAPACITY_POINT
+
+
+def test_a_bucket_with_no_capacity_gets_no_modelled_point(
+    spool: SpoolDB, channel_map: Path, make_obs
+) -> None:
+    """The compressor is off, so there is nothing to model — not a zero."""
+    seed(
+        spool, make_obs, start=NOW - timedelta(minutes=30), count=60,
+        capacity_pct=None, compressor_w=0.0,
+    )
+    points = block(spool, channel_map, target="/ui/hvac/data?window_s=1800")[
+        "modelled_power"
+    ]["points"]
+    assert points, "expected buckets"
+    assert all(p["modelled_w"] is None for p in points)
+    assert all(p["residual_w"] is None for p in points)
+
+
 # ----------------------------------------------------------------- the route
 
 
