@@ -3095,6 +3095,90 @@ payload names which reason applied. This is the same discipline `sample_count` e
 applied one level up: a partial *channel set* is as misleading as a partial hour, and it does
 not announce itself.
 
+## 174. The Glue catalog outgrew its own comment fields
+
+PLAN.md §12 and this project's conventions treat the Glue comments as a complete data
+dictionary: the `metric` comment enumerates every metric, the `value` comment carries the
+whole enum decode, and tests pin both against the code so neither can rot. That worked at 19
+metrics and three enum tables. Mapping nine more Bryant fields broke it arithmetically, not
+stylistically:
+
+* the `energy_raw_30s` metric names **alone** are **251 of the 255 characters** the Glue API
+  allows in a column comment — no room for one word of prose, let alone the day-grain
+  cross-reference the tests also require;
+* the decode across six enum metrics is **~370 characters**, so it cannot live in a column
+  comment at all;
+* and both table descriptions were already within ~20 characters of the 2048 limit, because
+  they were written to fill it.
+
+Neither enumeration was truncated. Both moved to a field that can hold them.
+
+**The decode now lives once, in `dim_channel`'s table description** — the semantic-layer
+table, which is where a dictionary belongs, with ~600 characters of headroom for future
+appends. Every table that carries enum rows points at it by name, and the pointer is tested
+to resolve. It is still generated from `bryant.ENUM_TABLES`, still integer-for-integer, still
+covers every metric in `model.ENUM_METRICS`, and the "an appended value reaches the comment
+without anyone editing it" guarantee is intact — it just reaches a different comment.
+
+**The metric catalog moved to the README**, which has room to be the closed list, and the
+`metric` comment now names the metrics a reader gets *wrong* — `watts`, the mutually
+exclusive `stage`/`stage_pct` pair, and the day-grain pair barred from these tables — plus
+`SELECT DISTINCT metric`. That last part is the honest improvement: the original test's
+rationale was "a reader filtering on an incomplete list drops rows", and a comment that
+tells you to enumerate cannot cause that failure at all, where a generated list that no
+longer fits eventually would.
+
+Six tests were repointed rather than deleted, each keeping its guarantee and stating in its
+docstring what changed and why. `_ENUM_DECODE` also stopped being built from a typed list of
+three metrics — which is how the three new enum metrics shipped, briefly, with no published
+decode at all.
+
+One incidental rename: static pressure's unit is `inwc`, not `inH2O`. Every vocabulary
+parser in `tests/test_docs.py` matches letters only, so a digit in a unit name would have
+hidden it from all of them — a unit that no test can see is a unit that will drift.
+
+## 175. The Carrier schema, introspected — and the granularity question settled by the API
+
+DEVIATIONS #155's rule (a new outbound call pattern against Carrier needs sign-off) was
+honoured: the owner asked for this on 2026-08-22. Introspection ran through
+`graphql_client_from_settings`, so the Origin spoof, the Bearer token, the 401 ladder and the
+throttle handling were the ones already proven; no new credential path exists.
+
+**662 types, 106 root query fields.** PLAN.md documents two of them. The ones worth knowing:
+
+| operation | what it is |
+|---|---|
+| `infinityStatus(serial)` | in use — the 30s status feed |
+| `infinityEnergy(serial)` | in use — day-grain energy, `energyPeriods` |
+| **`runtimeUsageInfinity(input)`** | `{deviceId, startDate, endDate, period}` → runtime buckets with `totalRuntime`, `totalCoolRuntime`, `totalHeatRuntime`, `outsideTemperature`, `isSystemOn` |
+| **`deviceHistory(input)`** | `{deviceId, point, periodValue/Unit, intervalValue/Unit}` — a generic point-history endpoint with an arbitrary interval |
+| `infinityProfile(serial)` | equipment identity: indoor/outdoor model and serial, `iducapacity`, `oducapacity`, `idustages`, firmware |
+| `infinityConfig(serial)` | full system configuration |
+| `infinityNotifications(serial)` | faults/alerts |
+| `locationEnergyUsage(input)` | `{username, locationId}` → `EnergyUsage{energyPeriodType, dateTime, kwh, cost}` |
+
+**The API settled the granularity question itself.** `runtimeUsageInfinity` with
+`period: "hour"` answers, in words:
+
+> `Invalid period specified. Available periods are: day, week, month`
+
+So there is **no sub-daily energy or runtime anywhere on this endpoint** — the earlier
+inference from `energyPeriods` was right, and is now a quoted fact rather than an inference.
+The panel remains the only source of sub-day HVAC energy, which is precisely why
+`breaker_p10` matters.
+
+Two live findings that are not conclusions yet: `runtimeUsageInfinity` with `period: "day"`
+returns **HTTP 504 from Carrier's own gateway**, repeatably, while an invalid period returns
+200 with a message — so the operation exists and validates its input but times out
+server-side, and it is worth retrying another day rather than writing off. And
+`deviceHistory` needs a `username`/`locationId` this probe did not have, so its `point`
+vocabulary — the one thing that could still yield sub-daily *telemetry* history — is
+untested.
+
+Also corrected: the input types are non-null (`GetRuntimeUsageInput!`). A plain
+`GetRuntimeUsageInput` declaration is a 400 with a validation message, which is what the
+first three probes were.
+
 ---
 
 # Status — what is done, and what has never been executed

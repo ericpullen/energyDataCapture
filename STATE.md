@@ -496,6 +496,91 @@ Beyond `getInfinityStatus` and `getInfinityEnergy`, what else the endpoint offer
 PLAN.md documents only those two, and a schema introspection would be a new outbound call
 pattern against Carrier — the kind of thing #155 says needs sign-off first.
 
+---
+
+## Nine more Bryant metrics, a modelled power series, and the schema introspected
+
+All three asked for on 2026-08-22, after the day-grain work.
+
+### The nine metrics
+
+Every one had been *requested but unmapped* pending a live response — and the capture that
+would settle them arrived on 2026-08-17, five days before anyone acted on it.
+
+| API field | metric | unit |
+|---|---|---|
+| `odu.comprpm` | `compressor_rpm` | rpm |
+| `odu.oducoiltmp` | `outdoor_coil_temp_f` | degF (via `cfgem`, like any temperature) |
+| `idu.statpress` | `static_pressure` | inwc |
+| `idu.cfm` / `idu.iducfm` / `odu.iducfm` | `idu_cfm` / `idu_iducfm` / `odu_iducfm` | CFM |
+| `oprstsmsg` / `odu.opmode` / `idu.opstat` | `op_status` / `odu_mode` / `idu_status` | enum |
+
+**19 rows a cycle now, up from 10**, zero unknown enums. `compressor_rpm` is the one that
+earns its place: continuous where `stage_pct` is quantised to 45/60/75/85, so it is a better
+independent variable for the watts comparison, and watts rising against flat rpm is how a
+failing compressor announces itself.
+
+**The three airflow numbers disagree** — 500, 513 and 1166 in one cycle — so each is recorded
+under the field it came from. `cfm` keeps the old blended pick for archive continuity.
+
+The fixtures earned their keep immediately: `odu.opmode` is `"cool"` in the 2026-08-16
+capture and `"cooling"` in the 2026-08-17 one. Both are in the table at **different codes**
+(6 and 1), because it is append-only and a synonym is cheaper than renumbering an archived
+code.
+
+Two real problems fell out, both recorded in DEVIATIONS #174: `_ENUM_DECODE` was built from a
+typed list of three metrics, so the three new enum metrics briefly shipped with **no published
+decode at all**; and the Glue catalog outgrew its own comment fields — the raw_30s metric
+names alone are **251 of 255 allowed characters**. The decode now lives once in
+`dim_channel`'s description with every enum table pointing at it, and the metric catalog lives
+in the README with the comment naming the traps plus `SELECT DISTINCT`. Nothing was
+truncated; both moved to fields that can hold them.
+
+### The modelled power series
+
+Bryant publishes no instantaneous power anywhere, so `/ui/hvac` now carries
+`capacity_pct x watts_per_point`, drawn dashed beside the measured watts.
+
+**It is never stored.** Rules 1 and 2 govern the archive, not the screen: a modelled watt
+sitting beside a measured one is indistinguishable a year later. So it is computed on read,
+labelled `derived: true`, ships its coefficient and provenance, and a test asserts that
+rendering the screen writes no rows and that no `modelled_w` metric exists.
+
+The coefficient is **fitted from the window on screen** (falling back to the measured 29.9
+W/point when the window is too thin, and saying which it used). Live right now: **29.34 W/pt
+fitted over 720 buckets, residual mean +9.5 W** — about 0.5% of a ~1.9 kW draw, worst single
+bucket 249 W. The residual is the point: it is the number that says whether the machine is
+drifting from its own control's account of itself.
+
+### The introspection
+
+**662 types, 106 root query fields**; PLAN.md documents two. Full table in DEVIATIONS #175.
+The four worth remembering:
+
+- **`runtimeUsageInfinity`** — `{deviceId, startDate, endDate, period}` → runtime buckets with
+  cool/heat runtime split, outside temperature and `isSystemOn`. Nothing collects this today.
+- **`deviceHistory`** — a generic point-history endpoint taking an arbitrary interval. The one
+  remaining candidate for sub-daily telemetry history, and untested: it needs a
+  `username`/`locationId` the probe did not have.
+- **`infinityProfile`** — equipment identity: indoor/outdoor model and serial, capacities,
+  stage count, firmware. Would settle several "which unit is this" questions permanently.
+- **`infinityNotifications`** — faults and alerts.
+
+**The API settled the granularity question in words.** `runtimeUsageInfinity` with
+`period: "hour"` replies:
+
+> `Invalid period specified. Available periods are: day, week, month`
+
+So there is no sub-daily energy or runtime on this endpoint at all. The earlier inference was
+right and is now a quotation. **The panel is the only source of sub-day HVAC energy**, which
+is exactly why the compressor breaker matters.
+
+Two loose ends, both honest: `period: "day"` returns a repeatable **HTTP 504 from Carrier's
+own gateway** (the operation exists and validates input, but times out server-side — retry
+another day), and `deviceHistory`'s `point` vocabulary is unexplored. Also worth knowing for
+next time: these input types are **non-null** (`GetRuntimeUsageInput!`), and a nullable
+declaration is a 400 with a validation message.
+
 ## Still ahead: split the poller from the batch stages
 
 Agreed 2026-08-19, and it supersedes "one box, somewhere reliable" as the end state. Keep
