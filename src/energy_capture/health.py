@@ -315,7 +315,16 @@ class StatusStore:
             counters and last-success times survive a container restart.
     """
 
-    __slots__ = ("_clock", "_doc", "_lock", "_log", "_path", "_poll_intervals", "_started")
+    __slots__ = (
+        "_clock",
+        "_doc",
+        "_lock",
+        "_log",
+        "_owned",
+        "_path",
+        "_poll_intervals",
+        "_started",
+    )
 
     def __init__(
         self,
@@ -332,6 +341,9 @@ class StatusStore:
         self._poll_intervals = dict(
             poll_intervals if poll_intervals is not None else _default_poll_intervals()
         )
+        #: Sections THIS process has written. Everything else in the file
+        #: belongs to somebody else and must survive our flushes -- see _flush.
+        self._owned: set[str] = set()
         self._doc = default_status_document()
         if load_existing:
             self._merge_existing()
@@ -501,7 +513,32 @@ class StatusStore:
         return body
 
     def _flush(self, section: str) -> dict[str, Any]:
-        """Rewrite the whole document atomically; return a copy of ``section``."""
+        """Rewrite the whole document atomically; return a copy of ``section``.
+
+        **Sections this process has never written are re-read from disk first.**
+
+        Without that, the long-running collector silently erased every one-shot
+        stage's status. `_flush` writes the whole in-memory document, and the
+        collector re-flushes on every poll cycle — so a `docker compose run --rm
+        energycap digest` would write its `digest` section, and the collector
+        would overwrite the file from its own copy seconds later. The section
+        reappeared only if the container happened to restart, because
+        `_merge_existing` reads the file at startup. Measured on the live
+        instance 2026-08-24: a successful digest run left no trace at all.
+
+        That mattered immediately, because `watch-health`'s "has the digest run
+        recently?" rule (DEVIATIONS #194) keys on exactly such a section, and a
+        watchdog reading a field another process is quietly deleting is worse
+        than no rule at all.
+
+        Ownership is tracked rather than guessed: we keep our own sections
+        whatever the file says, and defer on the rest. Two processes writing the
+        SAME section can still lose an update, which is inherent to a
+        single-file status document and is why every section has exactly one
+        writer in practice.
+        """
+        self._owned.add(section)
+        self._adopt_foreign_sections()
         self._doc["updated_utc"] = format_utc(self._clock())
         try:
             write_json_atomic(self._path, self._doc)
@@ -512,6 +549,21 @@ class StatusStore:
                 "status_write_failed", path=str(self._path), error=f"{type(exc).__name__}: {exc}"
             )
         return copy.deepcopy(self._doc[section])
+
+    def _adopt_foreign_sections(self) -> None:
+        """Pull in sections written by another process. Never raises."""
+        try:
+            existing = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(existing, dict):
+            return
+        for name, body in existing.items():
+            if name in self._owned or not isinstance(body, dict):
+                continue
+            current = self._doc.get(name)
+            if body != current:
+                self._doc[name] = copy.deepcopy(body)
 
     def _merge_existing(self) -> None:
         """Load a status.json from a previous run over the defaults, if readable."""

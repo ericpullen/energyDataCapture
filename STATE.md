@@ -621,13 +621,21 @@ one category of bug that gets quieter the worse it is. Fixed in this pass (DEVIA
 - **D2 at last**: `invalid_client` no longer destroys a working refresh token, and today's
   `invalid_scope` is classified explicitly.
 
-**Still true in production, and only you can change it.** None of this is running. The
-watchdog's launchd job has never been loaded, the instance is on a torn pre-merge image
-(no digest, no integrity, no `observed_seconds`), and LG&E's authorisation broke again on
-08-24 with `invalid_scope` — the meter feed has been dead since 08-23 16:30 and nothing
-paged. Three steps, all yours: rebuild/restart the instance on merged `main`, load the
-watchdog per `deploy/watchdog.md` (plus the hc-ping dead-man's switch), and re-authorize
-LG&E in a browser.
+**Deployed and live, 2026-08-24 23:38 UTC.** The instance runs merged `main`; all six jobs
+are scheduled with `digest_daily` at **10:00 local** (the N2 fix), and `/healthz` carries
+the `integrity` section. The watchdog now runs **on the instance** as
+`energycap-watch.timer` every 15 minutes — a first firing pushed to Pushover and was
+delivered, and the second correctly stayed quiet as "unchanged". Verified by running the
+digest on the box: it found the Panel B CT fault (2 × `frozen_channel`, 4 ×
+`feed_below_children`) and the B2 coverage gate correctly refused the meter comparison for
+a day with 16/24 intervals.
+
+**Two things still need you.** (1) `HEALTHCHECKS_PING_URL` is empty in the box's `.env` —
+until a healthchecks.io check is created and pasted there, nothing reports the watchdog's
+own death, which is the one failure no placement can cover for itself. (2) **LG&E needs a
+browser re-authorisation**: it broke 08-24 with `invalid_scope` and the meter feed has been
+dead since 08-23 16:30. Run `docker compose exec energycap energycap greenbutton-authorize`
+on the instance. Until then the `meter` WARNING is a true positive and will keep firing.
 
 ---
 
