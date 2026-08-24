@@ -52,14 +52,20 @@ emitted at all** rather than a number labelled with a unit we cannot justify.
 ``rh`` and nothing else. They are requested (for a future live inspection) and
 deliberately not mapped.
 
-**6. ``odu.opstat`` has two shapes, and the hardware picks.** A staged compressor
-reports a word (``"off"``/``"low"``/``"high"``) and a variable-capacity one
-reports a 0-100 capacity percentage (``"35"``). They are two different
+**6. ``odu.opstat`` has two shapes, and it picks per reading — not per system.**
+Sometimes it is a word (``"off"``/``"low"``/``"high"``/``"dehumidify"``) and
+sometimes a 0-100 capacity percentage (``"35"``). They are two different
 measurements and get two different metrics — ``stage`` (enum) and ``stage_pct``
 (pct) — so the metric name always tells a reader which one a row is. Both paths
 stay live for the life of the archive, at most one emits per cycle, and
-:data:`STAGE_CODES` is never renumbered to accommodate the other. See
-:meth:`BryantStatusSource._add_stage` and DEVIATIONS.md #59.
+:data:`STAGE_CODES` is never renumbered to accommodate the other.
+
+The classifier :func:`stage_metric_for` is deliberately per-value, and that turned
+out to matter: the live variable-capacity unit sends a **percentage while the
+compressor modulates and a word when it does not**, so one serial produces both
+metrics, interleaved, all day. The documentation that claimed a system only ever
+emits one of them was wrong, not the code. See
+:meth:`BryantStatusSource._add_stage` and DEVIATIONS.md #59 and #179.
 
 Unverified fields
 -----------------

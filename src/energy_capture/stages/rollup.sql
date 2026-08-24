@@ -169,6 +169,15 @@ SELECT
         WHEN metric = 'watts'
         THEN mean * (sample_count * $poll_interval_s) / 3.6e6
         ELSE NULL
-    END AS kwh
+    END AS kwh,
+    --    The denominator above, kept so kwh is auditable without knowing what
+    --    POLL_INTERVAL_S was in force when this file was written.  NULL
+    --    wherever kwh is NULL: another source may sample at its own cadence
+    --    and this column must not assert this one about it.
+    CASE
+        WHEN metric = 'watts'
+        THEN CAST(sample_count * $poll_interval_s AS BIGINT)
+        ELSE NULL
+    END AS observed_seconds
 FROM aggregated
 ORDER BY hour_start_utc, source, device_id, channel_id, metric

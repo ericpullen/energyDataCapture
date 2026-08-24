@@ -255,6 +255,34 @@ def test_an_empty_range_writes_nothing_rather_than_an_empty_file(
     assert not (tmp_path / "meter" / "lge-202608.parquet").exists()
 
 
+def test_an_empty_fetch_does_not_erase_the_freshness_signal(
+    settings: Settings, authorized: LgeAuth, tmp_path: Path
+) -> None:
+    """The watchdog must not delete itself on duty.
+
+    ``health.meter`` is built from the stored ``newest_interval_utc``, and the
+    state it exists to expose — LG&E stops publishing while the authorisation
+    is still good — is exactly the state that produces a *successful* fetch of
+    zero rows. If that fetch merged a null over the stored timestamp, the
+    block would vanish from ``/healthz`` at the moment it mattered.
+    """
+    from energy_capture.health import get_status_store
+
+    store = get_status_store()
+    store.record_success("greenbutton", rows=4398, newest_interval_utc="2026-08-19T03:45:00Z")
+
+    client, _ = transport(lambda r: httpx.Response(200, text=espi([])))
+    summary = greenbutton_fetch.run(
+        start=date(2026, 8, 16), end=date(2026, 8, 16),
+        out_dir=tmp_path / "meter", auth=authorized, client=client, bucket="",
+    )
+
+    assert summary["rows"] == 0
+    section = store.section("greenbutton")
+    assert section["newest_interval_utc"] == "2026-08-19T03:45:00Z"
+    assert section["rows"] == 0
+
+
 def test_dry_run_fetches_but_writes_nothing(
     settings: Settings, authorized: LgeAuth, tmp_path: Path
 ) -> None:

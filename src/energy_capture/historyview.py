@@ -202,6 +202,16 @@ class HistoryRange:
     def expected_samples(self, local_day: date) -> int:
         return SAMPLES_PER_HOUR * self.expected_hours(local_day)
 
+    def expected_meter_intervals(self, local_day: date, interval_s: int) -> int:
+        """How many meter intervals a COMPLETE ``local_day`` holds.
+
+        DST-aware for the same reason the panel side is: at 900s a normal day
+        has 96, the spring-forward day 92 and the fall-back day 100. Hard-coding
+        96 would call the short day incomplete every March and the long day
+        complete every November while an hour of energy went unmeasured.
+        """
+        return self.expected_hours(local_day) * 3600 // interval_s
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "start": self.start.isoformat(),
@@ -345,7 +355,7 @@ SELECT
     count(DISTINCT h.local_hour_start::DATE) AS days_seen,
     min(h.local_hour_start)::DATE          AS first_day,
     max(h.local_hour_start)::DATE          AS last_day
-FROM read_parquet(?) h
+FROM read_parquet(?, union_by_name := true) h
 LEFT JOIN read_parquet(?) d
        ON d.source = h.source
       AND d.device_id = h.device_id
@@ -364,7 +374,7 @@ SELECT
     {LEVEL_SQL}                            AS level,
     sum(h.kwh)                             AS kwh,
     sum(h.sample_count)                    AS samples
-FROM read_parquet(?) h
+FROM read_parquet(?, union_by_name := true) h
 WHERE h.metric = 'watts'
   AND h.local_hour_start >= ?
   AND h.local_hour_start < ?
@@ -462,7 +472,7 @@ WITH panels AS (
         h.device_id || '/' || h.channel_id             AS series_key,
         sum(h.kwh)                                     AS kwh,
         sum(h.sample_count)                            AS samples
-    FROM read_parquet(?) h
+    FROM read_parquet(?, union_by_name := true) h
     WHERE h.metric = 'watts'
       AND h.channel_id LIKE 'ct_1_%'
       AND h.local_hour_start >= ?
@@ -503,6 +513,19 @@ FROM panel_day p
 FULL OUTER JOIN meter_day m ON m.local_day = p.local_day
 ORDER BY local_day
 """
+
+#: Why the hourly reads use ``union_by_name``
+#: -------------------------------------------
+#: ``energy/hourly`` gains columns over time (``observed_seconds``, #190), and a
+#: glob across days therefore spans more than one schema for as long as it takes
+#: to re-roll — and for as long as a collector running the previous release keeps
+#: writing the old shape every hour. Without ``union_by_name`` DuckDB rejects the
+#: whole glob on the first mismatch, so a schema change would take the history
+#: view down until every file had been rewritten. With it, an older file simply
+#: reads NULL for a column it predates, which is the truth about that file.
+#:
+#: Deliberately NOT applied to the other datasets: their schemas are stable, and
+#: blanket tolerance would hide a genuine drift that ought to fail loudly.
 
 #: How many panel feed series SHOULD exist, read from the semantic layer rather
 #: than from the measurements.
@@ -547,12 +570,27 @@ def meter_block(con: Any, src: Sources, rng: HistoryRange) -> dict[str, Any]:
             _f(100.0 * float(worst) / expected, 1)
             if worst is not None and expected else None
         )
+        # BOTH sides have to be whole. Gating only the panel side was the bug:
+        # LG&E publishes late and revises, so a day whose meter series is half
+        # written compares a full panel day against a partial meter day and
+        # manufactures a delta of the size of the missing part -- a measured
+        # +65% on one such day -- which then polluted `mean_delta_pct`, the
+        # headline number. `intervals` was already carried on every row and
+        # simply never checked.
+        intervals = int(row["intervals"]) if row.get("intervals") else 0
+        expected_intervals = (
+            rng.expected_meter_intervals(local_day, METER_INTERVAL_S)
+            if isinstance(local_day, date)
+            else 0
+        )
+        meter_complete = bool(expected_intervals and intervals >= expected_intervals)
         complete = bool(
             expected_series
             and seen == expected_series
             and worst is not None
             and expected
             and float(worst) >= COMPLETE_COVERAGE * expected
+            and meter_complete
         )
         panel_kwh, meter_kwh = _f(row.get("panel_kwh")), _f(row.get("meter_kwh"))
         delta_pct = None
@@ -563,7 +601,9 @@ def meter_block(con: Any, src: Sources, rng: HistoryRange) -> dict[str, Any]:
                 "local_day": _isoday(local_day),
                 "meter_kwh": meter_kwh,
                 "panel_kwh": panel_kwh,
-                "intervals": int(row["intervals"]) if row.get("intervals") else None,
+                "intervals": intervals or None,
+                "intervals_expected": expected_intervals or None,
+                "meter_complete": meter_complete,
                 "series_seen": seen or None,
                 "series_expected": expected_series or None,
                 "coverage_pct": coverage,
@@ -586,7 +626,10 @@ def meter_block(con: Any, src: Sources, rng: HistoryRange) -> dict[str, Any]:
             "The house meter is found through dim_channel.is_primary. The barn is "
             "a separate service and is never included.",
             "A delta is shown only for a day where every panel feed series "
-            f"reported and the worst cleared {COMPLETE_COVERAGE:.0%} coverage.",
+            f"reported, the worst cleared {COMPLETE_COVERAGE:.0%} coverage, AND "
+            "the meter published its full interval count for the day "
+            "(DST-aware: 92, 96 or 100 at 900s). A partially published meter "
+            "day would otherwise read as a huge disagreement.",
         ],
     }
 
@@ -677,7 +720,7 @@ SELECT
     d.short_label             AS label,
     sum(h.sample_count)       AS samples,
     count(*)                  AS hours_present
-FROM read_parquet(?) h
+FROM read_parquet(?, union_by_name := true) h
 LEFT JOIN read_parquet(?) d
        ON d.source = h.source
       AND d.device_id = h.device_id

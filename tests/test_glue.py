@@ -1787,18 +1787,25 @@ def test_the_stage_note_is_built_from_the_source_of_truth_not_retyped() -> None:
 def test_every_table_that_can_hold_either_stage_metric_explains_the_trap(
     table: str,
 ) -> None:
-    """Both metrics named, the exclusivity stated, and which one THIS system emits.
+    """Both metrics named, and the instruction to select BOTH of them.
 
     Naming them in the ``metric`` list is not enough: the list reads as "these
-    can all appear", and one of these two never will.
+    can all appear" and says nothing about a single cycle emitting exactly one,
+    which is what makes a one-metric filter lose half the day silently.
+
+    This test previously pinned "MUTUALLY EXCLUSIVE" and "VARIABLE-CAPACITY" —
+    the words of the claim that this unit emits ``stage_pct`` and never
+    ``stage``. Six days of archive disproved it (DEVIATIONS.md #179), so the
+    pinned phrases are now the ones that stay true: select both, and absence is
+    not zero.
     """
     description = _spec(table).description
     assert glue.STAGE_REPRESENTATION_NOTE in description
-    assert "MUTUALLY EXCLUSIVE" in description
-    assert "VARIABLE-CAPACITY" in description
-    assert "absence, not zero" in description, (
-        f"{table} names both stage metrics without saying that the missing one "
-        "is absence rather than zero — CLAUDE.md rule 1"
+    assert "PER READING" in description
+    assert "SELECT BOTH" in description
+    assert "absence is not zero" in description, (
+        f"{table} names both stage metrics without saying that the half a "
+        "one-metric filter drops is absence rather than zero — CLAUDE.md rule 1"
     )
     for metric in (bryant.STAGE_METRIC, bryant.STAGE_PCT_METRIC):
         assert re.search(rf"\b{re.escape(metric)}\b", _column_comments(table)["metric"])

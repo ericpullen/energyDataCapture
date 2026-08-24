@@ -67,10 +67,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import duckdb
 import pyarrow as pa
@@ -83,9 +83,13 @@ from energy_capture.logging import get_logger
 __all__ = [
     "EXCLUDED_METRICS_RELATION",
     "HOURS_RELATION",
+    "INTERVAL_TOLERANCE",
+    "MIN_DELTAS_FOR_SPACING",
     "SQL_PATH",
     "DayRollup",
+    "PollIntervalMismatch",
     "RollupError",
+    "observed_interval_s",
     "connect",
     "excluded_metrics_table",
     "hours_table",
@@ -174,6 +178,119 @@ def excluded_metrics_table() -> pa.Table:
     )
 
 
+#: Deltas below this are treated as noise, not cadence: a duplicate that
+#: survived dedupe under a different key, or two sources writing the same
+#: instant. Never a real 30s poll.
+MIN_DELTA_S: float = 1.0
+
+#: How far the configured interval may sit from the observed cadence before the
+#: rollup refuses. Deliberately loose: the failure this guards against is a
+#: FACTOR (30s priced as 60s doubles every kWh), not a few percent of jitter,
+#: and an alarm that fires on jitter gets turned off.
+INTERVAL_TOLERANCE: float = 0.25
+
+#: Fewer deltas than this is not evidence of a cadence.
+MIN_DELTAS_FOR_SPACING: int = 20
+
+#: The data's own cadence: the MEDIAN gap between consecutive samples of one
+#: channel. Median, not mean, because a collector outage leaves one enormous
+#: delta that would drag a mean upward — the median is unmoved by a minority of
+#: gaps, which is exactly the property needed here (a day full of gaps must not
+#: be mistaken for a day sampled slowly).
+_INTERVAL_SQL: Final[str] = """
+WITH samples AS (
+    SELECT DISTINCT ts_utc, source, device_id, channel_id
+    FROM read_parquet($input_files)
+    WHERE metric = 'watts'
+      AND ts_utc >= $day_start_utc
+      AND ts_utc <  $day_end_utc
+),
+deltas AS (
+    SELECT date_diff('second', lag(ts_utc) OVER w, ts_utc) AS delta_s
+    FROM samples
+    WINDOW w AS (PARTITION BY source, device_id, channel_id ORDER BY ts_utc)
+)
+SELECT median(delta_s) AS observed_s, count(*) AS n
+FROM deltas
+WHERE delta_s IS NOT NULL AND delta_s >= $min_delta_s
+"""
+
+
+class PollIntervalMismatch(RollupError):
+    """The interval used for kWh disagrees with the data's actual cadence.
+
+    The one deterministic way this project can silently rewrite history. ``kwh``
+    is ``mean * sample_count * poll_interval_s / 3.6e6``, and
+    ``poll_interval_s`` is read from the CURRENT environment rather than from
+    the data. Change ``POLL_INTERVAL_S`` to 60 next year, then follow the
+    documented repair path — "re-run rollup over the range" — across 2026, and
+    every historical kWh doubles. Deterministically, idempotently, with no
+    error raised and nothing in the output that looks wrong.
+    """
+
+
+def observed_interval_s(
+    con: duckdb.DuckDBPyConnection,
+    files: Sequence[str],
+    *,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> float | None:
+    """The sample cadence the DATA shows, in seconds, or ``None`` if unknowable.
+
+    Only ``watts`` rows are measured: they are the only ones whose kWh uses the
+    interval at all, and another source may legitimately sample at its own
+    cadence (``BRYANT_POLL_INTERVAL_S`` is a separate knob).
+    """
+    row = con.execute(
+        _INTERVAL_SQL,
+        {
+            "input_files": list(files),
+            "day_start_utc": day_start_utc,
+            "day_end_utc": day_end_utc,
+            "min_delta_s": MIN_DELTA_S,
+        },
+    ).fetchone()
+    if not row or row[0] is None or int(row[1] or 0) < MIN_DELTAS_FOR_SPACING:
+        return None
+    return float(row[0])
+
+
+def _check_interval(
+    observed: float | None, interval: int, local_day: date, *, allow_mismatch: bool
+) -> None:
+    """Refuse to price energy with an interval the data contradicts."""
+    if observed is None or observed <= 0:
+        # Not enough samples to tell. Silence is correct: a handful of rows is
+        # not evidence, and refusing on it would make the guard fire hardest
+        # exactly where there is least data.
+        return
+    if abs(observed / interval - 1.0) <= INTERVAL_TOLERANCE:
+        return
+    # kwh = mean * sample_count * interval / 3.6e6, so pricing 30s data at 60s
+    # DOUBLES it. The factor the energy is wrong by is configured/observed --
+    # not observed/configured, which is the same number upside down and was
+    # what an earlier draft of this message printed.
+    error_factor = interval / observed
+    message = (
+        f"{local_day}: kWh would be computed with poll_interval_s={interval}s, "
+        f"but the data's own median sample spacing is {observed:.1f}s. "
+        f"Rolling up anyway would multiply every kWh for this day by "
+        f"{error_factor:.2f}. Pass the interval these rows were COLLECTED at "
+        "(`rollup --poll-interval-s`), not the one configured now."
+    )
+    if not allow_mismatch:
+        raise PollIntervalMismatch(message)
+    log.warning(
+        "rollup_interval_mismatch_allowed",
+        local_day=local_day.isoformat(),
+        configured_s=interval,
+        observed_s=round(observed, 2),
+        kwh_error_factor=round(interval / observed, 3),
+        detail=message,
+    )
+
+
 def _poll_interval_s(explicit: int | None = None) -> int:
     """``POLL_INTERVAL_S`` — the observed seconds each sample stands for."""
     if explicit is not None:
@@ -239,6 +356,7 @@ def rollup_day(
     poll_interval_s: int | None = None,
     connection: duckdb.DuckDBPyConnection | None = None,
     tz: str | None = None,
+    allow_interval_mismatch: bool = False,
 ) -> pa.Table:
     """Roll one LOCAL day's raw Parquet up to hourly rows.
 
@@ -251,6 +369,13 @@ def rollup_day(
             dedupe key.
         poll_interval_s: seconds each sample stands for (defaults to
             ``POLL_INTERVAL_S``). Only ``watts`` uses it, via ``kwh``.
+            Cross-checked against the data's own sample spacing; a disagreement
+            beyond :data:`INTERVAL_TOLERANCE` raises
+            :class:`PollIntervalMismatch` rather than silently rescaling
+            history.
+        allow_interval_mismatch: downgrade that refusal to a WARN. For the
+            genuine case where the cadence really did change mid-day; never
+            for making an error go away.
         connection: reuse an existing DuckDB connection (one is created and
             closed otherwise).
         tz: override the local zone (tests).
@@ -290,6 +415,9 @@ def rollup_day(
             },
         )
         table = _to_arrow(result)
+        observed = observed_interval_s(
+            con, files, day_start_utc=day_start_utc, day_end_utc=day_end_utc
+        )
     finally:
         if owned:
             con.close()
@@ -297,6 +425,9 @@ def rollup_day(
     # The query already emits HOURLY_SCHEMA's columns in order; the cast pins
     # the types (and the non-nullability of everything except `kwh`) so a
     # DuckDB change can never quietly alter the on-disk schema.
+    _check_interval(
+        observed, interval, local_day, allow_mismatch=allow_interval_mismatch
+    )
     return table.cast(model.HOURLY_SCHEMA)
 
 
@@ -333,6 +464,7 @@ def rollup_range(
     status: Any | None = None,
     tz: str | None = None,
     s3: bool | None = None,
+    allow_interval_mismatch: bool = False,
 ) -> list[DayRollup]:
     """Regenerate every local day in ``[start, end]``; return one result per day.
 
@@ -370,6 +502,7 @@ def rollup_range(
                     poll_interval_s=poll_interval_s,
                     connection=con,
                     tz=tz,
+                    allow_interval_mismatch=allow_interval_mismatch,
                 )
             except Exception as exc:
                 log.error(
@@ -412,6 +545,7 @@ def _rollup_one_day(
     poll_interval_s: int | None,
     connection: duckdb.DuckDBPyConnection,
     tz: str | None,
+    allow_interval_mismatch: bool = False,
 ) -> DayRollup:
     """One local day of :func:`rollup_range`. Raises on any failure."""
     inputs = list(resolve_inputs(day))
@@ -420,7 +554,12 @@ def _rollup_one_day(
         return DayRollup(local_day=day, rows=0, inputs=0)
 
     table = rollup_day(
-        day, inputs, poll_interval_s=poll_interval_s, connection=connection, tz=tz
+        day,
+        inputs,
+        poll_interval_s=poll_interval_s,
+        connection=connection,
+        tz=tz,
+        allow_interval_mismatch=allow_interval_mismatch,
     )
     hours = _distinct_hours(table)
     key = write(table, day) if write is not None else None
@@ -484,6 +623,7 @@ def run(
     poll_interval_s: int | None = None,
     dry_run: bool = False,
     status: Any | None = None,
+    allow_interval_mismatch: bool = False,
 ) -> dict[str, Any]:
     """``energycap rollup --start … --end …`` (PLAN.md §10).
 
@@ -516,6 +656,7 @@ def run(
         resolve_inputs=resolve_inputs,
         write=None if dry_run else write,
         poll_interval_s=poll_interval_s,
+        allow_interval_mismatch=allow_interval_mismatch,
         status=status,
         s3=True,
     )

@@ -84,6 +84,10 @@ STAGE_ENTRYPOINTS: dict[str, tuple[str, str]] = {
     "fetch-greenbutton": ("energy_capture.stages.greenbutton_fetch", "run"),
     "greenbutton-authorize": ("energy_capture.stages.greenbutton_auth", "run"),
     "compare-meter": ("energy_capture.stages.compare", "run"),
+    "verify-bill": ("energy_capture.stages.verify_bill", "run"),
+    "watch-health": ("energy_capture.watch", "run"),
+    "digest": ("energy_capture.stages.digest", "run"),
+    "check-channels": ("energy_capture.stages.integrity", "run"),
 }
 
 #: The exact signature each entry point must accept, for whoever implements the
@@ -97,7 +101,10 @@ STAGE_SIGNATURES: dict[str, str] = {
     "poll": "async run(*, once: bool, sources: tuple[str, ...] | None)",
     "upload": "run(*, start: date, end: date)",
     "compact-daily": "run(*, start: date, end: date)",
-    "rollup": "run(*, start: date, end: date)",
+    "rollup": (
+        "run(*, start: date, end: date, poll_interval_s: int | None, "
+        "allow_interval_mismatch: bool)"
+    ),
     "fetch-daily": "run(*, start: date, end: date)",
     "backfill": "run(*, start: date, end: date)",
     "discover": (
@@ -123,12 +130,29 @@ STAGE_SIGNATURES: dict[str, str] = {
     "compare-meter": (
         "run(*, start: date, end: date, meter_dir: Path | None, "
         "channels: tuple[str, ...] | None, source: str, meter: str | None, "
-        "min_coverage: float)"
+        "min_coverage: float, channel_map: Path | None)"
+    ),
+    "verify-bill": (
+        "run(*, start: date, end: date, meter: str | None, bill_kwh: float | None, "
+        "bill_total: float | None, tariff_path: Path | None, meter_dir: Path | None, "
+        "source: str, tolerance_pct: float, min_coverage: float)"
+    ),
+    "watch-health": "run(*, url: str | None, notify: bool, always_notify: bool)",
+    "digest": (
+        "run(*, local_day: date | None, bucket: str | None, notify: bool, "
+        "always_notify: bool, map_path: Path | None)"
+    ),
+    "check-channels": (
+        "run(*, start: date | None, end: date | None, bucket: str | None, "
+        "notify: bool, always_notify: bool, map_path: Path | None)"
     ),
 }
 
 #: Hand-maintained semantic layer, committed to the repo (PLAN.md §9).
 DEFAULT_CHANNEL_MAP = Path("config/channel_map.json")
+
+#: Hand-maintained rate parameters, transcribed from the bills.
+DEFAULT_TARIFF_PATH = Path("config/tariff.json")
 
 
 # ------------------------------------------------------------ shared options
@@ -489,7 +513,27 @@ def compact_daily_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
 
 
 @app.command("rollup")
-def rollup_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
+def rollup_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    poll_interval_s: Annotated[
+        int | None,
+        typer.Option(
+            "--poll-interval-s",
+            help=(
+                "Seconds each sample stands for, for kWh. Default: POLL_INTERVAL_S. "
+                "Pass the interval the rows were COLLECTED at when re-rolling old days."
+            ),
+        ),
+    ] = None,
+    allow_interval_mismatch: Annotated[
+        bool,
+        typer.Option(
+            "--allow-interval-mismatch",
+            help="Warn instead of refusing when the interval disagrees with the data.",
+        ),
+    ] = False,
+) -> None:
     """Rebuild the hourly rollup for each local day: rollup-YYYYMMDD.parquet.
 
     Regenerates the whole local day every time — cheap, and it avoids intra-day
@@ -503,12 +547,25 @@ def rollup_cmd(start: StartOpt = None, end: EndOpt = None) -> None:
     over the affected range. Fully idempotent and disposable — the hourly
     dataset can always be regenerated from raw.
 
+    GUARDED: the interval used for kWh is cross-checked against the data's own
+    median sample spacing, and a disagreement REFUSES rather than rescaling
+    history. Without that, changing POLL_INTERVAL_S and then re-running rollup
+    over old days would multiply every historical kWh by the ratio, silently.
+    When re-rolling days collected at a different cadence, say so with
+    --poll-interval-s.
+
     Default window: yesterday and today (local).
     """
     start_date, end_date = _resolve_range(
         start, end, default_start=_days_ago(1), default_end=_today()
     )
-    _run_stage("rollup", start=start_date, end=end_date)
+    _run_stage(
+        "rollup",
+        start=start_date,
+        end=end_date,
+        poll_interval_s=poll_interval_s,
+        allow_interval_mismatch=allow_interval_mismatch,
+    )
 
 
 @app.command("fetch-daily")
@@ -940,6 +997,13 @@ def compare_meter_cmd(
         str | None,
         typer.Option("--meter", help="Which meter's device_id to compare against."),
     ] = None,
+    channel_map: Annotated[
+        Path | None,
+        typer.Option(
+            "--channel-map",
+            help=f"Semantic layer, for the expected feed set. Default: {DEFAULT_CHANNEL_MAP}.",
+        ),
+    ] = None,
 ) -> None:
     """Compare the utility meter against the summed panel feeds, hour by hour.
 
@@ -952,9 +1016,11 @@ def compare_meter_cmd(
     warehouse uses, so this cannot disagree with energy/hourly about what an
     hour of watts is worth — including that kWh is observed-time-only.
 
-    Hours below --min-coverage are shown but kept out of the totals, and the
-    count of excluded hours is printed: a partly observed hour understates the
-    panels because the collector was down, not because the CTs are wrong.
+    An hour is totalled only if it clears --min-coverage AND every feed series
+    in the channel map reported. Both exclusions are shown and counted. The
+    second one matters because sample_count cannot see it: it is a minimum over
+    the channels that DID report, so a hub absent for a whole hour leaves the
+    survivors reading 100% while the panel total is short by a whole panel.
 
     Reads the SQLite spool, so it must run where the spool is — inside the
     container while the collector holds it:
@@ -975,7 +1041,224 @@ def compare_meter_cmd(
         source=source,
         meter=meter,
         min_coverage=min_coverage,
+        channel_map=channel_map,
     )
+
+
+@app.command("verify-bill")
+def verify_bill_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    meter: Annotated[
+        str | None,
+        typer.Option("--meter", help="Which meter's device_id to verify. Default: the map's primary."),
+    ] = None,
+    bill_kwh: Annotated[
+        float | None,
+        typer.Option("--bill-kwh", help="The kWh printed on the bill, to check the archive against."),
+    ] = None,
+    bill_total: Annotated[
+        float | None,
+        typer.Option("--bill-total", help="The dollar amount printed on the bill."),
+    ] = None,
+    tariff_path: Annotated[
+        Path | None,
+        typer.Option("--tariff", help=f"Tariff file. Default: {DEFAULT_TARIFF_PATH}."),
+    ] = None,
+    meter_dir: Annotated[
+        Path | None,
+        typer.Option("--meter-dir", help="Where the meter Parquet lives."),
+    ] = None,
+    source: Annotated[str, typer.Option("--source", help="Meter source to read.")] = "lge",
+    tolerance_pct: Annotated[
+        float,
+        typer.Option("--tolerance-pct", help="Dollar agreement within this is VERIFIED."),
+    ] = 1.0,
+    min_coverage: Annotated[
+        float,
+        typer.Option(
+            "--min-coverage",
+            help="Withhold a verdict below this fraction of the cycle's intervals.",
+        ),
+    ] = 0.995,
+) -> None:
+    """Check a utility bill against the meter's own interval readings, in dollars.
+
+    Sums energy/meter over the billing cycle, prices it through
+    config/tariff.json, and sets the result beside what LG&E charged. The kWh
+    are the utility's own readings, so a disagreement is arithmetic, not
+    instrument tolerance -- none of the CT-side caveats apply here.
+
+    --end is the meter READ date and is EXCLUSIVE. A cycle read 6/26 and again
+    7/28 is 32 days:
+
+        energycap verify-bill --start 2026-06-26 --end 2026-07-28 --meter 1308468
+
+    With the bill already transcribed into config/tariff.json, --bill-kwh and
+    --bill-total are read from there and can be omitted.
+
+    Coverage is checked against the DST-aware expected interval count: an
+    archive missing intervals makes any bill look overstated, so below
+    --min-coverage no verdict is given at all.
+    """
+    start_date, end_date = _resolve_range(
+        start, end, default_start=_days_ago(30), default_end=_today()
+    )
+    _run_stage(
+        "verify-bill",
+        start=start_date,
+        end=end_date,
+        meter=meter,
+        bill_kwh=bill_kwh,
+        bill_total=bill_total,
+        tariff_path=tariff_path,
+        meter_dir=meter_dir,
+        source=source,
+        tolerance_pct=tolerance_pct,
+        min_coverage=min_coverage,
+    )
+
+
+@app.command("watch-health")
+def watch_health_cmd(
+    url: Annotated[
+        str | None,
+        typer.Option("--url", help="Status endpoint of the WATCHED host. Default: HEALTHZ_URL."),
+    ] = None,
+    notify: Annotated[
+        bool,
+        typer.Option("--notify/--no-notify", help="Push alarms to Pushover."),
+    ] = True,
+    always_notify: Annotated[
+        bool,
+        typer.Option(
+            "--always-notify",
+            help="Push even when everything passes — for proving the channel works.",
+        ),
+    ] = False,
+) -> None:
+    """Check a collector's /healthz and push what is wrong to Pushover.
+
+    Exits 1 when any check fails, so a scheduler (launchd, cron) sees the
+    failure even if the push itself could not be delivered.
+
+        energycap watch-health --url http://<host>:8080/healthz
+
+    Run this on a DIFFERENT machine from the collector: a box that has died
+    cannot report that it died, which is why HEALTHZ_URL has no default.
+
+    Every rule treats a MISSING field as a failure, never as a pass. That is
+    the whole point -- `health.meter.stale` is absent until Green Button has
+    run once, and reading absence as healthy is the bug this command exists to
+    stop repeating.
+
+    See deploy/watchdog.md for the launchd job and the dead-man's-switch gap
+    this cannot close on its own.
+    """
+    result = _run_stage(
+        "watch-health", url=url, notify=notify, always_notify=always_notify
+    )
+    if isinstance(result, Mapping) and not result.get("ok", False):
+        raise typer.Exit(EXIT_STAGE_FAILED)
+
+
+@app.command("digest")
+def digest_cmd(
+    day: Annotated[
+        str | None,
+        typer.Option("--day", metavar="YYYY-MM-DD", help="Local day to review. Default: yesterday."),
+    ] = None,
+    notify: Annotated[
+        bool, typer.Option("--notify/--no-notify", help="Push findings to Pushover.")
+    ] = True,
+    always_notify: Annotated[
+        bool,
+        typer.Option("--always-notify", help="Push even when nothing is unusual."),
+    ] = False,
+    bucket: Annotated[
+        str | None, typer.Option("--bucket", help="Archive bucket. Default: S3_BUCKET.")
+    ] = None,
+) -> None:
+    """Review a day for anomalies and push what is worth looking at.
+
+    Two kinds of check. A trailing 21-day median band per circuit catches
+    whatever is unusual without knowing what a circuit is; five hard rules
+    catch specific expensive faults -- strip heat in mild weather, a load that
+    never cycles off, a circuit that went quiet, the barn outside its charging
+    envelope, and a rising overnight floor.
+
+    Every comparison is coverage-gated on observed_seconds: a day the collector
+    only half watched has half the kWh, and firing on that would teach you to
+    ignore the digest. Days that fall short are named as skipped, never treated
+    as quiet. A circuit without enough history is reported as un-baselined
+    rather than judged.
+
+    Findings are priced at the marginal rate from config/tariff.json -- the
+    cost of one more kWh, not the average, which fixed daily charges inflate.
+
+    Scheduled at 06:00 local as `digest_daily`.
+    """
+    _run_stage(
+        "digest",
+        local_day=_parse_date(day, "--day"),
+        bucket=bucket,
+        notify=notify,
+        always_notify=always_notify,
+    )
+
+
+@app.command("check-channels")
+def check_channels_cmd(
+    start: StartOpt = None,
+    end: EndOpt = None,
+    notify: Annotated[
+        bool, typer.Option("--notify/--no-notify", help="Push findings to Pushover.")
+    ] = True,
+    always_notify: Annotated[
+        bool,
+        typer.Option("--always-notify", help="Push even when the instruments look sound."),
+    ] = False,
+    bucket: Annotated[
+        str | None, typer.Option("--bucket", help="Archive bucket. Default: S3_BUCKET.")
+    ] = None,
+) -> None:
+    """Ask whether the METERS can be trusted, not whether we observed them.
+
+    Every other check here asks "did we observe it?" and all of them pass while
+    a CT channel returns the same wrong number for hours: full sample_count, no
+    null, a plausible value. That is DEVIATIONS #180, and it hid for six days.
+
+    Four checks, all over energy_hourly, none needing a new column. A frozen
+    channel (min == max for consecutive whole hours). A panel whose metered
+    circuits outdraw its own feed clamp, which is physically impossible and is
+    the one check independent of the failure mode. Disagreement with the utility
+    meter beyond tolerance, which is the ONLY check that sees a clamp reading
+    live but scaled wrong -- run it after touching any clamp. And a negative
+    reading, for a clamp fitted backwards.
+
+    Read-only: it writes nothing, anywhere. The Leviton fault it was built for
+    is upstream of this code and cannot be fixed here, so nothing is repaired,
+    interpolated or filtered out of the archive.
+
+    Thresholds are INTEGRITY_* in .env, each calibrated against eight days of
+    two real hubs -- one healthy, one faulty -- separating them with no false
+    positives. docs/check-channels.md carries the tables.
+
+    Defaults to yesterday. Exits nonzero when anything fires, so a scheduler
+    sees the failure even if the push could not be delivered.
+
+        energycap check-channels --start 2026-08-17 --end 2026-08-24
+    """
+    result = _run_stage(
+        "check-channels",
+        start=_parse_date(start, "--start"),
+        end=_parse_date(end, "--end"),
+        bucket=bucket,
+        notify=notify,
+        always_notify=always_notify,
+    )
+    if isinstance(result, Mapping) and not result.get("ok", True):
+        raise typer.Exit(EXIT_STAGE_FAILED)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -191,13 +191,23 @@ def run(
         # honest freshness signal for this dataset. A successful fetch that
         # returns nothing new leaves it unchanged, which is exactly the state
         # that used to look healthy while meter data quietly stopped.
+        #
+        # So a zero-row fetch must not send it at all. `record_success` merges
+        # whatever it is handed, and `None` would overwrite the stored
+        # timestamp -- deleting the `health.meter` block from /healthz in
+        # precisely the state (#177: LG&E publishing nothing) the block exists
+        # to expose. The watchdog would erase itself on duty.
         from energy_capture.health import get_status_store
+
+        freshness: dict[str, Any] = {}
+        if summary["last_ts_utc"] is not None:
+            freshness["newest_interval_utc"] = summary["last_ts_utc"]
 
         get_status_store().record_success(
             "greenbutton",
             rows=parsed.rows,
-            newest_interval_utc=summary["last_ts_utc"],
             meters=sorted(parsed.meters),
+            **freshness,
         )
 
     if target_bucket and not dry_run:

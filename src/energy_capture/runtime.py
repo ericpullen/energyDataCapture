@@ -115,6 +115,7 @@ from energy_capture.stages.poller import (
 __all__ = [
     "BRYANT_DAILY_AT",
     "DAILY_MAINTENANCE_AT",
+    "DIGEST_DAILY_AT",
     "GREENBUTTON_DAILY_AT",
     "UPLOAD_MINUTE",
     "ROLLUP_MINUTE",
@@ -123,12 +124,27 @@ __all__ = [
     "JobOutcome",
     "Runtime",
     "ScheduledJob",
+    "SCHEDULED_JOB_NAMES",
     "Scheduler",
     "default_jobs",
     "run",
 ]
 
 STAGE = "runtime"
+
+#: Every scheduled job, in firing-time order — the valid values for the
+#: ``SCHEDULED_JOBS`` setting. Kept as a constant so the setting can be
+#: documented and validated without building a schedule (which needs a spool);
+#: ``test_runtime`` asserts it matches what :func:`default_jobs` actually
+#: returns, so the two cannot drift.
+SCHEDULED_JOB_NAMES: tuple[str, ...] = (
+    "upload_hourly",
+    "rollup_hourly",
+    "daily_maintenance",
+    "bryant_daily_energy",
+    "greenbutton_daily",
+    "digest_daily",
+)
 
 #: Local minute-of-hour for the hourly jobs (PLAN.md §5: "~HH:05" / "~HH:20").
 UPLOAD_MINUTE = 5
@@ -141,6 +157,11 @@ BRYANT_DAILY_AT = (8, 30)
 #: LG&E publishes overnight and lags several hours; 09:15 local is comfortably
 #: after that and does not collide with the 08:30 Carrier fetch.
 GREENBUTTON_DAILY_AT = (9, 15)
+
+#: The nightly anomaly digest. AFTER 01:30 compaction and the re-roll, so it
+#: reads a finished D-1 rather than a partly written one, and early enough that
+#: the notification is waiting at breakfast rather than arriving mid-morning.
+DIGEST_DAILY_AT = (6, 0)
 #: Days of overlap re-read on every run, so a revised interval lands.
 GREENBUTTON_LOOKBACK_DAYS = 3
 
@@ -580,11 +601,31 @@ async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
     return await _call(fetch.run, start=start, end=today)
 
 
+async def _job_digest(now: datetime) -> Any:
+    """The nightly anomaly digest for D-1 (PLAN.md has no §; review item E).
+
+    Skips quietly when there is no archive to read: a deployment without S3 is
+    an ordinary state, not a failure, and failing here every morning would put
+    permanent noise in the very counters the watchdog reads.
+    """
+    module_name = "energy_capture.stages.digest"
+    try:
+        digest = importlib.import_module(module_name)
+    except Exception:  # pragma: no cover - defensive, matches the other jobs
+        _log.warning("scheduled_job_not_implemented", job="digest_daily", module=module_name)
+        return {"skipped": "not_implemented", "module": module_name}
+
+    if not get_settings().s3_bucket:
+        return {"skipped": "no_bucket"}
+    return await _call(digest.run, local_day=timeutil.local_date_of(now) - timedelta(days=1))
+
+
 def default_jobs(
     *,
     lookback_days: int = DAILY_LOOKBACK_DAYS,
     spool: SpoolDB | None = None,
     clock: Callable[[], datetime] | None = None,
+    jobs: Sequence[str] | None = None,
 ) -> tuple[ScheduledJob, ...]:
     """The schedule of PLAN.md §5, in firing-time order.
 
@@ -596,6 +637,14 @@ def default_jobs(
     Only ``bryant_daily_energy`` needs it, and only because the Carrier cloud
     dates its response relative to the fetch (see :func:`_job_bryant_daily`);
     every other job takes its window from the firing instant it is handed.
+
+    ``jobs`` selects a SUBSET by name, defaulting to the ``SCHEDULED_JOBS``
+    setting, and ``None``/empty means all of them — PLAN.md §5's one-container
+    design, which stays the default. The knob exists for the poller/batch split:
+    a process that does not run ``rollup_hourly`` and ``daily_maintenance``
+    needs no write access to derived data, which is the IAM boundary
+    DEVIATIONS #181 had to give up for want of exactly this. An unknown name
+    raises rather than being ignored.
     """
 
     async def hourly_upload(now: datetime) -> Any:
@@ -607,7 +656,7 @@ def default_jobs(
     async def bryant_daily(now: datetime) -> Any:
         return await _job_bryant_daily(now, clock=clock)
 
-    return (
+    every = (
         ScheduledJob(
             name="upload_hourly",
             schedule=HourlyAt(UPLOAD_MINUTE),
@@ -638,7 +687,30 @@ def default_jobs(
             run=_job_greenbutton_daily,
             description="LG&E Green Button meter intervals -> energy/meter",
         ),
+        ScheduledJob(
+            name="digest_daily",
+            schedule=DailyAt(*DIGEST_DAILY_AT),
+            run=_job_digest,
+            description="review D-1 for anomalies and push what is worth looking at",
+        ),
     )
+
+    wanted = tuple(jobs) if jobs is not None else get_settings().scheduled_job_names
+    if not wanted:
+        return every
+
+    known = {job.name: job for job in every}
+    unknown = [name for name in wanted if name not in known]
+    if unknown:
+        # Fail the boot. A typo that silently disabled the uploader would look
+        # exactly like a healthy collector whose archive stopped growing --
+        # DEVIATIONS #181's failure mode, arrived at from the other direction.
+        raise ValueError(
+            f"SCHEDULED_JOBS names {unknown} which are not scheduled jobs. "
+            f"Known jobs: {sorted(known)}. Leave SCHEDULED_JOBS empty to run all."
+        )
+    # Preserve firing-time order rather than the order they were listed in.
+    return tuple(job for job in every if job.name in set(wanted))
 
 
 # ------------------------------------------------------------------ scheduler
@@ -759,16 +831,59 @@ class Scheduler:
                 job=job.name,
                 error=f"{type(log_exc).__name__}: {log_exc}",
             )
+        self._record_success(job.name)
         return JobOutcome(name=job.name, ok=True, duration_s=duration_s, result=result)
+
+    def _store(self) -> Any:
+        store = self._status
+        if store is None:
+            from energy_capture.health import get_status_store
+
+            store = self._status = get_status_store()
+        return store
 
     def _record_failure(self, job: str, exc: BaseException) -> None:
         try:
-            store = self._status
-            if store is None:
-                from energy_capture.health import get_status_store
+            self._store().record_failure("scheduler", exc, job=job)
+        except Exception as status_exc:  # pragma: no cover - defensive
+            self._log.warning(
+                "status_update_failed", error=f"{type(status_exc).__name__}: {status_exc}"
+            )
 
-                store = self._status = get_status_store()
-            store.record_failure("scheduler", exc, job=job)
+    def _record_success(self, job: str) -> None:
+        """Clear the shared ``scheduler`` section — but only for the job that owns it.
+
+        Without any success path the section only ever counted UP: it was
+        written on failure and never on success, so ``consecutive_failures``
+        reached **203** on the live instance while every job was in fact
+        succeeding, and ``last_error`` still named a rollup failure from three
+        hours earlier. A counter that cannot go down is not a signal; anything
+        watching it alarms forever, gets muted, and misses the real event.
+        Found while building the watcher that would have depended on it
+        (DEVIATIONS #187).
+
+        The reset is deliberately **job-aware**. This one section is shared by
+        every job, so clearing it on any success would let the hourly uploader
+        wipe a rollup failure streak thirty seconds later — the counter would
+        oscillate 1, 0, 1, 0 and never reach a threshold. So a success only
+        clears the section when the failure recorded there belongs to the SAME
+        job. The meaning is therefore precise: *the job named in ``job`` has
+        failed ``consecutive_failures`` times in a row and has not succeeded
+        since.*
+
+        Even so, a watcher should key on each stage's own section (``rollup``,
+        ``uploader``, ``compactor``), which tracks one stage each and has always
+        reset correctly. This section is a convenience summary.
+        """
+        try:
+            store = self._store()
+            section = store.section("scheduler") or {}
+            owner = section.get("job")
+            streak = section.get("consecutive_failures") or 0
+            if streak and owner != job:
+                # Another job is the one failing. Leave its streak intact.
+                return
+            store.record_success("scheduler", job=job)
         except Exception as status_exc:  # pragma: no cover - defensive
             self._log.warning(
                 "status_update_failed", error=f"{type(status_exc).__name__}: {status_exc}"

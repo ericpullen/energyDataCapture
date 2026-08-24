@@ -50,17 +50,19 @@ needs to be told are things no schema can express:
   ``sample_count`` or an absent hour must never be read as zero consumption.
 
 One vocabulary fact needs prose rather than a list, and it is
-:data:`STAGE_REPRESENTATION_NOTE`: ``stage`` and ``stage_pct`` are two mutually
-exclusive renderings of ONE field (the outdoor unit's ``odu.opstat``), chosen by
-the hardware. A staged compressor reports a word and lands as ``stage``, an enum
-code; a variable-capacity one reports a 0-100 capacity percentage and lands as
-``stage_pct``, a real measurement. The live system is the second kind
-(``odu.type = gs3ngiphp``, ``opstat`` observed as ``"35"``), so it emits
-``stage_pct`` and no ``stage`` row will ever exist here. A reader who filters on
-``stage`` therefore gets an empty result — and an empty result is absence, not
-zero (CLAUDE.md rule 1). The note is carried by the database description and by
-every table comment either metric can reach, because the trap is invisible from
-the metric list alone — both names are on it, and one of them never lands.
+:data:`STAGE_REPRESENTATION_NOTE`: ``stage`` and ``stage_pct`` are two renderings
+of ONE field (the outdoor unit's ``odu.opstat``), and the rendering is chosen
+**per reading**. When the compressor reports a word it lands as ``stage``, an
+enum code; when it reports a 0-100 capacity percentage it lands as ``stage_pct``,
+a real measurement. The live system (``odu.type = gs3ngiphp``) does **both**: it
+sends a percentage while modulating and a word (``off``, ``dehumidify``) when it
+is not, so six days of archive hold 8,091 ``stage`` rows beside 9,010
+``stage_pct`` rows. A reader who filters on either one alone loses roughly half
+the day — and that absence is not zero (CLAUDE.md rule 1). The note is carried by
+the database description and by every table comment either metric can reach,
+because the trap is invisible from the metric list alone: both names are on it
+and nothing on the list says a single cycle emits only one of them. Corrected
+2026-08-23; DEVIATIONS.md #179 is why.
 
 The enum decode for ``mode``/``stage``/``fan`` is quoted straight out of
 :func:`energy_capture.sources.bryant.enum_decode_text`, so the comment cannot
@@ -375,21 +377,26 @@ ENUM_ROLLUP_WARNING: Final[str] = (
 ODU_TYPE_OBSERVED: Final[str] = "gs3ngiphp"
 
 #: ``odu.opstat`` — the compressor's operating state, and the HVAC signal that
-#: correlates with watts — has two mutually exclusive renderings decided by the
-#: hardware, and a reader who does not know that writes ``WHERE metric='stage'``
-#: and concludes the compressor never ran. The metric names are quoted from
-#: ``sources/bryant.py`` and the unit from ``model.UNIT_FOR_METRIC``, so a rename
-#: there cannot leave this sentence describing metrics that no longer exist.
+#: correlates with watts — has two renderings, and a reader who does not know
+#: that writes ``WHERE metric='stage'`` and loses half the day. The metric names
+#: are quoted from ``sources/bryant.py`` and the unit from
+#: ``model.UNIT_FOR_METRIC``, so a rename there cannot leave this sentence
+#: describing metrics that no longer exist.
 # Compressed 2026-08-22 when nine new metrics pushed both descriptions past the
-# 2048-character budget. The load-bearing half is the last clause — that on THIS
-# unit one of the two metrics can never appear — so that is what survived intact.
+# 2048-character budget, then CORRECTED 2026-08-23 (DEVIATIONS.md #179). The old
+# text said this unit emits stage_pct and `stage` NEVER appears. The archive says
+# otherwise: six days hold 8,091 stage rows and 9,010 stage_pct rows on this one
+# serial, because the rendering is chosen PER READING, not per system. The
+# load-bearing clause is now the last one — select both — so that is what must
+# survive any future compression.
 STAGE_REPRESENTATION_NOTE: Final[str] = " ".join(
     (
-        f"{bryant.STAGE_METRIC}/{bryant.STAGE_PCT_METRIC} are MUTUALLY EXCLUSIVE",
-        "renderings of one field (odu.opstat): staged units emit the enum,",
-        "VARIABLE-CAPACITY ones the pct.",
-        f"THIS unit is variable-capacity (odu.type {ODU_TYPE_OBSERVED}), so",
-        f"{bryant.STAGE_METRIC} NEVER appears: absence, not zero.",
+        f"{bryant.STAGE_METRIC}/{bryant.STAGE_PCT_METRIC}: two renderings of one",
+        "field (odu.opstat), chosen PER READING -- a word ->",
+        f"{bryant.STAGE_METRIC} (enum), a number -> {bryant.STAGE_PCT_METRIC}",
+        f"(0-100 {model.unit_for_metric(bryant.STAGE_PCT_METRIC)}). THIS unit",
+        f"({ODU_TYPE_OBSERVED}) emits BOTH, interleaved. SELECT BOTH: either one",
+        "alone drops half the rows, and that absence is not zero.",
     )
 )
 
@@ -439,13 +446,12 @@ _METRIC_GROUPS: Final[tuple[_MetricGroup, ...]] = (
                 "setpoint_heat_f",
                 "humidity_pct",
                 "mode",
-                # Two mutually exclusive renderings of ONE field, odu.opstat
-                # (model.UNIT_FOR_METRIC, DEVIATIONS.md #59): a staged outdoor
-                # unit emits `stage` (enum) and never `stage_pct`; a
-                # variable-capacity one emits `stage_pct` (0-100 percent) and
-                # never `stage`. Both are named everywhere either can appear,
-                # because a reader who filters on the one this system does not
-                # emit gets an empty result, not a zero.
+                # Two renderings of ONE field, odu.opstat (model.UNIT_FOR_METRIC,
+                # DEVIATIONS.md #59 and #179), chosen per reading: a word lands
+                # as `stage` (enum), a capacity percentage as `stage_pct` (0-100).
+                # This system emits BOTH, interleaved through the day. Both are
+                # named everywhere either can appear, because a reader who filters
+                # on one gets half the rows and no hint that the rest exist.
                 "stage",
                 "stage_pct",
                 "fan",
@@ -842,6 +848,12 @@ _HOURLY_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
         "half the kwh at equal watts. NULL — never 0 — for every metric except "
         "watts; 0 would read as 'no energy used'."
     ),
+    "observed_seconds": (
+        "kwh's denominator: sample_count * the poll interval these rows were "
+        "COLLECTED at. That interval is recorded nowhere else, so it is what "
+        "tells 30s energy from the same samples priced at 60s. Audit: kwh = "
+        "mean * observed_seconds / 3.6e6. NULL where kwh is."
+    ),
 }
 
 _DIM_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
@@ -1001,37 +1013,38 @@ _DAILY_DESCRIPTION = _paragraphs(
 
 _METER_DESCRIPTION = _paragraphs(
     "GRAIN: one row per (interval START, meter, metric, interval length) — "
-    "utility revenue-meter energy from LG&E Green Button Connect (ESPI). "
-    "ts_utc is the interval's START, never its midpoint or end; interval_s is "
-    "how long it covers.",
-    "READ THIS BEFORE YOU SUM ANYTHING. Every meter publishes the SAME energy "
-    "twice, as a 900s series AND a 3600s series. Summing value without "
-    "pinning interval_s DOUBLE COUNTS. Filter to one interval_s; never add "
-    "two together. That is why interval_s is in this table's dedupe key and "
-    "no other's.",
-    "TWO METERS, separate services, NEVER sum them: device_id 1308468 is the "
-    "HOUSE (~74-99 kWh/day), 1326254 is the BARN (~100% EV charging, 3.6-40 "
-    "kWh/day). dim_channel marks the house primary — join it rather than "
-    "hardcoding an id. device_id 944006 and 944401 are RETIRED house ids "
-    "republishing 1308468's own energy: duplicates, not extra consumption.",
-    "channel_id is electric_main (or gas_main); metric is kwh_interval (kWh) "
-    "or ccf_interval (CCF). Only electric has ever been served.",
+    "utility revenue-meter energy from LG&E Green Button (ESPI). ts_utc is "
+    "the START; interval_s is its length.",
+    "READ BEFORE YOU SUM. Each meter publishes the SAME energy at several "
+    "interval lengths — 900s, 3600s, and for the house 86400s (daily). "
+    "Summing value without pinning interval_s MULTIPLE-COUNTS (~triple for "
+    "all three). Filter to exactly one. Hence interval_s in this table's "
+    "dedupe key and no other's.",
+    "Spans differ: 900s/3600s start 2025-07-24; 86400s reaches back to "
+    "2024-01-01 and is the only history before then. They agree within 0.05% "
+    "where they overlap. Never mix grains in one SUM.",
+    "TWO METERS, separate services and rate schedules, NEVER sum: 1308468 is "
+    "the HOUSE (~74-99 kWh/day), 1326254 the BARN (~100% EV charging, "
+    "3.6-40 kWh/day). dim_channel marks the house primary — join it, do not "
+    "hardcode. 944006/944401 are RETIRED house ids republishing 1308468: "
+    "duplicates, not extra consumption.",
+    "channel_id is electric_main; metric is kwh_interval (kWh).",
     f"{_local_partition_clause(('year',), 'ts_local')} No month or day "
     "column, so a WHERE on one is COLUMN_NOT_FOUND: filter the rest of the "
     "date on ts_local or ts_utc.",
     "Dedupe key: (ts_utc, source, device_id, channel_id, metric, "
     "interval_s) — the canonical key PLUS interval_s.",
-    "This is the UTILITY's measurement and the independent check on our "
-    "sub-metering (`energycap compare-meter`, which reads ~3.4% high). "
-    "NOT interchangeable with energy_raw_30s or energy_hourly: "
-    "those are watts we sample every 30s, this is billed interval energy, and "
-    "the two never share a timestamp.",
-    "Gaps here are the utility's publication lag, NOT collector downtime: "
-    "LG&E publishes days late and revises, so recent days may be absent or "
-    "may change. But rule 1 still holds — AN ABSENT INTERVAL IS NOT ZERO "
-    "CONSUMPTION, and nothing here is interpolated or zero-filled. "
-    "Reverse-flow (net-generation) readings emit no row.",
+    "The UTILITY's own measurement: the check on our sub-metering "
+    "(compare-meter) and the basis for verifying a bill in dollars "
+    "(verify-bill). Over clean covered hours the summed feed CTs read a few "
+    "percent BELOW this meter — the panels UNDER-report — so a bill above "
+    "the panel total is expected CT under-read, not over-billing.",
+    "Gaps are the utility's publication lag, NOT collector downtime: LG&E "
+    "publishes days late and revises. Rule 1 holds — AN ABSENT INTERVAL IS "
+    "NOT ZERO CONSUMPTION; nothing is interpolated or zero-filled. "
+    "Reverse-flow readings emit no row.",
 )
+
 
 _METER_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
     "unit": (

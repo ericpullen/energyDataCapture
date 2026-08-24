@@ -3537,8 +3537,986 @@ here. `meterview.primary_meter` is left reading `channel_map.json` — it runs b
 the Mac and does not need S3 — but it is no longer the *only* way to learn the fact.
 
 
+## 179. `stage` is not permanently empty — `odu.opstat` picks its shape per reading
+
+**#59 predicted the mechanism correctly and then the documentation drew the wrong conclusion
+from it.** #59 said `odu.opstat` arrives either as a word or as a capacity percentage, that the
+two are different measurements, and that they must therefore become two metrics — `stage`
+(`unit='enum'`) and `stage_pct` (`unit='pct'`). All of that is right, and
+`sources/bryant.stage_metric_for` implements it as a **per-value** classifier: `_looks_numeric`
+on the string that just arrived.
+
+What #59, #75.1, the README and every Glue table comment then asserted was that the *choice*
+is made once, by the hardware — "two mutually exclusive renderings decided by the hardware, and
+a system only ever produces one of them" — and that this house, being a Greenspeed
+variable-capacity unit (`odu.type = "gs3ngiphp"`, `opstat` observed as `"35"` on 2026-08-17),
+would emit `stage_pct` and **"no `stage` row will ever exist here"**. The README went further and
+told a reader that `WHERE metric = 'stage'` "Returns NOTHING on this system."
+
+**Six days of archive say otherwise.** `energy/raw_30s` for 2026-08-17→23, one serial
+(`4022W200213`), one outdoor unit, nothing reconfigured or reflashed:
+
+| local day | `stage` rows | `stage_pct` rows |
+|---|---|---|
+| 08-17 (partial) | 17 | 1,013 |
+| 08-18 | 847 | 2,025 |
+| 08-19 | 1,945 | 934 |
+| 08-20 | 813 | 2,067 |
+| 08-21 | 1,518 | 1,361 |
+| 08-22 | 1,430 | 1,451 |
+| 08-23 (to 14:00) | 1,521 | 159 |
+| **total** | **8,091** | **9,010** |
+
+47% / 53%. Not a handful of stragglers around a firmware event — an even split, every day, and
+the flip happens several times a day. The `stage` values observed are `off` (6,837 rows) and
+`dehumidify` (1,254); the `stage_pct` values run 13–86.
+
+**The mechanism, now that there is enough data to see it:** a variable-capacity unit reports a
+*percentage while the compressor is modulating* and falls back to a *word* when it is not. The
+field's shape tracks compressor state, so it changes as often as the compressor does. 2026-08-23
+is the clean illustration — the compressor stopped at 05:31:03 local and from 06:00 onward every
+single cycle is a `stage` row, 120 an hour, while the whole of the previous afternoon's cooling
+block (08-22 15:00–22:00) is `stage_pct` at 120 an hour.
+
+The code needed no change. The classifier was already per-value, `STAGE_CODES` was never
+renumbered, the two metrics never share a dedupe key, and the archive is correct throughout:
+every row ever written records what the API actually said. **What was wrong was every sentence
+that told a reader to pick one metric**, which is the worst possible flavour of wrong here,
+because the documents exist precisely so that a human or an LLM can write a correct `WHERE`
+clause without reading the source. A reader who followed the README lost half the day and was
+told, in bold, that the empty half was impossible.
+
+Corrected in four places, all of which had independently retyped the claim:
+
+1. **README** — the data-model summary, the enum-decode bullet ("`stage` is **permanently empty
+   on this system**"), and the whole "Compressor stage: `stage` vs `stage_pct`" section, whose
+   SQL example block now shows the `max(CASE WHEN metric = …)` pivot that selects both instead of
+   two `WHERE` clauses labelled right and wrong.
+2. **`aws/glue.py`** — `STAGE_REPRESENTATION_NOTE`, the string published into the Glue database
+   description and into every table comment either metric can reach. This is the one that
+   mattered most: it is what an LLM reads to orient itself, and it said
+   "`stage` NEVER appears: absence, not zero." It now says the rendering is chosen PER READING,
+   that this unit emits BOTH, and SELECT BOTH. Kept to 267 characters — 35 more than the text it
+   replaced, which fit under the 2048-character table-comment budget only after trimming; #174
+   is still the reason that budget is tight.
+3. **`sources/bryant.py`** — trap 6 in the module docstring, which said "the hardware picks".
+4. **The tests that pinned the wrong words.** `test_glue.py` asserted `"MUTUALLY EXCLUSIVE"` and
+   `"VARIABLE-CAPACITY"` appeared in every stage-bearing table comment, and `test_docs.py`
+   asserted `"mutually exclusive"` appeared in the README. Those tests were doing their job —
+   they held the two documents to the same story — they were just holding them to a false one.
+   They now pin `PER READING`, `SELECT BOTH` and `absence is not zero`, which are the parts that
+   are true and the parts a reader acts on.
+
+**Two smaller consequences worth writing down.**
+
+`energycap discover` prints `stage_metric` per system, and #59 offered that as the way to answer
+"which rendering does this system emit" without waiting for a poll cycle. It cannot answer that
+question. It reports the rendering of the **single reading it just took** — which is exactly how
+the wrong conclusion got made on 2026-08-17, from one `opstat = "35"`. The README now says so.
+Only the archive can answer it, and the honest answer for any variable-capacity unit is "both".
+
+`bryant_stage_representation` logs at INFO on first sight of a rendering "and again on any
+change". It was written to catch a replaced or reflashed outdoor unit — a once-in-years event —
+and it is instead firing several times a day, forever, on a healthy system. Left as-is rather
+than demoted: the log is not lying, and the row counts in `status.json`
+(`stage_pct_rows` / `stage_enum_rows`) are the numbers to read. But `stage_representation`, the
+single-valued tag beside them, describes only the most recent cycle and should not be read as a
+property of the system.
+
+
+## 180. Panel B's feed CT reports 0 A while its own breakers report 1.9 kW
+
+Not a deviation from the spec — a deviation from what the data appears to say. Recorded here
+because CLAUDE.md rule 2 ("record what the API said, verbatim; filtering is a query-time
+concern") means the archive is *correct* and every naive query over it is *wrong*, and the only
+place that can be written down is here.
+
+**What the archive shows.** Over 2026-08-17 → 08-23, exact `0.0` on the Leviton CT `watts`
+channels:
+
+| hub | panel | CT channels | samples | exact zeros |
+|---|---|---|---|---|
+| `1000_0046_1D48` | B | `ct_1_a/b`, `ct_2_a/b` | 68,420 | **29–60% every single day** |
+| `1000_0046_1D52` | A | `ct_1_a/b` | 34,210 | **0. Not one, in six days.** |
+
+**Five things that are ruled out, each by a query rather than an argument.**
+
+1. **Not a gap, and not a failed poll.** `volts = 121.0` and `hz = 60.0` are present and correct
+   on the *same hub, same `ts_utc`* in every one of the 2,881 zero cycles checked. The hub was
+   connected and answering.
+2. **Not the watts arithmetic.** `amps` is `0.0` in 29,325 of 29,325 rows where `watts` is `0.0`,
+   and there is **not one** row with `watts = 0` and `amps > 0`. The current measurement itself is
+   zero, so this is not a power-factor or `V × A` bug.
+3. **Not the hub, and not the transport.** Panel B's smart breakers report normally straight
+   through the zero runs, down to `0.228 A` (`breaker_p10`) and `0.17 A` (`breaker_p26`). Whatever
+   fails, fails per CT object.
+4. **Not rounding or a small-value floor.** No CT sample on either hub has ever landed between
+   `0` and `0.562 A`. The clamp reports `0` or a real number, with nothing in between.
+5. **Not per-sample noise.** 143 runs on `ct_1_a` alone: median **7 minutes**, mean 10, maximum
+   **63.5 minutes**.
+
+**And the observation that settles it.** 2026-08-23, local, `1000_0046_1D48`:
+
+```
+03:20:03   ct_1_a: 0.0 W / 0.000 A     breaker_p10 (heat pump): 834 W
+03:21:03   ct_1_a: 0.0 W / 0.000 A     breaker_p10 (heat pump): 834 W
+   … eleven consecutive cycles, 5m30s …
+03:25:33   ct_1_a: 0.0 W / 0.000 A     breaker_p10:              12 W
+```
+
+834 W across two legs is ~3.5 A per leg, an order of magnitude above any plausible dead-band,
+flowing through a panel whose feed clamp reports exactly zero amps. Across all latched cycles
+80.5% carry under 120 W of breaker load — which is why this looks like a simple under-range at
+first — but **19.5% carry 300 W to 1,960 W**.
+
+So the reading does not merely drop out at low current: **it latches, and does not recover when
+load returns.** That also explains every secondary pattern, all of which are load-shaped rather
+than clock-shaped:
+
+- Concentrated 22:00–07:00 local, nearly absent 11:00–13:00. Panel B's only loads are the heat
+  pump, the cooktop and the double oven, all of which are off overnight.
+- Longer runs the deeper into the night (mean 1,159 s in the 05:00 hour, 270 s at 13:00).
+- Strictly nested: the `ct_1` pair is **never** zero unless the `ct_2` pair is also zero — 3,165
+  cycles both, **0 cycles `ct_1` alone**, over 19,505. This looked like a shared-subsystem clue
+  and it is not; see the blower cross-check below.
+- No alignment to any clock minute, so nothing periodic in our own code is doing it.
+- Panel A is exempt because its feed never goes below **2.455 A**. It never enters the dropout
+  that starts the latch. This is not a healthier panel; it is a busier one.
+
+**Cross-checked against an independent instrument.** `energy_meter` (LG&E house meter `1308468`,
+900 s series) versus the summed feed CTs for 2026-08-23, hour by hour: `−22.2%`, `−12.5%`,
+`−18.7%`, `−13.0%` for 03:00–06:00, the four hours containing zeros, against `+4.6%`, `−3.6%`,
+`−2.8%` for the three that contain none. The clean hours reproduce the `~3.4% high` figure
+`compare-meter` established in STATE.md, so the sub-metering is sound and the deficit is
+entirely these latched runs.
+
+**The first hypothesis was ours, and the experiment killed it.** The obvious suspect was the
+WebSocket current-state store: `LEVITON_INGEST=hybrid` gates freshness on the *connection*, never
+on how old a field is, so the store cannot distinguish *"the hub has told me nothing because the
+value is genuinely unchanged"* from *"the hub has stopped telling me anything about this
+channel"*. A CT that drops out at low current and is then never republished would leave the store
+handing out `0` forever — the same shape as the REST staleness `.env.example` documents (a feed
+frozen at `4086.05 W` for 46 consecutive reads), with a different frozen value. Three live
+readings seemed to agree: reconcile drift at `15 differing of 65` against the `4 of 24` STATE.md
+records, `awaiting_sync` at **7** rather than the `0` STATE.md reports as the WebSocket's headline
+achievement, and `/ui/data` serving `breaker_p0` at `age_s = 98787` for a channel REST no longer
+returns at all.
+
+**It is not the store. It is the hub, and both transports read the same wrong number.**
+
+The A/B ran 2026-08-23 20:18Z → 2026-08-24 06:23Z, 900 paired cycles, 16:18 → 02:23 local, so it
+spanned the whole dense part of the latch window. 11 cycles lost to fetch errors. Over 3,556
+comparable CT observations:
+
+| | count | share |
+|---|---|---|
+| WebSocket store **and** REST both exactly `0` | 1,273 | 35.8% |
+| WS `0` while REST reports load | 17 | 0.5% |
+| REST `0` while WS reports load | 23 | 0.6% |
+
+A latching store would make the second row large and the third row near-zero. They are the same
+size, and the 17 are almost all transition samples — `rest prev = 0.0, next = <the value>` — which
+is what two readers a few seconds apart look like at the edge of a run, not a stale cache. The
+`12–15 differing of 65` reconcile drift is the same jitter measured across mostly fast-changing
+breaker channels, and is not evidence of anything.
+
+**And REST reproduces the impossible reading directly, with no WebSocket anywhere in the path:**
+
+```
+time_utc   feed_W  feed_A  brk_sum_W     hp_W    hp_A     <- one REST response, one hub
+04:57:00      0.0   0.000       1467   1457.0   6.085
+04:57:41      0.0   0.000       1467   1457.0   6.085
+05:52:26      0.0   0.000       1764   1754.0   7.330
+```
+
+Of 114 REST observations with the feed at `0`, **32 carry 300 W or more** of breaker load on the
+same hub in the same response and 7 carry over 1 kW. REST zero-run lengths match the archive's
+WS-fed runs in shape (8 runs, median 360 s, mean 428 s, max 960 s, against median 420 s / mean
+604 s / max 3810 s). Same phenomenon, same hub, different transport.
+
+So the fault is inside the load centre: **the hub reports `0 A` on its CT channels while
+simultaneously reporting real current on its breaker channels, over both REST and the
+WebSocket.** Our pipeline is recording that faithfully, which is cardinal rule 2 working exactly
+as intended and is the reason the evidence existed to find this at all.
+
+The `breaker_p0`-at-27-hours observation stands on its own and is unrelated: the store retains
+channels REST has stopped returning. The poller drops them before the spool (19 rows ever
+archived), so it is a dashboard cosmetic, not a data defect. Worth a separate look, not this one.
+
+**A second cross-check narrowed the defect, and it exonerated `ct_2`.** `ct_2` clamps the HVAC
+subpanel feeder, whose only real load is the air-handler blower — and Bryant reports that blower's
+speed independently, 30 s for 30 s. Matched by the minute over eight days:
+
+| blower state | minutes | `ct_2` at zero | mean W when `ct_2` reports |
+|---|---|---|---|
+| stopped | 1,331 | 98.1% | 603 |
+| low (<600 rpm) | 5,021 | 95.1% | 172 |
+| running (≥600 rpm) | 3,402 | **6.8%** | 694 |
+
+`ct_2` reads zero when there is genuinely nothing to read and reports correctly the moment the
+blower spins up. **So the "`ct_2` fails 70% of the time" figure above is wrong as a fault rate** —
+most of those zeros are honest, and this entry originally implied otherwise. `ct_2` shares the
+low-current floor and simply spends most of its life below it.
+
+The same split on `ct_1` is what isolates the real defect — 62.1% zero with the blower stopped,
+15.5% low, 1.9% running. `ct_1` clamps the whole-panel service feed, which is *never*
+legitimately at zero (the panel always carries at least heat-pump standby), and 172 of its 750
+zero cycles coincide with ≥300 W measured on that hub's own breakers.
+
+That also kills the nesting clue: `ct_1` never drops out without `ct_2` because `ct_2` always
+carries less current and always crosses the threshold first. **Load ordering, not a shared
+failure path.** Worth stating because the reverse reading is the intuitive one and it is wrong.
+
+So the defect is narrow and stateable: **the channel-1 `GRID_POWER` CT pair on
+`1000_0046_1D48` enters a low-current dropout and does not exit it when current returns** — up to
+1,960 W, up to 63.5 minutes, over both transports, on the same firmware (2.1.2) as the hub that
+has never done it once. `connected: false` is not the tell: all six CT channels on both hubs
+report it, including the pair that never fails.
+
+### 2026-08-24: the restart failed, and it exposed a second failure mode this entry had missed
+
+The hub was power-cycled at 10:40 local. **It did not fix anything, and the investigation above
+was measuring only half the fault.**
+
+Everything before this looked for `value = 0`. The other mode is **a frozen non-zero value**, and
+it is both more common and easier to prove. On 2026-08-24 the feed CT returned `489.3 W` for
+**600 consecutive samples, 05:00 → 10:41 local, one distinct value across five hours**, while
+`breaker_p10` on the same hub cycled 0 → 165 W with 5–13 distinct values per hour. Summing that
+panel's metered children exceeds the frozen feed reading in **459 of those 600 cycles**, by up to
+116 W — physically impossible, since all of it passes through the feed clamp.
+
+Across eight days, distinct values per channel-hour on the feed CT pairs: the healthy hub
+averages **55.0** (2 of 326 channel-hours pinned to one value); `1D48` averages **8.2** (**53 of
+326** pinned). The independent REST-only reader saw the same thing — 42 distinct non-zero values
+in 900 samples with a longest identical run of **141**, against 131 values and a longest run of
+36 on the healthy hub. So the freeze is not a WebSocket-store artefact either.
+
+**Why this matters beyond the hardware:** "a gap stays a gap" (rule 1) and "record what the API
+said" (rule 2) are both being honoured, and the archive is still correct — but a frozen non-zero
+reading is invisible to every check this project has. `sample_count` is full, no row is missing,
+no value is null, and the number is plausible. Only comparing a channel against its own children,
+or counting distinct values per hour, catches it. **That is a query-surface gap worth closing**:
+a `distinct_values` column in the hourly rollup would have surfaced this on day one, and it is
+cheap — one `count(DISTINCT value)` in `rollup.sql`. Not implemented; noted as the concrete
+follow-up.
+
+The restart's one useful gift is the mechanism. At 10:41:51, about a minute after the reset, the
+feed CT updated **exactly once** (`489.3 → 494.76`) and then froze again at the new value for the
+next 90 minutes, while the healthy hub's feed swung 2,755 → 920 W in 57 seconds. The hub appears
+to take a single CT reading at startup and then stop refreshing the channel. That is now the
+headline symptom in the support report.
+
+Corrected consequence for the earlier text: recovery is **not** always "clean and complete". The
+zero runs recover; the frozen runs are not recoveries at all, just a different stuck value.
+
+Still open, and not answerable from here: clamp hardware, that hub's CT inputs, or firmware.
+**This is a Leviton bug to report**, not one we can fix — drafted in
+`docs/leviton-ct-zero-report.md`. A power cycle of the affected hub is being tried first, since
+a stuck firmware state is cheap to eliminate and both hubs run identical firmware.
+
+**Why S3 cannot settle it, which is the actionable gap.** Nothing in the archive records *which
+path supplied a value*. A row that came from the WebSocket store and a row that came from a REST
+reconcile are byte-identical, so no query over `energy/raw_30s` can distinguish a stale store
+from an honest hub reading. That is worth fixing independently of this bug — a per-cycle
+`value_source` is already in the log line and in `status.json`, and only the archive lacks it.
+
+**How the experiment was run, and why it had to be overnight.** An A/B against the same channels
+at the same moments: `LEVITON_INGEST=rest` with its own `SPOOL_DIR` on the Mac, paired every 30 s
+against the production process's `GET /ui/data`. Safe to run beside production for two reasons
+worth reusing: `poll --once` sets `run_background = (not once)`, so **no bandwidth keepalive is
+ever sent** — which is the one Leviton call that can disconnect a hub — and `rest` mode opens no
+socket at all. One login, token cached in the probe's own `tokens/` and reused for all 900 cycles.
+
+It had to span 22:00–02:00. The first paired sample, at 16:15 local, had Panel B drawing 7.8 A
+with the heat pump at 1902 W, and WS and REST agreed to three decimals on every one of 30
+channels. **The fault cannot be observed while the panel is busy** — which is exactly why six
+days of otherwise clean-looking data hid it, and why any future probe of this must be scheduled
+against the load, not against the clock.
+
+**The fix this entry originally proposed would have been wrong, and that is worth recording.**
+The plan was to give **zero-valued** WS entries a staleness timeout and emit nothing once it
+expired, turning a latched `0` into an honest gap. It would not have worked: the hub reports the
+zero over REST too, so the timeout would fire on values that are being actively republished, and
+`rest` mode — which has no store at all — would keep the defect untouched. It would also
+manufacture gaps over genuine zeros, which is its own violation of cardinal rule 1 in the
+opposite direction. **Do not add a staleness timeout for this.** The defect is upstream of every
+line of our code, and the honest handling is to keep recording verbatim and correct at query
+time.
+
+**Until then, at query time.** Panel B's feed CT under-reports and must not be used for kWh in
+any hour containing zeros. `sum(breakers) + ct_2` on that hub reconciles to the feed at 100–102%
+in clean hours and is the better substitute — with the caveat that `ct_2` carries the same
+defect. `energy_meter` is the arbiter wherever it overlaps. And a `WHERE value > 0` filter is
+**not** a fix: dropping the zeros and rescaling the surviving mean to a full cadence overshot the
+meter by 55% (23.49 kWh against 15.16) for 02:00–08:30 on 08-23, because the latched samples are
+not a random subset of the hour.
+
+
+## 181. The collector's `energy/hourly/` denial is lifted — the boundary was guarding a split that has not happened
+
+`docs/s3-storage.md` Phase 0 built two scoped IAM users and then did the thing most IAM work
+skips: it **asserted the denials against the real API**, not `simulate-principal-policy`. The
+collector key could write `energy/raw_30s/` and `energy/_tmp/` and was confirmed denied on
+`energy/hourly/` (`PutObject`) and `glue:GetDatabases`, "because the always-on internet-facing
+box cannot touch derived data or the catalog." That is a good boundary, correctly built, and
+correctly verified.
+
+**It was guarding an architecture that does not exist yet.** `PLAN.md` §5's design is one
+container, one process, and `energycap run` hosts the poll loops *and* the in-process scheduler:
+hourly upload, 01:30 daily compaction, hourly rollup. The poller/batch split that would move the
+last two off the instance is listed in `STATE.md` as *next*, not done — and there is **no
+configuration knob to disable a scheduled job**. `grep -nE "enabl|disabl" config.py` returns
+`leviton_ws_enabled` and `leviton_rest_reconcile_enabled` and nothing else.
+
+So the boundary did not prevent the collector from writing derived data. It made the collector
+**fail hourly, forever, in a way nothing was watching**:
+
+```
+"rollup": { "consecutive_failures": 6,
+  "last_error": "AccessDenied: ... user/energycap-collector is not authorized to perform:
+                 s3:PutObject on resource:
+                 \"arn:aws:s3:::ericpullen-energycap/energy/hourly/year=2026/month=08/
+                 rollup-20260823.parquet\" because no identity-based policy allows the
+                 s3:PutObject action",
+  "last_day_attempted": "2026-08-23" }
+```
+
+`energy/hourly/` was stale at `rollup-20260822.parquet` while `raw_30s` uploaded cleanly every
+hour, which is exactly the shape of failure that hides: the dataset a human looks at was fine,
+the derived one nobody lists was frozen, and `/healthz` was reporting it accurately the whole
+time to nobody.
+
+**`v2` also omitted `energy/raw_30s_parts_archive/*` entirely** — no write, no `ListBucket`
+prefix. The 01:30 compaction moves a day's hourly parts there after verifying the day file, so
+it would have failed on its first run on this host too. It had not failed yet only because the
+process restarted at 12:53 local and 01:30 had not come round; `compactor` read
+`consecutive_failures: 0, last_success_utc: null`, which is "never due", not "never broken", and
+is easy to misread as the latter.
+
+**Resolved by widening the collector policy (`v3`), not by fixing the split.** A new
+`WriteDerivedDataAndThePartsArchive` statement grants `PutObject`/`GetObject`/`DeleteObject` on
+`energy/hourly/*` and `energy/raw_30s_parts_archive/*`, and the archive prefix joins the
+`ListBucket` condition. The old read-only-on-`hourly` statement collapses to `dim_channel` only,
+since `hourly` reads are now covered by the write statement. **`glue:GetDatabases` stays
+denied** — the catalog half of the boundary is untouched, and `create-glue-tables` remains a
+batch/admin operation.
+
+This was a deliberate choice between three options, taken with the trade-off stated rather than
+discovered later:
+
+| | |
+|---|---|
+| Widen the policy (**chosen**) | No code change; rollup and compaction work tonight. Costs the boundary. |
+| Grant the parts archive only, disable the rollup job | Keeps the boundary; needs a new config knob and a batch runner for `rollup`. |
+| Do the job split now | What the policy was written for; largest change, and `hourly` stays stale until the batch side is scheduled and running. |
+
+**What is given up, stated plainly.** The internet-facing box can now overwrite and delete
+derived data. The blast radius is bounded by the fact that `energy/hourly/` is disposable by
+design — `rollup` rebuilds any local date range from `raw_30s`, idempotently, which is cardinal
+rule 7 — and the parts archive is already covered by the `expire-parts-archive` lifecycle rule.
+So the realistic worst case is "re-run a stage", not "lose data". It is still strictly less
+containment than `v2` had, and reinstating `v2` is not possible without breaking the collector
+until the split exists. If the split is ever done, this entry is the thing to revisit first.
+
+**Verified against the real API as `energycap-collector`**, per the standard this document set
+for itself: `PutObject` to `energy/hourly/`, `PutObject` to `energy/raw_30s_parts_archive/`, and
+the `CopyObject` into `energy/hourly/` that was the failing call — all three succeeded. Smoke-test
+objects hard-deleted with their versions (versioning is on, so a plain delete only writes a
+marker); 0 versions and 0 delete markers confirmed on both prefixes afterwards.
+
+One footnote against #174's neighbour trap: **`v3` propagated instantly.** Phase 0 recorded that
+a new policy *version* took over four minutes to go live, and warned against believing a fresh
+grant is wrong too early. This time the first call after `create-policy-version --set-as-default`
+already succeeded. Both observations are real; the honest rule is that version propagation is
+unpredictable, so retry before re-diagnosing, and never trust `simulate-principal-policy` in
+either direction.
+
+
 The remaining open questions — Okta token lifetimes and whether the refresh token rotates,
 whether the spoofed `Origin`/`Referer`/`Mobile-App-Brand` headers are load-bearing, the
 real domain of `status.mode`, the exact shape of `getInfinityEnergy`, the units behind
 `statpress`/`blwrpm`/`oat`, and the contents of the legacy DynamoDB table — are enumerated
 in **#75**, which remains the checklist for the first live run.
+
+## 182. Green Button carries no prices, so the tariff is a committed config file
+
+PLAN.md §13 designs the meter dataset as kWh and stops there; `docs/review-2026-08-23.md`
+B5 asks for the dollars. The first question was whether the utility already sends them.
+
+**It does not, and this is settled rather than assumed.** Against a real LG&E export
+(`data/20260809_20260918_GreenButton.xml`, 5,022 `IntervalReading`s):
+
+| Checked | Result |
+|---|---|
+| `cost` element on any `IntervalReading` | **0 occurrences** |
+| `UsageSummary` / `ElectricPowerUsageSummary` | **absent** |
+| `TariffProfile`, `billingPeriod`, rate-plan elements | **absent** |
+| `ReadingType/currency` | **`0`** on all six — ESPI's "not applicable" |
+| Resources reachable from `link rel` | UsagePoint, MeterReading, ReadingType, IntervalBlock, LocalTimeParameters. Nothing billing-shaped to walk to. |
+
+Structurally consistent with the registration in `docs/lge-greenbutton.md`: the granted
+scope is `FB=1_3_4_5` (Common, Connect My Data, Interval Metering, Interval Electric
+Metering) and LG&E's required function-block set tops out at interval metering. There is
+no billing block to have asked for.
+
+So dollars can only come from a transcribed tariff, which is **`config/tariff.json`** —
+hand-maintained and committed beside `channel_map.json`, and the same kind of artefact: a
+semantic layer the data cannot supply about itself. `tests/test_tariff.py` replays every
+cycle in it and requires the printed total back to the cent, so it cannot rot silently.
+
+**The bills are deliberately not committed.** They are account documents with names,
+addresses and account numbers on them; `data/` is gitignored. Only the derived rate
+parameters are in the repo.
+
+One trap recorded because it looks exactly like billing data and is not: `cost_day_usd` in
+`energy/daily` is **Carrier's own HVAC-only estimate** at whatever rate is typed into the
+thermostat. It is the only USD in the archive and it must never be treated as a bill.
+
+## 183. Two services, two rate schedules — and the riders do not apply to the same base
+
+Every meter-side surface in this project treats the barn as "the other meter". For pricing
+it is more than that: **a different rate schedule on a different account**, and the
+difference is not a scale factor.
+
+| | House `1308468` | Barn `1326254` |
+|---|---|---|
+| Account | *(separate accounts; numbers not committed — public repo)* | *(ditto)* |
+| Schedule | Residential Electric Service | **General Service Single Phase** |
+| Basic service | $0.47/day | $1.29/day |
+| Energy charge | $0.11362/kWh | $0.13248/kWh |
+| Fuel adjustment inside the rider base | **yes** | **no** |
+| Flat deduction from the rider base | none | **$0.0286/kWh** |
+| Home energy assistance charge | $0.30/mo | not charged |
+| KY sales tax | exempt (primary residence) | **6%**, on top of the school tax |
+| Demand register | none | kW, printed *Information Only*, **not billed** |
+
+And the three percentage riders each apply to a **different** base — on one July house bill
+the printed bases are $330.69, $332.38 and $320.68:
+
+```
+env_base  = basic + energy + DSM + FAC        (Residential)
+          = basic + energy + DSM              (General Service; FAC excluded)
+          less $0.0286/kWh                    (General Service only)
+rar_base  = env_base + environmental_surcharge
+pgr_base  = basic + energy                    (excludes DSM and FAC)
+school_base = total_electric - home_energy_assistance   (the one untaxed line)
+sales_base  = total_electric + school_tax     (levied ON TOP of it, not alongside)
+```
+
+All of it derived from, and re-verified against, ten bills per meter — twenty of twenty
+reproduce to the cent. Money is `Decimal` with `ROUND_HALF_UP` **per printed line**, because
+LG&E rounds each line and sums the rounded lines; summing exact products and rounding once
+gives a different answer, and float banker's rounding gives a third.
+
+Two further facts the bills gave up, recorded so nobody re-derives them:
+
+- **The fuel adjustment and the three rider percentages are re-set monthly and cannot be
+  predicted.** Ten observed months span $0.00048 to $0.01063/kWh on the fuel adjustment
+  alone — a 22x range — and riders flip between charge and credit (`0.380% CR`). So
+  `billing_cycles` in the tariff file is *history*, not a forecast, and a cycle with no bill
+  on file is reported as `no_verdict_estimated_riders` rather than being quietly totalled.
+- **A mid-cycle rate change is split by actual metered usage, not by day count.** The
+  2026-01 house bill put 355 kWh at the old rate where day-proration gives 335. `price_cycle`
+  reproduces the real split when handed `kwh_by_date` — which this project has, at 15-minute
+  grain — and says `allocation="day_proration"` when it does not. The residual on the three
+  affected cycles is bounded at $0.25 by a test.
+
+## 184. The billing cycle is `(read_start, read_end]` — measured, because the day count cannot catch it
+
+A bill prints two meter read dates and a day count: read 6/26 and again 7/28, "32 Days
+Billed". Both obvious readings of that give 32 days, so **the day count cannot distinguish
+them** — only the kWh move. `verify-bill` initially treated the end read date as exclusive,
+which is wrong.
+
+Summing the meter series over each cycle both ways, against the billed kWh:
+
+| Convention | Barn, 8 full cycles | House, 3 full cycles |
+|---|---|---|
+| `[read_start, read_end)` — end date excluded | mean abs error **3.67%** | **0.56%** |
+| `(read_start, read_end]` — end date included | mean abs error **0.16%** | **0.05%** |
+
+A 23x improvement, and the residual loses its alternating sign — the alternation was energy
+being shifted between adjacent cycles. Physically the reads land late in the day, so usage on
+the read date has already accrued to the cycle being closed.
+
+Corroborated independently: solving for the 2026-01 interim-rate boundary from the barn's
+15-minute series (find the day where cumulative kWh reaches the 64 kWh the bill put at the
+old rate) lands on **2026-01-01** under this convention — a clean administrative date — where
+the exclusive reading gives 2025-12-31.
+
+This lives in one function, `tariff.billing_days`, with the numbers above in its docstring,
+and every entry point speaks the bill's language (the two printed read dates) so only that
+function knows the offset. The rate-period `effective_from` dates in `config/tariff.json` are
+in the *billed-day* frame accordingly: the first day charged at that rate.
+
+Residual after the fix: every covered cycle reads **0.03%–0.65% low** against the billed kWh,
+consistently negative. That is the interval series' per-reading rounding against the meter's
+integer register — ~0.5 Wh on each of ~3,000 intervals — not a billing error, and it is well
+inside the ±1% verdict tolerance.
+
+## 185. The meter dataset gains 2.6 years of history — and a THIRD interval series
+
+`import-greenbutton` was built for bulk history and had never been used for it. Three
+Download My Data exports for the house plus one for the barn (2026-08-23) took
+`energy/meter` from 23 days to **2024-01-01 .. 2026-08-23, 183,711 rows**.
+
+**The exports do not all reach equally far back, and that is the point.** LG&E's download
+offers 15-minute, hourly and daily granularity as separate files, and they have *different*
+retention:
+
+| Granularity | Span | Why it matters |
+|---|---|---|
+| 900s | 2025-07-24 .. 2026-08-23 | ~13 months. Fine enough to verify a bill cycle. |
+| 3600s | 2025-07-24 .. 2026-08-23 | Same span; redundant with 900s. |
+| **86400s (daily)** | **2024-01-01** .. 2026-08-22 | **2.6 years — the only history before 2025-07-24.** |
+
+So "how far back does Green Button go" has no single answer: the coarser the grain, the
+further back it reaches. Worth knowing before anyone concludes the archive starts in 2025.
+
+**This makes the never-sum trap worse, so the catalog comment was rewritten.** There are now
+up to three series carrying the same energy for one meter; summing all three is roughly
+triple, not double. `_METER_DESCRIPTION` now says so and names the differing spans. Every
+consumer in the tree was checked and already pins `interval_s` — `compare.resolve_interval`
+(finest wins), `verify_bill.meter_cycle`, `meterview` (per-device finest),
+`historyview.METER_INTERVAL_S = 900`. Nothing needed a code change; the risk was purely that
+a human or an LLM would query it by hand.
+
+**Cross-validated before trusting any of it.** Over the 395 days where all three grains
+overlap they agree to within **0.05%** (39,580.5 daily vs 39,559.7 from 900s vs 39,573.8 from
+3600s), so the daily series is a sound answer to "what did last winter use" even though no
+finer data exists behind it.
+
+**The S3 mirror had to merge DOWN before pushing up.** The local month files were built from
+the downloads; S3's `lge-202608.parquet` held **1,488 barn rows the local copy did not** —
+the instance's own Connect fetches, which only ever existed there. Pushing the local files
+directly would have deleted them. The fix was to pull S3's month files, run them through the
+same `merge_into_month` every other path uses, verify the result was a strict superset of
+both sides (0 S3 rows missing, 0 duplicate dedupe tuples), and only then upload.
+
+*This is a standing hazard, not a one-off:* `data/meter/` on the Mac and `energy/meter/` in
+S3 are two independently-written copies of one dataset, and the instance writes the one in
+S3 daily. Any future bulk import from the Mac must merge down first. Verified after upload by
+reading the archive back with DuckDB — 183,711 rows, 183,711 distinct dedupe tuples — and by
+one Athena query across `year IN (2024, 2025, 2026)`, which also confirms partition
+projection (`2024,2035`) already covered the new years.
+
+## 186. `SCHEDULED_JOBS` — the knob #181 needed and did not have
+
+`docs/review-2026-08-23.md` A2 reported the collector failing `rollup_hourly` hourly and
+forever on `AccessDenied`, with `compactor.last_success_utc: null`, and recommended either
+moving the derived-data jobs to a host with credentials or adding a job-selection knob.
+
+**The live symptom was already gone by the time the work started.** #181's `v3` policy took
+effect between the review's probe and 2026-08-23 19:20 local, and the rollup succeeded:
+`consecutive_failures: 0`, `last_day_rolled: 2026-08-23`, 1,603 rows over 19 hours, with
+`energy/hourly/year=2026/month=08/rollup-20260823.parquet` present in S3 at that timestamp.
+So A2's rollup half closed itself.
+
+**The compactor half was still unproven, and it moves data.** It had never run on the
+instance — `last_success_utc: null` is "never due", not "never broken" — and its first
+unattended run was due at 01:30. Rather than wait, all six S3 calls the archive move makes
+were exercised against the real API as `energycap-collector`, the standard #181 set:
+
+| Call | |
+|---|---|
+| `PutObject` to `energy/raw_30s/` (write a part) | OK |
+| `ListBucket` on the archive prefix | OK |
+| `CopyObject` part -> archive | OK |
+| `HeadObject` on the archive copy (the size check before deleting the source) | OK |
+| `DeleteObject` the source part | OK |
+| `DeleteObject` from the archive (the 7-day sweep) | OK |
+
+So tonight's compaction will work. **A caveat on the cleanup, because #181 set a standard
+this could not fully meet:** `energycap-batch` lacks `s3:ListBucketVersions` and
+`s3:GetLifecycleConfiguration`, so the probe objects could not be hard-deleted with their
+versions the way #181 describes. Both prefixes are clean to every normal listing — no stage,
+query or table location can see anything — and the two 6-byte noncurrent versions are covered
+by the `expire-noncurrent-versions` (30d) rule, the archive one sooner by
+`expire-parts-archive` (14d). **The runbook is nonetheless not reproducible with the
+credentials it tells you to use**, which is worth fixing the next time that policy is edited.
+
+**What was actually built: the knob.** `SCHEDULED_JOBS` (empty = all, which stays the
+default and is PLAN.md §5's one-container design) selects a subset of the schedule by name.
+`runtime.SCHEDULED_JOB_NAMES` is the valid set, with a test asserting it matches what
+`default_jobs()` really returns so the two cannot drift. An unknown name **raises at boot**
+rather than being ignored — a typo that silently disabled `upload_hourly` would present as a
+healthy collector whose archive stopped growing, which is #181's failure mode approached from
+the other side.
+
+Its justification is no longer "stop attempting what it cannot do". It is that **#181 paid
+for the missing knob with the IAM boundary**, choosing to widen the collector policy over
+`energy/hourly/` and `energy/raw_30s_parts_archive/` and recording that "if the split is ever
+done, this entry is the thing to revisit first." The knob is what makes revisiting possible:
+a collector started with `SCHEDULED_JOBS=upload_hourly,bryant_daily_energy,greenbutton_daily`
+writes no derived data at all, and the policy can go back to `v2`.
+
+**Not done, and deliberately left as a decision:** actually splitting. That needs the batch
+stages given a home with a scheduler (launchd on the Mac), and moving them is a change to
+where the work runs, not a config edit. The knob is the prerequisite, landed and tested; the
+move is the user's call. Note also that `greenbutton_daily` must stay wherever
+`tokens/lge.json` lives — the instance — because the refresh token rotates (STATE.md).
+
+## 187. Delivery — `watch-health`, and the counter that could only go up
+
+`docs/review-2026-08-23.md` A1: "every failure signal this system carefully
+produces terminates in `/healthz` and `status.json`, which nothing reads — the
+system has detection everywhere and delivery nowhere." Both recent incidents (the
+three-day LG&E lapse, the six-day CT zero-latch) ran under a green healthcheck and
+were found by a human reading a chart.
+
+`energycap watch-health` is the delivery half: it reads a collector's status
+document **from another machine** and pushes to Pushover. `deploy/watchdog.md` is
+the runbook, `deploy/com.duckbillhq.energycap-watch.plist` the launchd job.
+
+### The design rule: absence is a failure, not a pass
+
+The obvious implementation of this command is a `jq` expression, and the obvious
+`jq` expression is wrong. `/healthz` on the live instance carries **no
+`greenbutton` section at all** until the daily fetch has run once, so
+`health.meter.stale` is *absent* — and `jq '.health.meter.stale == true'` reads
+absence as health, which is the exact disguise #177 wore.
+
+So every rule either finds its evidence or alarms saying it could not. An empty
+`{}` document raises five alarms, not zero; an unreachable host is the loudest
+alarm there is, because that is what a dead collector looks like. There is a test
+for each case, and **the first draft failed one of them**: the `pollers` and
+`meter` rules were nested under `if isinstance(health, Mapping)`, so a document
+with no `health` block skipped them silently. Caught by
+`test_an_empty_document_alarms_on_everything_it_cannot_check` before it shipped —
+the bug this command exists to prevent, found inside the command itself.
+
+`HEALTHZ_URL` has no default for the same reason: a watcher that quietly defaults
+to localhost is a watcher installed beside the thing it watches, and a box that
+has died cannot report that it died.
+
+### The counter that could only go up
+
+Found while deciding what to key the rules on. `Scheduler` wrote the shared
+`scheduler` status section **on failure and never on success**, so on the live
+instance it read:
+
+```
+"scheduler": { "consecutive_failures": 203,
+               "last_error": "RollupError: 1 of 1 day(s) failed to roll up: 2026-08-23",
+               "job": "rollup_hourly" }
+```
+
+while every job was in fact succeeding and the rollup had completed three hours
+earlier. A counter that cannot go down is not a signal: anything watching it
+alarms forever, gets muted, and then misses the real event.
+
+The reset is **job-aware**, which matters more than it looks. One section is
+shared by every job, so clearing it on any success would let the hourly uploader
+wipe a rollup streak thirty seconds later — the counter would oscillate 1, 0, 1,
+0 and never reach a threshold. So a success clears the section only when the
+failure recorded there belongs to the *same* job. The meaning is now exact: the
+job named in `job` has failed `consecutive_failures` times in a row and has not
+succeeded since. Both halves are pinned by tests; the existing
+`test_a_throwing_scheduled_job_does_not_stop_the_scheduler` is what caught the
+naive version, since its scenario is precisely a failing job interleaved with a
+succeeding sibling.
+
+The watcher still does not consult that aggregate. Each stage's own section
+(`rollup`, `uploader`, `compactor`) tracks one stage and has always reset
+correctly, and that is the precise signal.
+
+### Not every failing run gets a push
+
+At the 15-minute cadence, alarming on every failing run is ~96 identical
+notifications a day for one fault. The owner mutes the channel, and a muted
+channel is the silent-failure hole rebuilt one level up. So: push on **state
+change**, push an **all-clear** on recovery (a resolved page should be visibly
+resolved, not merely quiet), and re-push a persistent fault every 6 hours so one
+reported at 03:00 is not forgotten. State in `{SPOOL_DIR}/watch-state.json`; a
+missing or corrupt file means "no history", which **sends** — failing open is the
+only safe direction for an alarm.
+
+### Two rules `/healthz` will not give us
+
+`uploader` and `spool` (review A3). `/healthz` judges pollers only, so rotated S3
+credentials leave it green indefinitely while the archive stops growing. Both
+rules read the raw sections and never consult `health.ok`, so no change to
+`health.py` was needed.
+
+### Verified live, 2026-08-23
+
+Against the real instance and the real Pushover account: seven checks run, one
+alarm raised (`meter` — the `greenbutton` section genuinely is absent since the
+process restarted at 16:53 and the fetch fires at 09:15), delivered to the phone,
+and on the two following runs `send=false reason=unchanged`. Exit code 1 on a
+failing check, on an unreachable host, and on a missing URL.
+
+### What it still cannot tell you
+
+**That the watcher itself stopped.** A launchd job on a sleeping Mac is silent,
+and launchd *skips* missed `StartInterval` firings rather than catching up.
+Silence is indistinguishable from health — the same class of bug, one level up.
+Closing it needs a dead-man's switch (an external service that alerts when pings
+STOP); `watch-health` exits 0 on a clean run specifically so one can be appended:
+`energycap watch-health && curl -fsS https://hc-ping.com/<uuid>`. Not done here
+because it needs an account this project does not have, and it is recorded as the
+highest-value remaining item in the alerting story rather than quietly omitted.
+
+## 188. Both coverage gates were half-built — the panel side and the meter side
+
+`docs/review-2026-08-23.md` B1 and B2. Two independent ways the ±5% answer went
+silently wrong, with the same shape: a completeness check that could not see the
+thing that was missing.
+
+### B1 — `sample_count` cannot see an absent hub
+
+`sample_count` on a compared hour is the **minimum** across the feed channels
+that produced rows, which is right for a channel that reported *partially*. It is
+blind to a channel that reported *nothing*: an absent hub contributes nothing to
+a minimum, so the surviving hub's full count is published as **100% coverage**
+while the summed panel energy is short by a whole panel. One hub offline for a
+day reads as "the panels are ~50% below the meter", at full coverage, on both the
+CLI and the `/ui` meter card.
+
+The fix is to count distinct `(device_id, channel_id)` series per hour and
+compare against what SHOULD report. Keyed on the pair, not the channel id: both
+hubs publish a `ct_1_a`, so `channel_id` alone cannot tell four reporting series
+from two — which is precisely why the original code could not see it.
+
+**Where the expectation comes from matters more than the count.** It is read
+from `channel_map.json`, never derived from the measurements, because deriving it
+is circular: a hub that stopped reporting for the whole range would simply not be
+"expected", so its absence could never make anything incomplete. `historyview`
+reached the same conclusion from `dim_channel` (#173b); `compare-meter` uses the
+map because it is designed to run with nothing but the collector and the map
+needs no build step.
+
+`compare_range` takes the expected count as an argument rather than reading the
+map itself — it is the measurement, and where the expectation comes from is
+policy belonging to the caller. Left unset it is 0, meaning **UNKNOWN**, and the
+report says so out loud rather than quietly excluding nothing. (The first draft
+read the map inside `compare_range`, which coupled every test to the repo's real
+config and correctly failed them.)
+
+### B2 — `/ui/history` gated only the panel side
+
+`intervals` was already carried on every row of the meter block and never
+checked. LG&E publishes late and revises, so a day whose panel side is complete
+and whose meter side is half written compares a full day against a partial one
+and manufactures a delta the size of the missing part — a measured **+65%** on
+one such day, marked `complete: true`, which then polluted `mean_delta_pct`, the
+block's headline number.
+
+The gate is the DST-aware interval count: **92, 96 or 100** at 900s. Hard-coding
+96 would call the short day incomplete every March and — worse — call the long
+day complete every November while an hour of energy went unmeasured.
+
+### B6, folded in because it is the same command
+
+The README's billing recipe fetched both meters and then ran `compare-meter`
+with no `--meter`, which is a guaranteed `AmbiguousMeterError`. `meterview`
+already consulted the map's `primary` flag; `compare.run` did not, so the CLI and
+the `/ui` card disagreed about whether the question was answerable at all.
+`compare.run` now defaults to the map's primary. It reads `primary is True`, not
+`bool(primary)` — review B7's point that `bool("no")` is `True` is exactly how a
+typo becomes a silent wrong answer — and still refuses rather than guessing when
+no primary is marked and the meters genuinely differ.
+
+Each of the three gates has a test that fails without it, verified by reverting
+the fix and watching it go red.
+
+## 189. The rollup refuses to price energy with an interval the data contradicts
+
+`docs/review-2026-08-23.md` C1, and the only finding in that review that could
+silently rewrite history rather than merely report it wrongly.
+
+`kwh = mean * sample_count * poll_interval_s / 3.6e6`, and `poll_interval_s` is
+read from the **current environment** — not from the data, not from the file, not
+from anything the row carries. Nothing recorded what cadence a given day was
+actually collected at, and nothing checked.
+
+So: set `POLL_INTERVAL_S=60` at some future point, then follow this project's own
+documented repair path — *"if you fix a collector bug, re-run rollup over the
+affected range"* — across 2026, and **every historical kWh doubles**.
+Deterministically. Idempotently. With no error raised, no warning logged, and
+nothing in the output that looks wrong. The bill comparison, the digest, the
+dashboards and `verify-bill` would all agree with each other on the new, wrong
+numbers.
+
+**Demonstrated on the real archive** (2026-08-21, one raw input, 826 hourly rows):
+
+| | |
+|---|---|
+| priced at 30s, the cadence it was collected at | **90.48 kWh** |
+| priced at 60s | **180.97 kWh** — exactly 2.00x |
+
+**The guard.** `rollup_day` now measures the data's own cadence and refuses when
+it disagrees with the interval about to be used, beyond `INTERVAL_TOLERANCE`
+(0.25 — loose on purpose: the failure is a FACTOR, not a few percent of jitter,
+and an alarm that fires on jitter gets turned off).
+
+The statistic is the **median gap between consecutive samples of one channel**,
+computed in SQL with a window function over the day's `watts` rows. Three
+choices, each of which a simpler version got wrong first:
+
+* **Median, not mean.** One collector outage leaves a single enormous delta that
+  drags a mean upward.
+* **Consecutive deltas, not `(last_ts - first_ts) / (sample_count - 1)`.** That
+  per-row average is inflated by any gap *inside* the hour, so the first draft
+  refused to roll up a deliberately gapped test hour — the guard firing hardest
+  exactly where the data most needs rolling up.
+* **`watts` rows only.** They are the only rows whose kWh uses the interval, and
+  Bryant has its own `BRYANT_POLL_INTERVAL_S`.
+
+Under `MIN_DELTAS_FOR_SPACING` (20) the answer is `None` and the guard stays
+silent: a handful of rows is not evidence of a cadence, and refusing there would
+break the rollup of a day the collector had only just started.
+
+The message names the factor the energy would be wrong **by**, which is
+`configured / observed` — an earlier draft printed `observed / configured`, the
+same number upside down, which would have sent a reader hunting for missing
+energy instead of invented energy. A test pins the exact string.
+
+`--poll-interval-s` states the cadence old rows were collected at, and
+`--allow-interval-mismatch` downgrades the refusal to a WARN for a cadence that
+genuinely changed mid-range. Two existing DST tests were sampling hourly while
+claiming 30s; they now declare `poll_interval_s=3600`, which is what their
+fixtures actually contain.
+
+**Not done: `observed_seconds` as an HOURLY_SCHEMA column.** The review offers it
+as the alternative fix, and it is the better *record* — it would make each row
+self-describing, so a reader could verify `kwh == mean * observed_seconds / 3.6e6`
+without knowing what `POLL_INTERVAL_S` was in force. It is deferred because
+nothing in this codebase reads Parquet with `union_by_name`, so adding a column
+splits `energy/hourly` into two incompatible schemas and breaks
+`read_parquet('…/rollup-*.parquet')` until **every** existing day is re-rolled.
+That re-roll is the sanctioned, idempotent path and is cheap today (7 days) and
+never cheaper — but it rewrites production data, so it is a decision rather than
+a side effect. The guard above closes the actual hazard without it.
+
+## 190. `energy/hourly` gains `observed_seconds` — kWh made auditable
+
+The other half of #189, and the part that puts the fact in the *data* rather than
+only in a guard. `PLAN.md` §10 lists the hourly columns; this is a fifteenth.
+
+`kwh = mean * sample_count * poll_interval_s / 3.6e6`, and that interval came
+from the collector's environment at rollup time. Nothing in the file recorded it,
+so a reader could not distinguish energy computed at a 30s cadence from the same
+samples re-priced at 60s — the two are byte-identical apart from the number.
+`observed_seconds` is that denominator written down, which makes every row
+self-checking:
+
+```
+kwh = mean * observed_seconds / 3.6e6
+```
+
+**NULL exactly where `kwh` is NULL.** Tempting to populate it everywhere — it
+reads like a property of the sampling, not of the metric — but the rollup uses
+ONE interval for the whole day while Bryant polls on its own
+`BRYANT_POLL_INTERVAL_S`. Writing Leviton's cadence onto Bryant's rows would put
+a quiet falsehood in the one column whose entire purpose is to be trustworthy.
+A test pins the null-alignment.
+
+### The migration, and why it did not need a deploy first
+
+Nothing here read Parquet with `union_by_name`, so adding a column splits
+`energy/hourly` into two incompatible schemas: `read_parquet('…/rollup-*.parquet')`
+fails on the first mismatch and takes `/ui/history` down until every file is
+rewritten. Worse, the collector on the instance keeps writing the OLD shape every
+hour until it is rebuilt, so "re-roll everything" is not even a stable end state
+— the next hourly job re-splits the archive.
+
+So the four hourly reads in `historyview` now use `union_by_name := true`. An
+older file reads NULL for a column it predates, which is the truth about that
+file. Deliberately NOT applied to the other datasets: their schemas are stable and
+blanket tolerance would hide a genuine drift that ought to fail loudly. A test
+builds a genuinely mixed archive — one file with the column, one without — and
+requires the glob to read.
+
+That makes the re-roll a tidy-up rather than a prerequisite, and the deploy
+ordering irrelevant.
+
+### Verified, 2026-08-24
+
+Re-rolled 2026-08-17..24 (8 days, 7,848 rows) and read the result back
+independently rather than trusting the stage's counters:
+
+| check | result |
+|---|---|
+| `kwh = mean * observed_seconds / 3.6e6` | **0 violations** in 2,226 energy rows |
+| `(kwh IS NULL) <> (observed_seconds IS NULL)` | **0 rows** |
+| 2026-08-21 total, a closed day measured before the change | **90.48 kWh**, unchanged |
+| Athena over the updated Glue table | 7,848 rows, 0 violations |
+
+The archive's overall total rose 724.07 -> 732.92 kWh, which is **live data
+arriving between the two reads** (rows 7,764 -> 7,848), not the migration: the
+closed days are identical.
+
+**One thing the new column immediately exposed**, which is the point of having
+it: 56 rows carry `observed_seconds = 3630` — 121 samples in a clock hour where
+120 fit. All on 2026-08-22, the breaker-retrofit day. A poll cycle drifting
+across an hour boundary lands two samples in the same hour; the energy is
+overstated by ~0.8% for those rows. Pre-existing and honest (it really did take
+121 samples), but until now there was nothing in the data that could show it.
+
+## 191. The nightly digest — the first thing that says whether a day was UNUSUAL
+
+`docs/review-2026-08-23.md` E: anomaly detection "does not exist yet; the data is
+ready". Everything else in this project reports what happened; nothing said
+whether it was normal. That role was filled by a human noticing a shape on a
+chart, which is how six days of latched CT zeros (#180) and a three-day LG&E
+lapse (#177) were both found, days late.
+
+`energycap digest` reviews a local day and pushes what is worth looking at, on
+the Pushover channel #187 built. Scheduled `digest_daily` at **06:00 local** —
+after the 01:30 compaction and re-roll, so D-1 is finished rather than half
+written, and early enough to be waiting at breakfast.
+
+### Two kinds of check, deliberately separate
+
+**A trailing 21-day band per circuit**, needing no knowledge of what a circuit
+is. Median and MAD, **not** mean and standard deviation: one genuinely anomalous
+day inflates a standard deviation enough to swallow the next one — the failure
+mode where a fault that starts today makes tomorrow's identical fault look
+normal. The MAD does not move. A test pins that with a 100x outlier.
+
+**Five hard rules**, one per scenario the review named: strip heat in mild
+weather, a load that stopped cycling, a circuit that went quiet, the barn outside
+its 3.6–40 kWh envelope, and a rising overnight floor.
+
+The strip-heat rule is the one worth the most: `eheat` kWh/day and
+`outdoor_temp_f` have both been collected all along — 234 days of the former —
+and **nothing ever joined them**. Resistance heat above 45°F outdoor is the most
+expensive silent fault this house can have.
+
+### Not crying wolf is the whole design
+
+Every comparison is **coverage-gated on `observed_seconds`** (#190) — the column
+added the same day, doing real work immediately. A day the collector only half
+watched has roughly half the kWh; reporting that as "usage halved" would train
+the owner to ignore the digest, which is exactly how #180 stayed hidden. Such a
+day is *named as skipped*, so "quiet" and "not looked at" never look alike. The
+gate applies to the **baseline too**: a band built from half-watched days sits
+low, and then the first complete day reads as a spike.
+
+Too little history is silence, not a pass: below `MIN_BASELINE_DAYS` a circuit is
+reported un-baselined rather than judged.
+
+**One rule had to be rewritten because a test caught it crying wolf.**
+`stuck_load` originally fired on any circuit drawing in all 24 hours — which is
+every fridge and network rack, every night, forever. It now fires only when the
+circuit's own history shows it *normally cycles*, so the finding is the CHANGE.
+Two tests hold that line from both sides.
+
+### What it cannot do, measured rather than assumed
+
+**It would not have caught #180.** Panel B's daily feed total is 23.5, 24.0,
+21.4, 24.6, 24.1, 24.7 kWh straight through the latched days — flat. A
+sub-hourly intermittent fault averages out at day grain, and no daily band will
+ever see it. That belongs to the meter comparison (whose gates #188 fixed) or to
+a future zero-run rule over `raw_30s`. Saying so here is better than letting the
+digest imply a coverage it does not have.
+
+**It is mostly un-baselined today**, and honestly reports that: on the real
+archive for 2026-08-23 it compared 8 circuits and named 20 as not yet baselined —
+the breakers installed on 08-22 have no history, and `energy/hourly` only reaches
+back to 08-17. It becomes useful as the archive grows; it does not pretend to be
+useful now.
+
+Verified end to end against the real archive and the real Pushover account:
+`digest_done findings=0 compared=0 skipped_unbaselined=28`, delivered.
