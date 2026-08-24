@@ -597,6 +597,35 @@ another day), and `deviceHistory`'s `point` vocabulary is unexplored. Also worth
 next time: these input types are **non-null** (`GetRuntimeUsageInput!`), and a nullable
 declaration is a 400 with a validation message.
 
+## The catalog and the README were corrected — 2026-08-24
+
+The adversarial review's block F, all of it. Documentation only, but the Glue comments and
+the README **are** the interface an LLM queries this archive through, so a wrong sentence
+there is a wrong answer downstream.
+
+The one that matters: **the nesting hierarchy was published nowhere a reader could see it.**
+A breaker sits physically inside its panel's feed CT, so `sum(kwh)` across every channel is
+2–3x the house — and that fact lived only in `channel_map.json` notes (stripped from the
+Parquet) and `historyview`'s docstring (source code). It is now on the database description,
+both time-series tables, `dim_channel`, the canonical `channel_id` column comment, and the
+README's honesty section with a level table pinned by test to `historyview.LEVELS`.
+
+Also corrected: the README denied `energy_meter` exists in four places while 183,711 rows sat
+in S3; `dim_channel.category`'s published examples (`kitchen`, `lighting`, `backup-feed`) were
+all invented and now generate from `dim.KNOWN_CATEGORIES`; the enum warning covered three of
+six enum metrics; the MWBC volts-doubling trap is published on `category = 'mwbc'`; and
+**seven** pre-#179 "stage is never emitted here" claims survived in the README, `glue.py`,
+`channel_map.json` — and in the test fixtures, where the corpus emitted no `stage` row and a
+test asserted that as correct. The corpus now flips rendering mid-window and the test asserts
+both columns carry signal. Full accounting in DEVIATIONS #192.
+
+**Watch the description budget.** Three of five tables are within 25 characters of the 2048
+limit: `energy_raw_30s` 9, `energy_hourly` 10, `dim_channel` 23. Several of those strings are generated from the schema and
+the enum tables, so the next appended metric or enum code overflows — loudly (`_fit` raises),
+but expect to tighten prose in the same commit.
+
+---
+
 ## `energy/hourly` gained `observed_seconds` — 2026-08-24
 
 kWh is now self-checking: `kwh = mean * observed_seconds / 3.6e6`, verified with 0 violations

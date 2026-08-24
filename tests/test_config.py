@@ -160,6 +160,47 @@ def test_the_lge_endpoints_are_https(field: str) -> None:
     assert getattr(config.Settings(), field).startswith("https://")
 
 
+def test_no_setting_can_be_inherited_from_the_developers_shell() -> None:
+    """The suite must see the environment it declares, and nothing else.
+
+    ``conftest._TEST_ENV`` is an allowlist and named 16 of the 48 settings. The
+    other 32 came straight from whatever the developer had exported: an actual
+    ``LGE_CLIENT_ID=gbc_18`` in one shell made three tests fail outright, and
+    every other un-named setting -- ``LEVITON_INGEST``, ``SCHEDULED_JOBS``, both
+    ``PUSHOVER_*``, the integrity thresholds -- silently ran against one
+    machine's configuration and passed, which is the worse half of the bug.
+
+    ``conftest._clear_settings_environment`` now deletes every ``Settings``
+    field's variable before the fakes go in, driven off ``model_fields`` so it
+    cannot go stale. This asserts the consequence: a setting the suite did not
+    ask for holds its declared default, whatever the shell says.
+    """
+    import os
+
+    from tests.conftest import _TEST_ENV
+
+    chosen = {key.lower() for key in _TEST_ENV} | {"spool_dir"}
+    settings = config.Settings(_env_file=None)  # type: ignore[call-arg]
+
+    for name, field in config.Settings.model_fields.items():
+        if name in chosen:
+            continue
+        assert name.upper() not in os.environ, (
+            f"{name.upper()} survived into the test environment; "
+            "conftest._clear_settings_environment should have removed it"
+        )
+        actual = getattr(settings, name)
+        expected = field.get_default(call_default_factory=True)
+        if isinstance(actual, SecretStr):
+            actual = actual.get_secret_value()
+        if isinstance(expected, SecretStr):
+            expected = expected.get_secret_value()
+        assert actual == expected, (
+            f"{name} is {actual!r}, not its declared default {expected!r} — "
+            "something outside the suite is configuring it"
+        )
+
+
 def test_no_lge_credential_has_a_default_value() -> None:
     """Endpoints ship with real defaults; credentials must not ship at all."""
     settings = config.Settings(_env_file=None)  # type: ignore[call-arg]

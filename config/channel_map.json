@@ -79,7 +79,7 @@
       "label": "Bryant Evolution system — outdoor temp, mode, stage",
       "short_label": "HVAC system status",
       "category": "hvac_status",
-      "notes": "30s status channel (PLAN.md §7.3). Metrics: outdoor_temp_f (system oat), mode and stage (unit='enum', integer codes from the append-only tables in sources/bryant.py — decode is in the Glue column comment for `value`). 'stage' comes from the OUTDOOR unit's opstat only (DEVIATIONS.md #58) and may be permanently empty if this unit reports a capacity percentage instead of a word (#59)."
+      "notes": "30s status channel (PLAN.md §7.3). Metrics: outdoor_temp_f (system oat), mode and stage (unit='enum', integer codes from the append-only tables in sources/bryant.py — decode is in the Glue column comment for `value`). 'stage' comes from the OUTDOOR unit's opstat only (DEVIATIONS.md #58). It is NOT empty here: opstat renders as a word or a capacity percentage per reading, and this unit produces both interleaved all day, so `stage` and `stage_pct` each hold about half the compressor's day and either one alone is half an answer (#179 corrects the prediction in #59)."
     },
     {
       "source": "bryant",
