@@ -201,8 +201,26 @@ def _spool_with_feed(settings: Settings, day_start: datetime, hours: int, watts:
     spool.close()
 
 
+def _feed_map(tmp_path, hubs=("hub-a",)):
+    """A channel map matching the fixture's feeds.
+
+    Without this the module falls back to the repo's real config/channel_map.json
+    (four series, two hubs) and every fixture — which writes one hub — is
+    correctly judged incomplete. Tests must state their own expectation.
+    """
+    import json
+
+    path = tmp_path / "channel_map.json"
+    path.write_text(json.dumps({"mappings": [
+        {"source": "leviton", "device_id": hub, "channel_id": ch}
+        for hub in hubs
+        for ch in ("ct_1_a", "ct_1_b")
+    ]}))
+    return path
+
+
 def test_the_comparison_follows_the_primary_flag_not_a_heuristic(
-    settings: Settings,
+    settings: Settings, tmp_path
 ) -> None:
     """The barn could out-consume the house on a heavy charging day.
 
@@ -225,6 +243,7 @@ def test_the_comparison_follows_the_primary_flag_not_a_heuristic(
         settings=settings,
         spool_path=settings.spool_dir / "spool.db",
         labels=labels_for(primary=HOUSE),
+        channel_map=_feed_map(tmp_path),
     )
     comparison = block["comparison"]
     assert comparison["available"] is True
@@ -286,3 +305,36 @@ def test_an_unreadable_spool_degrades_to_a_reason_not_an_exception(
     )
     assert block["available"] is True, "the meter tiles must survive a bad spool"
     assert block["comparison"]["available"] is False
+
+
+def test_the_card_withholds_the_comparison_when_a_whole_hub_is_missing(
+    settings: Settings, tmp_path
+) -> None:
+    """The /ui meter card had the same blindness `compare-meter` did.
+
+    The fixture writes one hub's two feed legs; the map says two hubs should
+    report. Every channel that reported reported fully, so coverage is 100% and
+    the old gate passed — while the panel total is short by a whole panel and
+    the card would have published "panels read ~50% below the meter" as fact.
+    """
+    day = timeutil.local_date_of(NOW) - timedelta(days=1)
+    day_start, _ = timeutil.local_day_bounds_utc(day)
+    _spool_with_feed(settings, day_start, hours=2, watts=1000.0)
+    write_meter(
+        settings,
+        [(HOUSE, day_start, 2.0, 3600), (HOUSE, day_start + timedelta(hours=1), 2.0, 3600)],
+    )
+
+    block = meterview.meter_block(
+        now=NOW,
+        settings=settings,
+        spool_path=settings.spool_dir / "spool.db",
+        labels=labels_for(primary=HOUSE),
+        # Two hubs expected; the spool only has hub-a.
+        channel_map=_feed_map(tmp_path, hubs=("hub-a", "hub-b")),
+    )
+    comparison = block["comparison"]
+    assert comparison["available"] is False
+    assert comparison["hours_missing_a_feed"] == 2
+    assert comparison["series_expected"] == 4
+    assert "every feed series" in comparison["reason"]

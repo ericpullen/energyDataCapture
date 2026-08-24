@@ -364,6 +364,7 @@ def test_default_jobs_are_exactly_the_schedule_in_plan_section_5() -> None:
         "daily_maintenance",
         "bryant_daily_energy",
         "greenbutton_daily",
+        "digest_daily",
     }
     assert jobs["upload_hourly"].schedule == HourlyAt(runtime.UPLOAD_MINUTE) == HourlyAt(5)
     assert jobs["rollup_hourly"].schedule == HourlyAt(runtime.ROLLUP_MINUTE) == HourlyAt(20)
@@ -371,8 +372,169 @@ def test_default_jobs_are_exactly_the_schedule_in_plan_section_5() -> None:
     assert jobs["bryant_daily_energy"].schedule == DailyAt(8, 30)
     # LG&E publishes overnight and lags; 09:15 is after that and clear of 08:30.
     assert jobs["greenbutton_daily"].schedule == DailyAt(9, 15)
+    # After 01:30 compaction and the re-roll, so D-1 is finished when read.
+    assert jobs["digest_daily"].schedule == DailyAt(6, 0)
     # dim_channel is rebuilt on demand only (PLAN.md §5) — never scheduled.
     assert not any("dim" in name for name in jobs)
+
+
+async def test_a_recovered_job_clears_the_shared_scheduler_counter(
+    status: StatusStore,
+) -> None:
+    """The counter must be able to go DOWN.
+
+    It was written on failure and never on success, so it reached 203 on the
+    live instance while every job was succeeding and `last_error` still named a
+    rollup failure from three hours earlier. Anything watching a counter that
+    only climbs alarms forever, gets muted, and then misses the real event
+    (DEVIATIONS #187).
+    """
+    outcomes = iter([RuntimeError("boom"), RuntimeError("boom"), None])
+
+    def flaky(now: datetime) -> str:
+        result = next(outcomes)
+        if isinstance(result, Exception):
+            raise result
+        return "ok"
+
+    job = ScheduledJob(name="rollup_hourly", schedule=HourlyAt(20), run=flaky)
+    scheduler = Scheduler([job], status=status)
+
+    fired = utc(2026, 8, 23, 20, 20)
+    await scheduler.fire(job, fired)
+    await scheduler.fire(job, fired)
+    assert status.section("scheduler")["consecutive_failures"] == 2
+
+    await scheduler.fire(job, fired)
+    section = status.section("scheduler")
+    assert section["consecutive_failures"] == 0
+    assert "last_error" not in section
+
+
+async def test_a_sibling_success_does_not_wipe_another_jobs_streak(
+    status: StatusStore,
+) -> None:
+    """One section is shared by every job, so an unqualified reset would let the
+    hourly uploader clear a rollup streak thirty seconds later — the counter
+    would oscillate 1, 0, 1, 0 and never reach any threshold. Only the job that
+    owns the recorded failure may clear it."""
+
+    def broken(now: datetime) -> str:
+        raise RuntimeError("AccessDenied")
+
+    def fine(now: datetime) -> str:
+        return "ok"
+
+    rollup = ScheduledJob(name="rollup_hourly", schedule=HourlyAt(20), run=broken)
+    upload = ScheduledJob(name="upload_hourly", schedule=HourlyAt(5), run=fine)
+    scheduler = Scheduler([rollup, upload], status=status)
+    fired = utc(2026, 8, 23, 20, 20)
+
+    for _ in range(3):
+        await scheduler.fire(rollup, fired)
+        await scheduler.fire(upload, fired)
+
+    section = status.section("scheduler")
+    assert section["consecutive_failures"] == 3
+    assert section["job"] == "rollup_hourly"
+
+
+def test_the_job_name_constant_cannot_drift_from_the_real_schedule() -> None:
+    """``SCHEDULED_JOB_NAMES`` is what validates the setting and documents it.
+
+    It is a hand-written constant so the setting can be checked without
+    building a schedule (which needs a spool), which means it can rot. Adding a
+    job and forgetting the constant would make the new job un-selectable and
+    make ``SCHEDULED_JOBS=<its name>`` fail the boot.
+    """
+    assert runtime.SCHEDULED_JOB_NAMES == tuple(job.name for job in default_jobs())
+
+
+def test_the_env_example_job_list_cannot_drift_from_the_real_schedule() -> None:
+    """`.env.example` is where a human reads the valid names, so it can rot too.
+
+    It did: ``digest_daily`` was registered by ``default_jobs`` and absent from
+    the comment for as long as the digest existed, so anyone who set
+    ``SCHEDULED_JOBS`` by copying that list silently lost the nightly digest —
+    including the instrument checks that now ride it. Documentation drift with
+    teeth, which is exactly the class of bug this file exists to pin.
+
+    Parses only the name list itself, not the prose around it: the first version
+    of this test searched the whole comment block, and the sentence explaining
+    the bug happened to contain ``digest_daily``, so it passed while the list was
+    broken. Set equality, so a name left behind after a job is removed fails too.
+    """
+    import re
+    from pathlib import Path
+
+    text = Path(".env.example").read_text(encoding="utf-8")
+    tail = text.partition("Valid names:")[2].partition("SCHEDULED_JOBS=")[0]
+    listed: set[str] = set()
+    for line in tail.splitlines():
+        body = line.lstrip("#").strip()
+        # Only lines that are purely a comma-separated name list; prose (which
+        # starts with "(" here) and blank lines are skipped.
+        if not body or not re.fullmatch(r"[a-z_]+(\s*,\s*[a-z_]+)*,?", body):
+            continue
+        listed.update(part.strip() for part in body.split(",") if part.strip())
+    assert listed == set(runtime.SCHEDULED_JOB_NAMES), (
+        f".env.example lists {sorted(listed)}, schedule has "
+        f"{sorted(runtime.SCHEDULED_JOB_NAMES)}"
+    )
+
+
+def test_no_selection_runs_every_job_which_is_the_one_container_design() -> None:
+    """PLAN.md §5 is one process running all five. That must stay the default —
+    an empty setting is 'all', never 'none'."""
+    assert len(default_jobs(jobs=None)) == 6
+    assert len(default_jobs(jobs=())) == 6
+
+
+def test_selecting_a_subset_drops_the_rest_and_keeps_firing_order() -> None:
+    """The poller/batch split: a process that does not roll up or compact needs
+    no write access to derived data (DEVIATIONS #181, #186)."""
+    poller_only = default_jobs(
+        jobs=["greenbutton_daily", "upload_hourly", "bryant_daily_energy"]
+    )
+    # Listed out of order on purpose — the schedule's own order is what matters.
+    assert [job.name for job in poller_only] == [
+        "upload_hourly",
+        "bryant_daily_energy",
+        "greenbutton_daily",
+    ]
+    assert not any(
+        job.name in ("rollup_hourly", "daily_maintenance") for job in poller_only
+    )
+
+
+def test_an_unknown_job_name_fails_the_boot_rather_than_being_ignored() -> None:
+    """A typo that silently disabled the uploader would look exactly like a
+    healthy collector whose archive stopped growing — #181's failure mode from
+    the other direction. The error names the alternatives."""
+    with pytest.raises(ValueError, match="rollup_hourley") as excinfo:
+        default_jobs(jobs=["upload_hourly", "rollup_hourley"])
+    assert "rollup_hourly" in str(excinfo.value)
+
+
+def test_the_setting_parses_a_comma_list_and_empty_means_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from energy_capture.config import Settings
+
+    assert Settings(_env_file=None).scheduled_job_names == ()
+    assert Settings(
+        _env_file=None, scheduled_jobs=" upload_hourly , greenbutton_daily "
+    ).scheduled_job_names == ("upload_hourly", "greenbutton_daily")
+    # A trailing comma is a typo, not a job named "".
+    assert Settings(
+        _env_file=None, scheduled_jobs="upload_hourly,"
+    ).scheduled_job_names == ("upload_hourly",)
+
+    monkeypatch.setattr(
+        runtime, "get_settings",
+        lambda: Settings(_env_file=None, scheduled_jobs="upload_hourly"),
+    )
+    assert [job.name for job in default_jobs()] == ["upload_hourly"]
 
 
 # ======================================================================

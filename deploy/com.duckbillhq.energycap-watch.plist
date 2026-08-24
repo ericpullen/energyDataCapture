@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — do not install as-is. Replace every __PLACEHOLDER__ with a real
+  absolute path; deploy/watchdog.md has the sed one-liner and the launchctl
+  commands.
+
+  This is the watchdog: it reads the COLLECTOR's /healthz over the network and
+  pushes what is wrong to Pushover. It therefore belongs on a DIFFERENT machine
+  from the collector — the Mac, while the collector runs on Lightsail. A box
+  that has died cannot report that it died, so a watcher installed beside the
+  thing it watches is decoration.
+
+  Unlike com.duckbillhq.energycap.plist this job is NOT KeepAlive. It is a
+  periodic one-shot: StartInterval fires it, it exits, launchd fires it again.
+  KeepAlive on a program that exits immediately is a hot loop.
+
+  The command exits 1 when any check fails. launchd does not care, and that is
+  fine — the exit code is there for a human running it by hand and for a
+  dead-man's-switch wrapper later. Delivery is Pushover's job, not launchd's.
+
+  NOTHING HERE HAS EVER BEEN LOADED on the development machine.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.duckbillhq.energycap-watch</string>
+
+    <!-- __REPO_ROOT__ = absolute path of the energyDataCapture checkout.
+         __UV__       = absolute path of uv (`command -v uv`), because launchd's
+                        PATH does not include ~/.local/bin. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV__</string>
+        <string>run</string>
+        <string>energycap</string>
+        <string>watch-health</string>
+    </array>
+
+    <!-- Must be the repo root: Settings discovers .env by walking up from the
+         working directory, and PUSHOVER_TOKEN/PUSHOVER_USER/HEALTHZ_URL live
+         there. Started anywhere else the job runs with no credentials, cannot
+         deliver, and says so in the log where nobody is looking. -->
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__UV_DIR__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Every 15 minutes. The pollers go stale after 90s, but paging a
+         household faster than this buys nothing and costs attention. Note
+         launchd SKIPS missed firings while the Mac is asleep rather than
+         catching up — see the "what this cannot tell you" section of
+         deploy/watchdog.md. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!-- Fire once on load so a bad install is discovered immediately rather
+         than fifteen minutes later. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- One run is a couple of HTTP requests. If it is still going after two
+         minutes something is badly wrong and the next firing is due soon. -->
+    <key>ExitTimeOut</key>
+    <integer>120</integer>
+
+    <!-- launchd creates these FILES but not their directory:
+         `mkdir -p __DATA_DIR__/logs` before the first bootstrap. -->
+    <key>StandardOutPath</key>
+    <string>__DATA_DIR__/logs/energycap-watch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__DATA_DIR__/logs/energycap-watch.err.log</string>
+</dict>
+</plist>

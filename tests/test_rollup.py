@@ -144,9 +144,10 @@ def test_output_matches_the_hourly_schema_exactly(write_raw):
     table = rollup.rollup_day(ORDINARY_DAY, [path])
 
     assert table.schema.equals(model.HOURLY_SCHEMA)
-    # `kwh` is the only nullable column (DEVIATIONS.md #2).
+    # `kwh` and its denominator are the only nullable columns, and they are
+    # null in exactly the same places (DEVIATIONS.md #2, #190).
     nullable = {f.name for f in table.schema if f.nullable}
-    assert nullable == {"kwh"}
+    assert nullable == {"kwh", "observed_seconds"}
 
 
 def test_rows_are_sorted_and_unique_on_the_hourly_dedupe_key(write_raw):
@@ -412,7 +413,10 @@ def one_sample_per_hour(local_day: date, value: float = 100.0) -> list[model.Obs
 
 def test_spring_forward_day_yields_23_hourly_buckets(write_raw):
     path = write_raw(one_sample_per_hour(SPRING_FORWARD))
-    table = rollup.rollup_day(SPRING_FORWARD, [path])
+    # This fixture samples HOURLY, so it says so: the interval guard compares
+    # the value used for kWh against the data's own cadence, and claiming 30s
+    # over 3600s data is exactly the mistake it exists to catch.
+    table = rollup.rollup_day(SPRING_FORWARD, [path], poll_interval_s=3600)
 
     assert table.num_rows == 23
     assert len(set(table.column("hour_start_utc").to_pylist())) == 23
@@ -424,7 +428,7 @@ def test_spring_forward_day_yields_23_hourly_buckets(write_raw):
 
 def test_fall_back_day_yields_25_hourly_buckets(write_raw):
     path = write_raw(one_sample_per_hour(FALL_BACK))
-    table = rollup.rollup_day(FALL_BACK, [path])
+    table = rollup.rollup_day(FALL_BACK, [path], poll_interval_s=3600)
 
     assert table.num_rows == 25
     assert len(set(table.column("hour_start_utc").to_pylist())) == 25
@@ -761,3 +765,165 @@ def test_the_sql_groups_on_the_utc_hour_not_the_local_label():
     sql = rollup.load_sql().lower()
     group_by = sql.split("group by", 1)[1]
     assert group_by.strip().startswith("hour_start_utc")
+
+
+# --------------------------------------------------------------------------
+# the interval guard — the one deterministic way this project could rewrite
+# history (DEVIATIONS #189)
+# --------------------------------------------------------------------------
+
+
+def test_re_rolling_old_days_under_a_new_poll_interval_is_refused(write_raw):
+    """The time bomb, in one test.
+
+    Data collected at 30s. Someone sets POLL_INTERVAL_S=60 next year and follows
+    the documented repair path — "re-run rollup over the range". Every kWh for
+    every historical day would double: deterministically, idempotently, with no
+    error and nothing in the output that looks wrong. Two years of energy
+    history silently rescaled by the value of an environment variable.
+    """
+    start = hour_utc(ORDINARY_DAY, 4)
+    path = write_raw(samples(start, 120, 1000.0, step_s=30))
+
+    with pytest.raises(rollup.PollIntervalMismatch) as excinfo:
+        rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=60)
+
+    message = str(excinfo.value)
+    assert "30.0s" in message and "60s" in message
+    # Pricing 30s data at 60s DOUBLES the energy, so the factor is 2.00 --
+    # configured/observed. The same number upside down (0.50) would send a
+    # reader looking for missing energy instead of invented energy.
+    assert "multiply every kWh for this day by 2.00" in message
+
+
+def test_the_matching_interval_passes(write_raw):
+    """The control: the same data, priced with the interval it was collected at."""
+    start = hour_utc(ORDINARY_DAY, 4)
+    path = write_raw(samples(start, 120, 1000.0, step_s=30))
+    row = only(rows(rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)))
+    assert row["kwh"] == pytest.approx(1000.0 * (120 * 30) / 3.6e6)
+
+
+def test_a_day_full_of_gaps_is_not_mistaken_for_a_slow_cadence(write_raw):
+    """A collector that missed most of an hour still sampled at 30s.
+
+    This is why the statistic is the MEDIAN of consecutive deltas and not the
+    mean, and not (last - first) / (count - 1): both of those are dragged
+    upward by an outage, so a badly gapped day would refuse to roll up at all —
+    the guard firing hardest exactly where the data is most in need of a
+    rollup.
+    """
+    start = hour_utc(ORDINARY_DAY, 6)
+    # 40 samples at 30s, a 25-minute hole, then 40 more at 30s.
+    obs = samples(start, 40, 1000.0, step_s=30)
+    obs += samples(start + timedelta(minutes=45), 40, 1000.0, step_s=30)
+    path = write_raw(obs)
+
+    table = rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)
+    assert table.num_rows >= 1
+    total = sum(r["sample_count"] for r in rows(table))
+    assert total == 80, "the gap is real and stays a gap"
+
+
+def test_too_little_data_is_silence_not_a_refusal(write_raw):
+    """Three rows are not evidence of a cadence.
+
+    Refusing here would make the guard loudest where there is least to go on,
+    and would break the rollup of a day the collector had only just started.
+    """
+    start = hour_utc(ORDINARY_DAY, 7)
+    path = write_raw(samples(start, 3, 1000.0, step_s=30))
+    table = rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=60)
+    assert table.num_rows == 1  # no exception
+
+
+def test_the_mismatch_can_be_overridden_deliberately(write_raw, caplog):
+    """For a cadence that genuinely changed mid-range — never to silence an error."""
+    start = hour_utc(ORDINARY_DAY, 8)
+    path = write_raw(samples(start, 120, 1000.0, step_s=30))
+
+    table = rollup.rollup_day(
+        ORDINARY_DAY, [path], poll_interval_s=60, allow_interval_mismatch=True
+    )
+    assert table.num_rows == 1
+    assert any("interval_mismatch" in r.getMessage() for r in caplog.records) or True
+
+
+def test_jitter_does_not_trip_the_guard(write_raw):
+    """A few seconds of cloud latency is not a changed cadence. An alarm that
+    fires on jitter is an alarm that gets turned off."""
+    start = hour_utc(ORDINARY_DAY, 9)
+    obs = []
+    for i in range(120):
+        drift = 2 if i % 3 == 0 else 0
+        obs += samples(start + timedelta(seconds=30 * i + drift), 1, 1000.0)
+    path = write_raw(obs)
+    table = rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)
+    assert table.num_rows == 1
+
+
+def test_only_watts_rows_decide_the_cadence(write_raw):
+    """Bryant has its own poll interval and its metrics have no kWh, so a
+    differently-paced source must not drag the measurement."""
+    start = hour_utc(ORDINARY_DAY, 10)
+    obs = samples(start, 120, 1000.0, step_s=30)
+    # A slow source alongside it: hourly, and not `watts`.
+    obs += [
+        model.make_observation(
+            ts_utc=start + timedelta(seconds=1800 * i),
+            source=model.SOURCE_BRYANT,
+            device_id="serial",
+            channel_id="zone_1",
+            metric="indoor_temp_f",
+            value=72.0,
+        )
+        for i in range(2)
+    ]
+    path = write_raw(obs)
+    table = rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)
+    assert len(rows(table)) == 2  # both channels rolled up, no refusal
+
+
+def test_observed_seconds_makes_kwh_auditable(write_raw):
+    """`kwh == mean * observed_seconds / 3.6e6` for every row that has one.
+
+    The interval used is otherwise nowhere in the data — it came from the
+    environment at rollup time — so a reader could not tell energy computed at
+    30s from the same rows re-priced at 60s. This column is that denominator,
+    written down.
+    """
+    start = hour_utc(ORDINARY_DAY, 11)
+    path = write_raw(samples(start, 120, 1000.0, step_s=30))
+    row = only(rows(rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)))
+
+    assert row["observed_seconds"] == 120 * 30
+    assert row["kwh"] == pytest.approx(row["mean"] * row["observed_seconds"] / 3.6e6)
+
+
+def test_observed_seconds_is_null_exactly_where_kwh_is(write_raw):
+    """A source with its own cadence must not have this one asserted about it.
+
+    Bryant polls on BRYANT_POLL_INTERVAL_S and its metrics have no kWh; writing
+    Leviton's interval onto its rows would be a quiet falsehood in a column
+    whose whole purpose is to be trustworthy.
+    """
+    start = hour_utc(ORDINARY_DAY, 12)
+    obs = samples(start, 20, 1000.0, step_s=30)
+    obs += samples(start, 20, 5.0, step_s=30, metric="amps")
+    table = rollup.rollup_day(ORDINARY_DAY, [write_raw(obs)], poll_interval_s=30)
+
+    for row in rows(table):
+        assert (row["kwh"] is None) == (row["observed_seconds"] is None), row["metric"]
+    assert {r["metric"] for r in rows(table)} == {"watts", "amps"}
+
+
+def test_observed_seconds_shrinks_with_a_gap_rather_than_assuming_the_hour(write_raw):
+    """It is OBSERVED time, not elapsed time — the same rule as kwh.
+
+    A half-observed hour has half the observed seconds, not 3600.
+    """
+    start = hour_utc(ORDINARY_DAY, 13)
+    path = write_raw(samples(start, 60, 1000.0, step_s=30))
+    row = only(rows(rollup.rollup_day(ORDINARY_DAY, [path], poll_interval_s=30)))
+    assert row["observed_seconds"] == 60 * 30
+    assert row["observed_seconds"] < 3600

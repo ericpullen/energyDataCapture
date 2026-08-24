@@ -95,6 +95,7 @@ def meter_block(
     settings: Settings | None = None,
     spool_path: Path | str | None = None,
     labels: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+    channel_map: Path | str | None = None,
 ) -> dict[str, Any]:
     """The whole card. Never raises; a failure becomes ``{"error": …}``."""
     resolved = settings or get_settings()
@@ -150,6 +151,7 @@ def meter_block(
             settings=resolved,
             spool_path=spool_path,
             requested=primary_meter(labels, [m["device_id"] for m in meters]),
+            channel_map=channel_map,
         ),
     }
 
@@ -283,6 +285,7 @@ def _comparison(
     settings: Settings,
     spool_path: Path | str | None,
     requested: str | None = None,
+    channel_map: Path | str | None = None,
 ) -> dict[str, Any]:
     """Panels vs. meter for one complete local day, memoised on its inputs."""
     global _comparison_cache
@@ -292,6 +295,7 @@ def _comparison(
         _newest_mtime(directory, model.SOURCE_LGE),
         str(spool_path or ""),
         requested,
+        str(channel_map or ""),
     )
     if _comparison_cache is not None and _comparison_cache.key == key:
         return _comparison_cache.value
@@ -302,6 +306,7 @@ def _comparison(
         settings=settings,
         spool_path=spool_path,
         requested=requested,
+        channel_map=channel_map,
     )
     _comparison_cache = _Cached(key=key, value=value)
     return value
@@ -314,6 +319,7 @@ def _compute_comparison(
     settings: Settings,
     spool_path: Path | str | None,
     requested: str | None = None,
+    channel_map: Path | str | None = None,
 ) -> dict[str, Any]:
     # Imported here, not at module scope: the comparison pulls in DuckDB and the
     # rollup, and the dashboard must keep rendering if that import ever fails.
@@ -342,6 +348,11 @@ def _compute_comparison(
         return {"available": False, "reason": "no meter readings"}
 
     interval_s, _ = compare.resolve_interval(tables, device_id=device_id)
+    # How many feed series SHOULD report, from the hand-maintained map. Without
+    # it an hour in which a whole hub went silent shows 100% coverage — every
+    # channel that reported reported fully — while the panel total is short by a
+    # whole panel. `sample_count` is a minimum and cannot see an absent series.
+    expected_series = len(compare.expected_feed_series(map_path=channel_map))
     try:
         with open_spool(spool_path) as spool:
             rows = compare.compare_range(
@@ -352,24 +363,23 @@ def _compute_comparison(
                 poll_interval_s=settings.poll_interval_s,
                 device_id=device_id,
                 interval_s=interval_s,
+                expected_series=expected_series,
             )
     except Exception as exc:
         log.warning("meterview_comparison_failed", error=f"{type(exc).__name__}: {exc}")
         return {"available": False, "error": f"comparison failed: {exc}"}
 
-    usable = [
-        r
-        for r in rows
-        if r.meter_kwh is not None
-        and r.panel_kwh is not None
-        and r.coverage >= compare.DEFAULT_MIN_COVERAGE
-    ]
-    excluded = sum(
-        1
-        for r in rows
-        if r.meter_kwh is not None
-        and r.panel_kwh is not None
-        and r.coverage < compare.DEFAULT_MIN_COVERAGE
+    def _both(r: Any) -> bool:
+        return r.meter_kwh is not None and r.panel_kwh is not None
+
+    def _qualifies(r: Any) -> bool:
+        series_ok = r.series_complete or not r.series_expected
+        return r.coverage >= compare.DEFAULT_MIN_COVERAGE and series_ok
+
+    usable = [r for r in rows if _both(r) and _qualifies(r)]
+    excluded = sum(1 for r in rows if _both(r) and not _qualifies(r))
+    missing_feed = sum(
+        1 for r in rows if _both(r) and r.series_expected and not r.series_complete
     )
     if not usable:
         return {
@@ -377,9 +387,12 @@ def _compute_comparison(
             "local_day": local_day.isoformat(),
             "meter": device_id,
             "hours_excluded": excluded,
+            "hours_missing_a_feed": missing_feed,
+            "series_expected": expected_series or None,
             "reason": (
-                "no hour of that day had both a meter reading and full sample "
-                "coverage"
+                "no hour of that day had both a meter reading and a complete "
+                "panel side (full sample coverage AND every feed series "
+                "reporting)"
             ),
         }
 
@@ -393,13 +406,17 @@ def _compute_comparison(
         "interval_s": interval_s,
         "hours_compared": len(usable),
         "hours_excluded": excluded,
+        "hours_missing_a_feed": missing_feed,
+        "series_expected": expected_series or None,
         "meter_kwh": round(meter_kwh, 3),
         "panel_kwh": round(panel_kwh, 3),
         "difference_kwh": round(difference, 3),
         "difference_pct": round(100.0 * difference / meter_kwh, 1) if meter_kwh else None,
         "note": (
-            "Only hours with full sample coverage are totalled: a partly "
-            "observed hour understates the panels because the collector was "
-            "down, not because the CTs are wrong."
+            "Only hours with full sample coverage AND every feed series "
+            "reporting are totalled. A partly observed hour understates the "
+            "panels because the collector was down, not because the CTs are "
+            "wrong — and an hour missing a whole hub understates them by a "
+            "whole panel while every surviving channel still reads 100%."
         ),
     }

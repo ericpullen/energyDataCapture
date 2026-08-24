@@ -453,6 +453,10 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
         "fetch-greenbutton",
         "greenbutton-authorize",
         "compare-meter",
+        "verify-bill",
+        "watch-health",
+        "digest",
+        "check-channels",
     }
 
     # What the CLI command bodies actually pass, keyword for keyword. Binding
@@ -464,7 +468,12 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
         "poll": {"once": True, "sources": None},
         "upload": {"start": date(2026, 8, 15), "end": date(2026, 8, 16)},
         "compact-daily": {"start": date(2026, 8, 15), "end": date(2026, 8, 16)},
-        "rollup": {"start": date(2026, 8, 15), "end": date(2026, 8, 16)},
+        "rollup": {
+            "start": date(2026, 8, 15),
+            "end": date(2026, 8, 16),
+            "poll_interval_s": None,
+            "allow_interval_mismatch": False,
+        },
         "fetch-daily": {"start": date(2026, 8, 15), "end": date(2026, 8, 16)},
         "backfill": {"start": date(2026, 8, 15), "end": date(2026, 8, 16)},
         "discover": {
@@ -511,6 +520,33 @@ def test_every_built_stage_resolves_through_the_cli_table() -> None:
             "source": "lge",
             "meter": None,
             "min_coverage": 0.9,
+            "channel_map": None,
+        },
+        "verify-bill": {
+            "start": date(2026, 6, 26),
+            "end": date(2026, 7, 28),
+            "meter": None,
+            "bill_kwh": None,
+            "bill_total": None,
+            "tariff_path": None,
+            "meter_dir": None,
+            "source": "lge",
+            "tolerance_pct": 1.0,
+            "min_coverage": 0.995,
+        },
+        "watch-health": {"url": None, "notify": True, "always_notify": False},
+        "digest": {
+            "local_day": None,
+            "bucket": None,
+            "notify": True,
+            "always_notify": False,
+        },
+        "check-channels": {
+            "start": None,
+            "end": None,
+            "bucket": None,
+            "notify": True,
+            "always_notify": False,
         },
     }
     assert set(passed) == set(cli.STAGE_ENTRYPOINTS)

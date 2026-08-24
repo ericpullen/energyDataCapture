@@ -392,10 +392,16 @@ def test_hourly_schema_types() -> None:
         assert schema.field(column).type == pa.timestamp("us", tz="UTC")
 
 
-def test_hourly_kwh_is_the_only_nullable_column() -> None:
-    """``kwh`` is NULL for every metric but ``watts`` — never 0 (§2.5)."""
+def test_hourly_kwh_and_its_denominator_are_the_only_nullable_columns() -> None:
+    """``kwh`` is NULL for every metric but ``watts`` — never 0 (§2.5).
+
+    ``observed_seconds`` is null in exactly the same places: it is kwh's
+    denominator, and asserting one source's poll interval onto another source's
+    rows would put a quiet falsehood in the column whose entire purpose is to
+    make kwh auditable (#190).
+    """
     nullable = {f.name for f in model.HOURLY_SCHEMA if f.nullable}
-    assert nullable == {"kwh"}
+    assert nullable == {"kwh", "observed_seconds"}
     assert model.POWER_METRIC == "watts"
 
 

@@ -233,14 +233,44 @@ and failing is more useful than billing.
 
 #### The permission split was tested by asserting the denials, not just the grants
 
-The collector key can put/get/delete under `energy/raw_30s/` and `energy/_tmp/`, and is
-**denied** on `energy/hourly/` (`PutObject`) and on `glue:GetDatabases` — both confirmed by
-the real API, not by `simulate-principal-policy`. That is the point of the split: the
-always-on internet-facing box cannot touch derived data or the catalog.
+As built (`v2`), the collector key could put/get/delete under `energy/raw_30s/` and
+`energy/_tmp/`, and was **denied** on `energy/hourly/` (`PutObject`) and on
+`glue:GetDatabases` — both confirmed by the real API, not by `simulate-principal-policy`.
+That was the point of the split: the always-on internet-facing box cannot touch derived data
+or the catalog.
 
 Smoke-test objects were then hard-deleted **including their versions and delete markers** —
 with versioning on, `delete-object` only writes a marker, so the bucket is not actually empty
 until the versions go too. Confirmed: 0 versions, 0 delete markers.
+
+> **Superseded the same day — the `hourly` denial has been lifted (`v3`, 2026-08-23).**
+> The denial was correct for the *planned* poller/batch split and wrong for the process that
+> is actually running: `energycap run` schedules the hourly rollup and the 01:30 compaction
+> itself, with no knob to turn either off, so the boundary did not stop derived-data writes —
+> it just made them fail. `rollup` logged six consecutive `AccessDenied` on
+> `CopyObject → energy/hourly/…` before this was noticed, and `energy/hourly/` was stale at
+> `rollup-20260822.parquet` while `raw_30s` kept uploading fine.
+>
+> `v3` adds a `WriteDerivedDataAndThePartsArchive` statement —
+> `PutObject`/`GetObject`/`DeleteObject` on `energy/hourly/*` **and** on
+> `energy/raw_30s_parts_archive/*`, which `v2` omitted entirely and which tonight's 01:30
+> compaction would have failed on next — plus `energy/raw_30s_parts_archive/*` in the
+> `ListBucket` prefix condition. `glue:GetDatabases` stays denied: the collector still never
+> touches the catalog.
+>
+> **What is given up, stated plainly:** the internet-facing box can now overwrite and delete
+> derived data. `energy/hourly/` is disposable by design (`rollup` rebuilds any date range
+> from `raw_30s`), and the parts archive is covered by the `expire-parts-archive` lifecycle
+> rule, so the blast radius is "re-run a stage", not "lose data". Restoring the boundary means
+> doing the job split for real — knobs to disable the in-process upload/compaction/rollup jobs
+> and a scheduled batch runner under `energycap-batch`. Until that exists, `v2` cannot be
+> reinstated without breaking the collector. DEVIATIONS.md #181.
+>
+> Verified as the collector user against the real API, not `simulate-principal-policy`:
+> `PutObject` to `energy/hourly/`, `PutObject` to `energy/raw_30s_parts_archive/`, and the
+> `CopyObject` into `energy/hourly/` that was the failing call — all three succeeded, this
+> time with no propagation delay at all (contrast trap 2 below). Smoke-test objects hard
+> deleted with their versions; 0 versions, 0 delete markers confirmed for both prefixes.
 
 #### Two traps worth not re-deriving
 

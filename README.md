@@ -79,11 +79,12 @@ the LG&E `energy/meter` dataset, built 2026-08-23 as the `energy_meter` table.
 **Never sum `energy_meter.value` without pinning `interval_s`** — every meter
 publishes the same energy as both a 900s and a 3600s series.
 
-**`stage` and `stage_pct` are two mutually exclusive renderings of one field** — the
-outdoor unit's `odu.opstat` — and which one a system emits is fixed by its hardware.
-**This house emits `stage_pct` and will never emit a single `stage` row**, so a query
-that filters on `stage` here returns nothing at all. That is the "absence is not zero"
-trap in its sharpest form; read
+**`stage` and `stage_pct` are two renderings of one field** — the outdoor unit's
+`odu.opstat` — and the rendering is chosen **per reading**, not per system.
+**This house emits both, interleaved**: over 2026-08-17→23 the archive holds 8,091
+`stage` rows and 9,010 `stage_pct` rows on the same serial. A query that filters on
+either one silently drops roughly half the day. That is the "absence is not zero" trap
+in its sharpest form; read
 [Compressor stage: `stage` vs `stage_pct`](#compressor-stage-stage-vs-stage_pct) before
 writing either into a `WHERE`.
 
@@ -496,6 +497,27 @@ unhealthy, because in `hybrid` the REST fallback is still landing rows and an un
 container would be a false alarm; read the `leviton_ws` section for the socket's own
 state.
 
+**Nothing reads `/healthz` unless you make it.** That is what `energycap watch-health`
+is for: run it on a *different* machine, on a timer, and it pushes what is wrong to
+Pushover. Seven checks, including two — uploader age and spool backlog — that `/healthz`
+deliberately will not cover, so rotated S3 credentials cannot leave it green while the
+archive quietly stops growing.
+
+```bash
+uv run energycap watch-health --always-notify   # prove the channel, then schedule it
+```
+
+Its governing rule is that **a missing field is a failure, not a pass**: `health.meter`
+does not exist until Green Button has run once, and the obvious
+`jq '.health.meter.stale == true'` reads that absence as health — which is exactly how
+the 2026-08 authorisation lapse hid for three days. It pushes on state change (plus an
+all-clear on recovery, and a reminder every 6h) rather than on every failing run, because
+an alarm that fires 96 times a day gets muted.
+
+**[`deploy/watchdog.md`](deploy/watchdog.md)** has the setup, the launchd job, and an
+honest account of the one thing it still cannot tell you — that the watcher itself
+stopped.
+
 **`GET /ui` — the live dashboard**, on the same port (`http://localhost:8080/ui`). Open it
 to watch the data arrive instead of waiting for it to reach S3: latest value per channel
 with a 30-minute sparkline, the three biggest watt channels overlaid, the HVAC readings
@@ -562,7 +584,7 @@ options: `--log-level`, `--traceback`, `--version`.
 | `energycap poll [--once] [--source ...]` | One poll cycle (or the loop) → SQLite spool. A failed cycle writes zero rows. | — |
 | `energycap upload` | Closed local hours from the spool → `part-*.parquet`, verified by S3 Parquet row count before the spool rows are marked uploaded. | yesterday → today |
 | `energycap compact-daily` | A day's parts → `day-{YYYYMMDD}.parquet`, then (only after the row count verifies) moves the parts to the archive prefix. | yesterday |
-| `energycap rollup` | Rebuild the whole local day's hourly rollup. The heal for late data. | yesterday → today |
+| `energycap rollup` | Rebuild the whole local day's hourly rollup. The heal for late data. Refuses if the kWh interval disagrees with the data's own sample cadence — see below. | yesterday → today |
 | `energycap fetch-daily` | Carrier daily energy → `energy/daily` (day1 + day2 revision). | D-2 → D-1 |
 | `energycap backfill` | Historical Bryant energy from the legacy DynamoDB table + the old collector's JSON, DynamoDB preferred on overlap. Read-only against DynamoDB. | D-2 → D-1 |
 | `energycap discover [--dump FILE]` | Enumerate the live Leviton/Bryant hierarchy; print a `channel_map.json` skeleton for unmapped channels and write `live_channels.json` beside the map. `--dump` records every raw upstream response. | — |
@@ -572,6 +594,121 @@ options: `--log-level`, `--traceback`, `--version`.
 | `energycap greenbutton-authorize [--code …]` | Authorize against Green Button Connect. No `--code` prints the URL to open; `--code` exchanges it and caches tokens at `SPOOL_DIR/tokens/lge.json`, mode 600. | — |
 | `energycap fetch-greenbutton` | The same meter intervals over the authorized Connect API instead of a downloaded file — same parser, same writer. Scheduled daily at 09:15 local. | D-3 → today |
 | `energycap compare-meter` | The utility meter vs. the summed service-feed CTs, hour by hour, with sample coverage. | yesterday → today |
+| `energycap verify-bill` | A billing cycle's meter intervals, priced through `config/tariff.json`, against what LG&E charged — in dollars. | last 30 days |
+| `energycap watch-health` | Read a collector's `/healthz` from another machine and push what is wrong to Pushover. Exits 1 on any failing check. | — |
+| `energycap digest` | Review a local day for anomalies — a trailing 21-day band per circuit plus five hard rules — and push the findings to Pushover. Scheduled 06:00 local. Runs `check-channels` first and will not judge a circuit whose instrument it cannot trust. | yesterday |
+| `energycap check-channels` | Ask whether the **instruments** can be trusted, which nothing else here asks: a frozen channel, a panel outdrawing its own feed, disagreement with the utility meter, a reversed clamp. Read-only. Findings ride the nightly digest's push. Exits 1 on any finding. | yesterday |
+
+### Coverage is not correctness — `check-channels`
+
+Everything else in this project asks *"did we observe it?"* — `sample_count`,
+`observed_seconds`, staleness, failure streaks. **All of them pass while a CT
+channel returns the same wrong number six hundred times in a row.** The row is
+present, the value is non-null, the coverage is complete and the number is
+plausible. That is [`DEVIATIONS.md`](DEVIATIONS.md) #180, a Leviton hub that
+stops updating its CT channels, and it hid for six days.
+
+```bash
+energycap check-channels --start 2026-08-17 --end 2026-08-24
+```
+
+Four checks, all over `energy_hourly`, none needing a column the rollup does not
+already have:
+
+| finding | what it catches |
+|---|---|
+| `frozen_channel` | `min = max` at a non-zero value for consecutive whole hours. **Pinned at zero is not frozen, it is off** — a water heater idle for two hours legitimately reports `0.0`, and calling that a fault was the first false positive this check produced. CT channels only: breakers report integer watts and a steady 21 W porch light pins trivially. |
+| `feed_below_children` | a panel's metered circuits drawing more than its own feed clamp reports. Physically impossible, and the only check **independent of the failure mode** — it fires on a frozen channel, a stuck-zero channel and a clamp reading low alike. |
+| `meter_disagreement` | the panels disagreeing with the LG&E meter by more than tolerance over a whole day. The **only** check that sees a clamp reading live but *scaled wrong* — a jaw not fully closed, a clamp round the wrong conductor — because such a channel varies, never freezes, and may stay above its children. Run it after touching any clamp. |
+| `negative_reading` | a clamp fitted backwards. Never yet observed here, so this one is unproven rather than calibrated. |
+
+Thresholds are the `INTEGRITY_*` settings, and every default is calibrated
+against eight days of two real hubs — one healthy, one faulty — separating them
+with **no false positives**. `docs/check-channels.md` carries the tables. Both
+sides are coverage-gated and a skipped day is always *named*: a partial first
+day of collection and a half-published meter day were both reported as huge
+instrument faults until the gates were added, and an alert that cries wolf gets
+muted — which is how #180 survived in the first place.
+
+It writes nothing, anywhere. The fault it was built for is upstream of this
+code, so nothing is repaired, interpolated, or filtered out of the archive.
+
+### The rollup will not price energy with the wrong interval
+
+`kwh = mean_watts * sample_count * POLL_INTERVAL_S / 3.6e6`, and that interval
+comes from the environment, not from the data. So changing `POLL_INTERVAL_S` and
+then following this README's own advice — *re-run rollup over the affected
+range* — would multiply every historical kWh by the ratio: silently, idempotently
+and with nothing in the output that looks wrong.
+
+`rollup` now measures the median gap between consecutive samples for the day and
+**refuses** if it disagrees with the interval about to be used:
+
+```
+2026-08-21: kWh would be computed with poll_interval_s=60s, but the data's own
+median sample spacing is 30.0s. Rolling up anyway would multiply every kWh for
+this day by 2.00.
+```
+
+When re-rolling days collected at a different cadence, say which:
+`--poll-interval-s 30`. `--allow-interval-mismatch` downgrades the refusal to a
+warning, for a cadence that genuinely changed mid-range.
+
+### Is the bill right? (`verify-bill`)
+
+`compare-meter` asks whether the panels agree with the meter. `verify-bill` asks
+whether the **amount** is right: it sums LG&E's own 15-minute readings over the
+billing cycle, prices them through the tariff, and sets the result beside the
+bill. Because both sides come from the utility, none of the CT-side caveats
+apply — a disagreement here is arithmetic, not instrument tolerance.
+
+```bash
+# Both dates are the meter READ dates exactly as the bill prints them.
+container exec energycap energycap verify-bill \
+    --start 2026-06-26 --end 2026-07-28 --meter 1308468
+```
+
+With the bill transcribed into `config/tariff.json`, `--bill-kwh` and
+`--bill-total` are read from there and can be omitted.
+
+**`--end` is a read date, and the days billed are `(start, end]`.** A cycle read
+6/26 and again 7/28 bills 6/27 through 7/28 — 32 days. The previous read date's
+usage belongs to the previous cycle. This was measured, not assumed: across the
+barn's eight fully covered cycles the mean absolute error against billed kWh is
+**3.67%** treating the read date as exclusive and **0.16%** on this convention.
+The day *count* is identical either way, so nothing else catches the mistake.
+
+`config/tariff.json` is hand-maintained and transcribed from the bills. Add a
+`billing_cycles` block each month; add a `rate_period` only when the
+basic/energy/DSM rate itself changes. `tests/test_tariff.py` replays every cycle
+in the file and requires the printed total back to the cent, so a transcription
+slip fails the suite instead of quietly biasing every answer.
+
+Three things it will not do:
+
+- **Price the wrong service.** The house is *Residential Electric Service*; the
+  barn is *General Service Single Phase* on a separate account, with a different
+  energy charge, a fuel adjustment excluded from the rider base, a $0.0286/kWh
+  deduction from that base, and 6% Kentucky sales tax the house is exempt from
+  as a primary residence. The tariff is keyed by meter id, so the mix-up is
+  unreachable rather than merely discouraged.
+- **Give a verdict over a gap.** Missing intervals understate the kWh, which
+  understates the priced total, which makes a correct bill look overstated by
+  exactly the size of the gap. Below `--min-coverage` (default 0.995, DST-aware)
+  no verdict is given at all.
+- **Present an estimate as a reconciliation.** LG&E re-sets the fuel adjustment
+  and the three percentage riders every month — ten observed months span
+  `$0.00048` to `$0.01063/kWh` on the fuel adjustment alone. A cycle with no bill
+  on file carries last month's forward and is reported as `no_verdict_estimated_riders`.
+
+**Green Button carries no pricing.** Verified against a real export: no `cost`
+element on any of 5,022 `IntervalReading`s, no `UsageSummary` or `TariffProfile`,
+and every `ReadingType` declares `currency = 0` ("not applicable"). The granted
+scope (`FB=1_3_4_5`) has no billing function block. Dollars can only come from a
+transcribed tariff, which is why `config/tariff.json` exists. Note also that
+`cost_day_usd` in `energy/daily` is **Carrier's** HVAC-only estimate at whatever
+rate is typed into the thermostat — it is not billing data and must never be
+treated as such.
 
 ### Meter vs. panels
 
@@ -587,8 +724,19 @@ container exec energycap energycap fetch-greenbutton --start 2026-08-14
 container exec energycap energycap import-greenbutton /data/GreenButton.xml
 
 # 2. Compare against ct_1_a + ct_1_b on both hubs — the two service feeds.
+#    The meter defaults to whichever the channel map marks `primary: true`
+#    (the house). Pass --meter to override; without a primary flag AND with
+#    several differing meters present, it refuses rather than guessing.
 container exec energycap energycap compare-meter --start 2026-08-14 --end 2026-08-17
 ```
+
+An hour is totalled only if it clears `--min-coverage` **and every feed series in
+the channel map reported**. That second gate is not redundant: `sample_count` is
+the minimum over the channels that *did* report, so a hub absent for a whole hour
+leaves the survivors reading 100% coverage while the panel total is short by a
+whole panel — which reads as "the panels are ~50% below the meter" and is not.
+The `feeds` column shows `seen/expected`, and hours missing one are counted
+separately from thinly-covered ones.
 
 Authorizing needs a MyMeter **local** account — one whose email differs from your
 My Account login, created with a registration code LG&E emails on request. The
@@ -1285,49 +1433,74 @@ The rules, which are not negotiable:
   a fallback bucket, never an invented number, never `unknown = 99`.
 - Because of that, an absent `mode`/`stage`/`fan` row can mean the API sent something we
   have never seen, not that the system was off. Check the logs for `bryant_enum_unknown`.
-- `stage` is **permanently empty on this system** — settled by a live run, not a
-  prediction. The next section is the whole story.
+- `stage` is **not empty on this system, and neither is `stage_pct`** — both are
+  emitted, interleaved, because `odu.opstat` changes shape with what the compressor is
+  doing. Filtering on one loses the other. The next section is the whole story.
 
 ---
 
 ## Compressor stage: `stage` vs `stage_pct`
 
 `odu.opstat` — what the *outdoor unit* is doing — is the single most useful HVAC signal
-here: it is the one that correlates with watts. It arrives in **one of two shapes, decided
-by the hardware, and a system only ever produces one of them**:
+here: it is the one that correlates with watts. It arrives in **one of two shapes, and the
+shape is decided per reading by what the unit is doing** — not, as this section long
+claimed, fixed for the life of the hardware:
 
-| the outdoor unit is… | `odu.opstat` reads | metric emitted | `unit` | the other metric |
-|---|---|---|---|---|
-| single-, two- or multi-stage | a word: `off`, `low`, `high`, `idle`, `dehumidify` | `stage` (integer code, decoded above) | `enum` | no `stage_pct` row, ever |
-| **variable-capacity** (Greenspeed / inverter) | a number: `"0"`–`"100"`, the compressor's capacity percentage | `stage_pct` (the number as reported) | `pct` | **no `stage` row, ever** |
+| `odu.opstat` reads | metric emitted | `unit` | observed on this house |
+|---|---|---|---|
+| a word: `off`, `low`, `high`, `idle`, `dehumidify` | `stage` (integer code, decoded above) | `enum` | yes — `off` and `dehumidify`, 8,091 rows over six days |
+| a number: `"0"`–`"100"`, the compressor's capacity percentage | `stage_pct` (the number as reported) | `pct` | yes — values 13–86, 9,010 rows over the same six days |
 
-**This house is the second kind.** The first live call (`energycap discover`, 2026-08-17)
-returned `odu.type = "gs3ngiphp"` with `odu.opstat = "35"` — a Greenspeed variable-capacity
-heat pump reporting 35 % capacity. Every poll cycle since has emitted `stage_pct` and
-**zero `stage` rows**, and that will not change unless the outdoor unit is replaced.
+**This house emits both, and it always has.** The outdoor unit is a Greenspeed
+variable-capacity heat pump (`odu.type = "gs3ngiphp"`), and while the compressor
+modulates, `odu.opstat` is a capacity percentage. When it is *not* modulating the same
+field returns a word instead — observed as `off` and `dehumidify`. So the rendering flips
+back and forth all day, tracking compressor state:
 
-So, concretely:
+| local day | `stage` rows | `stage_pct` rows |
+|---|---|---|
+| 2026-08-17 (partial) | 17 | 1,013 |
+| 2026-08-18 | 847 | 2,025 |
+| 2026-08-19 | 1,945 | 934 |
+| 2026-08-20 | 813 | 2,067 |
+| 2026-08-21 | 1,518 | 1,361 |
+| 2026-08-22 | 1,430 | 1,451 |
+| 2026-08-23 (to 14:00) | 1,521 | 159 |
+
+So, concretely — **select both, always**:
 
 ```sql
--- Returns NOTHING on this system. Not "the compressor was off" — nothing.
+-- WRONG on this system: each of these silently drops about half the day.
 WHERE source = 'bryant' AND metric = 'stage'
+WHERE source = 'bryant' AND metric = 'stage_pct'
 
--- This is the compressor signal here.
-WHERE source = 'bryant' AND metric = 'stage_pct'    -- value is 0-100, unit 'pct'
+-- The compressor signal is the pair. Keep them apart (one is an enum code, the
+-- other a real percentage) and let the NULL say which rendering that cycle used.
+SELECT ts_local,
+       max(CASE WHEN metric = 'stage'     THEN value END) AS stage_code,  -- enum
+       max(CASE WHEN metric = 'stage_pct' THEN value END) AS stage_pct    -- 0-100
+FROM energy_raw_30s
+WHERE source = 'bryant' AND metric IN ('stage', 'stage_pct')
+GROUP BY ts_local
 ```
 
-That is the [cardinal rule](#reading-this-data-honestly) at its most dangerous: an empty
-result is *absence*, and absence is never zero. If you do not know which rendering a
-system uses, ask it — `energycap discover` prints `odu_type`, `odu_opstat` and
-`stage_metric` per system, without waiting for a poll cycle — or select both metrics and
-let the one that comes back NULL tell you.
+Never coalesce the two into one column: `stage = 2` means `high` and `stage_pct = 2` means
+2 % capacity. For a continuous signal you can average across the whole day, use
+`compressor_rpm` instead — it is populated regardless of which rendering `opstat` chose.
 
-Both paths stay live forever, so a replaced or reflashed outdoor unit can switch a system
-from one to the other mid-archive. The two never collide: they are different metric names,
-so they never share a dedupe key `(ts_utc, source, device_id, channel_id, metric)` and
-never average together. The source logs `bryant_stage_representation` at INFO the first
-time it sees a rendering and again on any change, and `status.json` carries
-`stage_representation`, `stage_pct_rows` and `stage_enum_rows`.
+That is the [cardinal rule](#reading-this-data-honestly) at its most dangerous: an empty
+result is *absence*, and absence is never zero. `energycap discover` prints `odu_type`,
+`odu_opstat` and `stage_metric` per system — but note that it reports the rendering of the
+**one reading it just took**, so a single `discover` call cannot tell you a system only
+ever produces one shape. Only the archive can, and on this system it says otherwise.
+
+The two never collide: they are different metric names, so they never share a dedupe key
+`(ts_utc, source, device_id, channel_id, metric)` and never average together. The source
+logs `bryant_stage_representation` at INFO the first time it sees a rendering and again on
+any change — on this system that fires routinely, several times a day, which is not the
+"replaced or reflashed outdoor unit" event the log line was written to catch. `status.json`
+carries `stage_representation`, `stage_pct_rows` and `stage_enum_rows`; read the two counts,
+not the single tag. Background: DEVIATIONS.md #179.
 
 Two things `stage_pct` is **not**:
 

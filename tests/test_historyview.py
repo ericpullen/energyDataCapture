@@ -58,6 +58,7 @@ def _hourly_rows(day: date, channels, *, hours: int = 24, watts: float = 100.0):
                     "first_ts_utc": utc,
                     "last_ts_utc": utc,
                     "kwh": watts * historyview.SAMPLES_PER_HOUR * 30 / 3.6e6,
+                    "observed_seconds": historyview.SAMPLES_PER_HOUR * 30,
                 }
             )
     return rows
@@ -284,6 +285,83 @@ def test_the_meter_delta_is_withheld_on_an_incomplete_day(con, archive) -> None:
     assert partial["coverage_pct"] == pytest.approx(25.0, abs=0.1)
 
 
+def test_a_partially_published_meter_day_withholds_the_delta(con, tmp_path) -> None:
+    """The other half of the gate, and the one that was missing.
+
+    LG&E publishes late and revises. A day whose PANEL side is complete but
+    whose METER side is half written compares a full day against a partial one
+    and manufactures a delta the size of the missing part — a measured +65% on
+    one such day, which then polluted `mean_delta_pct`, the headline number.
+    `intervals` was already carried on every row and simply never checked.
+    """
+    from energy_capture.stages import dim  # noqa: F401 - fixture parity
+
+    feeds = [(HUB_A, "ct_1_a"), (HUB_A, "ct_1_b"), (HUB_B, "ct_1_a"), (HUB_B, "ct_1_b")]
+    day = date(2026, 8, 18)
+    hourly = _write(
+        tmp_path / "hourly.parquet",
+        _hourly_rows(day, feeds, watts=1000.0),
+        model.HOURLY_SCHEMA,
+    )
+    dim_rows, dim_schema = _dim_rows([
+        (model.SOURCE_LEVITON, HUB_A, "ct_1_a", "Panel A feed A", False),
+        (model.SOURCE_LEVITON, HUB_A, "ct_1_b", "Panel A feed B", False),
+        (model.SOURCE_LEVITON, HUB_B, "ct_1_a", "Panel B feed A", False),
+        (model.SOURCE_LEVITON, HUB_B, "ct_1_b", "Panel B feed B", False),
+        (model.SOURCE_LGE, HOUSE, "electric_main", "House meter", True),
+    ])
+    dim_path = _write(tmp_path / "dim.parquet", dim_rows, dim_schema)
+
+    # HALF a day of meter intervals: 48 of the 96 a complete day holds.
+    local = datetime.combine(day, datetime.min.time())
+    meter_rows = [
+        {
+            "ts_utc": local + timedelta(minutes=15 * i, hours=4),
+            "ts_local": local + timedelta(minutes=15 * i),
+            "source": model.SOURCE_LGE, "device_id": HOUSE,
+            "channel_id": "electric_main", "metric": "kwh_interval",
+            "value": 1.0, "unit": "kWh", "interval_s": 900,
+        }
+        for i in range(48)
+    ]
+    meter = _write(tmp_path / "meter.parquet", meter_rows, model.METER_SCHEMA)
+    daily = _write(tmp_path / "daily.parquet", [], model.DAILY_SCHEMA)
+
+    src = historyview.Sources(
+        hourly=hourly, meter=meter, dim=dim_path, daily=daily, bucket="test-bucket"
+    )
+    rng = historyview.HistoryRange(start=day, end=day)
+    block = historyview.meter_block(con, src, rng)
+    row = block["rows"][0]
+
+    # The panel side is perfect — that is the point.
+    assert row["series_seen"] == row["series_expected"] == 4
+    assert row["coverage_pct"] == pytest.approx(100.0, abs=0.1)
+
+    # ...and the meter side is not, so no delta is published.
+    assert row["intervals"] == 48
+    assert row["intervals_expected"] == 96
+    assert row["meter_complete"] is False
+    assert row["complete"] is False
+    assert row["delta_pct"] is None, "half a meter day must not produce a delta"
+    assert block["mean_delta_pct"] is None
+    assert block["complete_days"] == 0
+
+
+def test_the_meter_interval_expectation_follows_dst(con, archive) -> None:
+    """92 on the spring-forward day, 100 on the fall-back day, 96 otherwise.
+
+    Hard-coding 96 would call the short day incomplete every March and — worse —
+    call the long day complete every November while a whole hour of energy went
+    unmeasured.
+    """
+    rng = historyview.HistoryRange(start=date(2026, 3, 8), end=date(2026, 11, 1))
+    assert rng.expected_meter_intervals(date(2026, 3, 8), 900) == 92
+    assert rng.expected_meter_intervals(date(2026, 11, 1), 900) == 100
+    assert rng.expected_meter_intervals(date(2026, 8, 18), 900) == 96
+    assert rng.expected_meter_intervals(date(2026, 8, 18), 3600) == 24
+
+
 def test_only_one_interval_series_is_counted(con, archive) -> None:
     """Each meter publishes the same energy as 900s AND 3600s. The fixture writes
     96 x 1.0 and 24 x 4.0 per day — both 96 kWh. Summing both gives 192."""
@@ -405,3 +483,49 @@ def test_the_page_declares_both_theme_scopes() -> None:
     assert "prefers-color-scheme: dark" in page
     assert '[data-theme="dark"]' in page
     assert ':not([data-theme="light"])' in page
+
+
+def test_a_mixed_schema_hourly_archive_still_reads(con, tmp_path) -> None:
+    """The migration this had to survive.
+
+    `energy/hourly` gained `observed_seconds` (#190). For as long as it takes to
+    re-roll — and for as long as a collector on the previous release keeps
+    writing the old shape every hour — a glob across days spans BOTH schemas.
+    Without `union_by_name` DuckDB rejects the entire glob on the first
+    mismatch, which would take the history view down until every file had been
+    rewritten.
+    """
+    import pyarrow.parquet as pq
+
+    feeds = [(HUB_A, "ct_1_a")]
+    old_day, new_day = date(2026, 8, 18), date(2026, 8, 19)
+
+    # One file WITHOUT the column, exactly as the previous release wrote it.
+    old_rows = _hourly_rows(old_day, feeds, watts=1000.0)
+    old_schema = model.HOURLY_SCHEMA.remove(
+        model.HOURLY_SCHEMA.get_field_index("observed_seconds")
+    )
+    old_tbl = pa.Table.from_pylist(
+        [{k: v for k, v in r.items() if k != "observed_seconds"} for r in old_rows],
+        schema=old_schema,
+    )
+    pq.write_table(old_tbl, tmp_path / "rollup-20260818.parquet")
+
+    # ...and one WITH it.
+    new_tbl = pa.Table.from_pylist(
+        _hourly_rows(new_day, feeds, watts=1000.0), schema=model.HOURLY_SCHEMA
+    )
+    pq.write_table(new_tbl, tmp_path / "rollup-20260819.parquet")
+
+    glob = str(tmp_path / "rollup-*.parquet")
+    rows = con.execute(
+        "SELECT local_hour_start, observed_seconds "
+        "FROM read_parquet(?, union_by_name := true) ORDER BY local_hour_start",
+        [glob],
+    ).fetchall()
+
+    assert len(rows) == old_tbl.num_rows + new_tbl.num_rows
+    # The old file reads NULL for the column it predates — the truth about it —
+    # and the new one carries a real value. Both in one glob, no error.
+    assert any(r[1] is None for r in rows)
+    assert any(r[1] is not None for r in rows)

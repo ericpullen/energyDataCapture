@@ -79,6 +79,8 @@ SECRET_SETTING_FIELDS: tuple[str, ...] = (
     "carrier_password",
     "lge_client_secret",
     "lge_registration_access_token",
+    "pushover_token",
+    "pushover_user",
 )
 
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
@@ -222,6 +224,56 @@ class Settings(BaseSettings):
     health_port: int = Field(default=8080, ge=1, le=65535)
     log_level: str = "INFO"
 
+    # -------------------------------------------------------------- Watchdog
+    #: Where `energycap watch-health` fetches the status document from. This is
+    #: the WATCHED host, and the watcher must not run on it: a box that has died
+    #: cannot report that it died. Empty means "no default" so the command has
+    #: to be told, rather than silently checking localhost and passing.
+    healthz_url: str = ""
+    #: Pushover credentials. Empty disables the push and the command only prints
+    #: and sets its exit code -- useful for a dry run, useless as an alarm.
+    pushover_token: SecretStr = SecretStr("")
+    pushover_user: SecretStr = SecretStr("")
+    #: An uploader that has not succeeded in this long means the archive has
+    #: stopped growing. It runs hourly at :05, so two hours is one clean miss.
+    uploader_stale_after_s: int = Field(default=7200, ge=60)
+    #: Spool rows waiting to be uploaded. One hour is ~10k rows at 30s across
+    #: ~85 channels, so this is roughly "four hours behind and falling further".
+    spool_pending_ceiling: int = Field(default=45000, ge=1000)
+    #: Consecutive failures of any one stage before it is an alarm. Two means a
+    #: single transient hourly miss stays quiet and a real fault does not.
+    failure_streak_alarm: int = Field(default=2, ge=1)
+
+    # ---------------------------------------------- instrument integrity (#180)
+    # These decide what `check-channels` calls a fault, and therefore what the
+    # nightly digest pushes to a phone. Every default is calibrated against
+    # eight days of two real hubs, one healthy and one faulty, and separates
+    # them with no false positives. docs/check-channels.md shows the tables.
+    #: Consecutive hours a channel may report ``min == max`` before it counts.
+    #: One frozen hour is a genuinely steady load; two in a row is not.
+    integrity_frozen_min_hours: int = Field(default=2, ge=1)
+    #: How far a panel's metered children may exceed its feed before that
+    #: physical impossibility is reported — percent of the feed reading, and an
+    #: absolute floor so a lightly loaded panel is not judged on noise. Bare
+    #: "any excess" fires on the healthy hub; clamp tolerance is ~3.4%.
+    integrity_feed_excess_pct: float = Field(default=5.0, gt=0.0)
+    integrity_feed_excess_min_w: float = Field(default=100.0, ge=0.0)
+    #: Daily panel-vs-meter disagreement that alarms. The only check that sees
+    #: a clamp reading live but scaled wrong.
+    integrity_meter_disagree_pct: float = Field(default=10.0, gt=0.0)
+    #: Hourly ``sample_count`` below this is skipped and named, never passed.
+    integrity_min_samples: int = Field(default=100, ge=1)
+
+    #: Which scheduled jobs this process runs. Empty (the default) means ALL of
+    #: them, which is PLAN.md §5's one-container design and must stay the
+    #: default. Set it to run a subset — the poller/batch split this project has
+    #: listed as next needs exactly this, and DEVIATIONS #181 had to widen an IAM
+    #: policy it would rather have kept narrow precisely because the knob did not
+    #: exist. Names are validated against the real schedule at startup, so a typo
+    #: fails the boot rather than silently disabling a job. See
+    #: `runtime.SCHEDULED_JOB_NAMES`.
+    scheduled_jobs: str = ""
+
     # ---------------------------------------------------------- Semantic layer
     blackstart_inventory_path: Path | None = None
 
@@ -315,6 +367,21 @@ class Settings(BaseSettings):
                 "no row can consume."
             )
         return self
+
+    # ------------------------------------------------------- scheduled jobs
+    @property
+    def scheduled_job_names(self) -> tuple[str, ...]:
+        """``SCHEDULED_JOBS`` parsed, or ``()`` meaning "run them all".
+
+        Comma-separated, whitespace tolerated. Deliberately NOT validated here:
+        the list of real job names lives in :mod:`~energy_capture.runtime`, and
+        importing it from the settings module would invert the dependency. The
+        check happens where the schedule is built, which is also the only place
+        that can name the alternatives in the error.
+        """
+        return tuple(
+            name.strip() for name in self.scheduled_jobs.split(",") if name.strip()
+        )
 
     # ------------------------------------------------------- Leviton ingestion
     @property

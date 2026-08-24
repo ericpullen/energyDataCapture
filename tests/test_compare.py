@@ -519,3 +519,153 @@ def test_two_interval_series_are_not_summed_together() -> None:
 def test_a_single_interval_series_needs_no_note() -> None:
     tables = _meter_rows([("1308468", HOUR_UTC, 2.0)])
     assert compare.resolve_interval(tables) == (900, None)
+
+
+# ------------------------------------------------- a whole hub going missing
+
+
+def test_a_wholly_missing_hub_is_not_full_coverage(spool, make_obs, tmp_path) -> None:
+    """The gap sample_count cannot see.
+
+    `sample_count` is the MINIMUM across the channels that produced rows. A hub
+    absent for the entire hour produces none, so it contributes nothing to the
+    minimum: the surviving hub reports its full count, coverage reads 100%, and
+    the summed panel energy is short by a whole panel. One hub offline for a day
+    published "the panels read ~50% below the meter" at full coverage.
+    """
+    # Only hub-a reports. hub-b is silent for the whole hour.
+    fill_hour(spool, make_obs, channels=("ct_1_a", "ct_1_b"), device_id="hub-a")
+
+    rows = compare.compare_range(
+        start=LOCAL_DAY,
+        end=LOCAL_DAY,
+        spool=spool,
+        meter_tables=meter_table(tmp_path, kwh=4.0),
+        poll_interval_s=POLL_S,
+        expected_series=4,  # both hubs, two legs each
+    )
+    hour = next(r for r in rows if r.panel_kwh is not None)
+
+    # Coverage is the trap: it is perfect, because every channel that reported
+    # reported fully.
+    assert hour.coverage == pytest.approx(1.0)
+    assert hour.sample_count == FULL_HOUR_SAMPLES
+
+    # ...and the series count is what catches it.
+    assert hour.series_seen == 2
+    assert hour.series_expected == 4
+    assert hour.series_complete is False
+
+    report = compare.format_report(rows)
+    assert "TOTAL" not in report, "an hour missing a whole hub must not be totalled"
+    assert "FEED SERIES" in report
+    assert "2/4" in report
+
+
+def test_all_feeds_reporting_is_complete_and_totalled(spool, make_obs, tmp_path) -> None:
+    """The control: same shape, both hubs present."""
+    for hub in ("hub-a", "hub-b"):
+        fill_hour(spool, make_obs, channels=("ct_1_a", "ct_1_b"), device_id=hub)
+
+    rows = compare.compare_range(
+        start=LOCAL_DAY,
+        end=LOCAL_DAY,
+        spool=spool,
+        meter_tables=meter_table(tmp_path, kwh=4.0),
+        poll_interval_s=POLL_S,
+        expected_series=4,
+    )
+    hour = next(r for r in rows if r.panel_kwh is not None)
+    assert hour.series_seen == 4
+    assert hour.series_complete is True
+    assert "TOTAL" in compare.format_report(rows)
+
+
+def test_an_unreadable_channel_map_says_so_instead_of_passing_everything(
+    spool, make_obs, tmp_path
+) -> None:
+    """Unknown expectation must not read as 'nothing missing'.
+
+    With no map there is no way to tell four reporting feeds from two, so no
+    hour is excluded for a missing hub — but the report has to SAY that, or a
+    silently-degraded run is indistinguishable from a clean one.
+    """
+    fill_hour(spool, make_obs, channels=("ct_1_a", "ct_1_b"), device_id="hub-a")
+    rows = compare.compare_range(
+        start=LOCAL_DAY,
+        end=LOCAL_DAY,
+        spool=spool,
+        meter_tables=meter_table(tmp_path, kwh=4.0),
+        poll_interval_s=POLL_S,
+        expected_series=0,  # the map could not be read
+    )
+    hour = next(r for r in rows if r.panel_kwh is not None)
+    assert hour.series_complete is False  # unknown is not complete...
+
+    report = compare.format_report(rows)
+    assert "TOTAL" in report  # ...but it does not silently drop the hour either
+    assert "channel map could not be read" in report
+    assert "2/?" in report
+
+
+def test_the_expected_feed_series_come_from_the_map_not_the_data(tmp_path) -> None:
+    """Deriving the expectation from the measurements would be circular: a hub
+    that stopped reporting entirely would simply not be 'expected', so its
+    absence could never make an hour incomplete."""
+    import json
+
+    path = tmp_path / "channel_map.json"
+    path.write_text(json.dumps({"mappings": [
+        {"source": "leviton", "device_id": "hub-a", "channel_id": "ct_1_a"},
+        {"source": "leviton", "device_id": "hub-a", "channel_id": "ct_1_b"},
+        {"source": "leviton", "device_id": "hub-b", "channel_id": "ct_1_a"},
+        {"source": "leviton", "device_id": "hub-b", "channel_id": "ct_1_b"},
+        # Not a feed CT, and must not be counted.
+        {"source": "leviton", "device_id": "hub-a", "channel_id": "breaker_p1"},
+        # A different source entirely.
+        {"source": "lge", "device_id": "1308468", "channel_id": "electric_main"},
+    ]}))
+    series = compare.expected_feed_series(map_path=path)
+    assert series == frozenset({
+        ("hub-a", "ct_1_a"), ("hub-a", "ct_1_b"),
+        ("hub-b", "ct_1_a"), ("hub-b", "ct_1_b"),
+    })
+    # Absent or unreadable is an empty set, never a guess.
+    assert compare.expected_feed_series(map_path=tmp_path / "nope.json") == frozenset()
+
+
+def test_the_primary_flag_answers_the_ambiguous_meter_question(tmp_path) -> None:
+    """B6: the documented recipe errored as written.
+
+    The README said to fetch both meters and then run `compare-meter` with no
+    --meter, which is a guaranteed AmbiguousMeterError. `meterview` already
+    consulted the map's `primary` flag and the CLI did not, so the two
+    disagreed about whether the question was even answerable.
+    """
+    import json
+
+    path = tmp_path / "channel_map.json"
+    path.write_text(json.dumps({"mappings": [
+        {"source": "lge", "device_id": "1308468", "channel_id": "electric_main",
+         "primary": True},
+        {"source": "lge", "device_id": "1326254", "channel_id": "electric_main"},
+    ]}))
+    assert compare.primary_meter_from_map(path) == "1308468"
+
+
+def test_a_non_bool_primary_is_not_a_primary(tmp_path) -> None:
+    """`bool("no")` is True, which is how a typo becomes a silent wrong answer
+    (review B7). Only a real `true` counts."""
+    import json
+
+    path = tmp_path / "channel_map.json"
+    path.write_text(json.dumps({"mappings": [
+        {"source": "lge", "device_id": "1326254", "channel_id": "electric_main",
+         "primary": "no"},
+    ]}))
+    assert compare.primary_meter_from_map(path) is None
+
+
+def test_no_map_means_no_guess(tmp_path) -> None:
+    """Refusing to choose is better than choosing the barn."""
+    assert compare.primary_meter_from_map(tmp_path / "absent.json") is None

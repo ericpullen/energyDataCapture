@@ -129,6 +129,14 @@ publishes the same energy as **both a 900s and a 3600s series**, which the canon
 silently collapsed until `model.METER_DEDUPE_KEY` gained `interval_s`; nothing may ever sum two
 interval series. And Connect exposes a meter the download does not.
 
+**The archive now reaches back to 2024-01-01** (imported 2026-08-23, 183,711 rows). Bulk
+Download My Data, not Connect — and the three granularities have different retention: 900s and
+3600s go back to 2025-07-24, the **daily** series to 2024-01-01. Coarser grain, longer history.
+That means a THIRD interval series for the house, so summing without pinning `interval_s` is now
+~triple rather than double; every consumer already pins it, and the Glue comment was rewritten to
+say so (DEVIATIONS #185). Any future bulk import from the Mac **must merge S3 down first** — S3
+held 1,488 barn rows the Mac did not, and a direct push would have deleted them.
+
 **Two meters, and they must never be summed.** `1308468` is the house (74–99 kWh/day);
 `1326254` is the **barn** — a separate service that is ~100% EV charging (Ford Charge Station
 Pro + Tesla Universal), ~150 W baseline with one large load late afternoon into evening peaking
@@ -137,7 +145,14 @@ at 14.7 kW, 3.6–40 kWh/day. `channel_map.json` marks the house `primary: true`
 guess. The download also republishes the house under two retired ids (944006, 944401) which are
 mapped and collapsed on sight.
 
-**Result: the feed CTs read ~3.4% high against the meter** over fully covered hours. That is
+**Result: the feed CTs read a few percent LOW against the meter** over fully covered hours —
+the panels UNDER-report. (Corrected 2026-08-23. This line used to read "~3.4% high", quoting
+DEVIATIONS #168. That figure is right *for its own sample* — 13 hours on 2026-08-18, panels
+47.878 vs meter 46.295 — but it did not survive more data, and it should never have been
+carried here as the standing result. Every fuller measurement since is negative, including
+this section's own 77.614 meter vs 75.186 panels, and all six days re-probed against the
+archive on 2026-08-23. Direction matters: a bill above the panel total is expected CT
+under-read, not over-billing.) A few percent is
 within the combined tolerance of the clamps and the meter, and it is the first evidence the
 sub-metering is trustworthy.
 
@@ -582,6 +597,61 @@ another day), and `deviceHistory`'s `point` vocabulary is unexplored. Also worth
 next time: these input types are **non-null** (`GetRuntimeUsageInput!`), and a nullable
 declaration is a 400 with a validation message.
 
+## `energy/hourly` gained `observed_seconds` — 2026-08-24
+
+kWh is now self-checking: `kwh = mean * observed_seconds / 3.6e6`, verified with 0 violations
+across 2,226 energy rows in S3 and again through Athena. The whole archive (08-17..24, 7,848
+rows) was re-rolled and the Glue table updated; closed days are byte-for-byte the same energy
+(08-21 still 90.48 kWh). `historyview`'s hourly reads use `union_by_name`, so a collector still
+running the previous release can keep writing the old shape without breaking anything —
+the re-roll was a tidy-up, not a prerequisite (DEVIATIONS #190).
+
+Alongside it, `rollup` now **refuses** to price energy with an interval the data contradicts.
+Changing `POLL_INTERVAL_S` and re-running rollup over old days would have multiplied every
+historical kWh by the ratio, silently; demonstrated on real data at exactly 2.00x (#189).
+
+---
+
+## Anomaly detection exists — 2026-08-24
+
+`energycap digest` reviews D-1 and pushes findings to Pushover; `digest_daily` runs 06:00 local
+(after the 01:30 compaction, so D-1 is finished). A trailing 21-day median/MAD band per circuit,
+plus five hard rules — strip heat in mild weather (the expensive one; `eheat` and
+`outdoor_temp_f` were both being collected and nothing joined them), a load that stopped cycling,
+a circuit gone quiet, the barn outside 3.6–40 kWh, a rising overnight floor. DEVIATIONS #191.
+
+Everything is coverage-gated on `observed_seconds`, including the baseline, so a half-watched day
+is *named as skipped* rather than reported as a drop. Below 7 comparable days a circuit is
+un-baselined, not passed.
+
+**Two honest limits.** It would NOT have caught #180 — Panel B's daily total is flat through the
+latched days, because a sub-hourly fault averages out at day grain. And it is mostly un-baselined
+today: 8 circuits compared, 20 not yet (the 08-22 breakers are new and `energy/hourly` starts
+08-17). It gets useful as the archive grows.
+
+---
+
+## Alerting exists — 2026-08-23
+
+`energycap watch-health` reads the collector's `/healthz` **from the Mac** and pushes to
+Pushover; `deploy/watchdog.md` is the runbook and `deploy/com.duckbillhq.energycap-watch.plist`
+the 15-minute launchd job (written, **not yet loaded**). Seven checks, verified end to end
+against the live instance and the real Pushover account. Two of them (`uploader`, `spool`)
+exist because `/healthz` judges pollers only and would stay green through rotated S3 keys.
+
+The rule that matters: **absence is a failure, not a pass** — an empty document raises five
+alarms, and an unreachable host is the loudest one. Pushes on state change, all-clear on
+recovery, re-push every 6h, so a persistent fault cannot train you to mute the channel.
+
+Found on the way: the shared `scheduler` counter was written on failure and never on success,
+reading **203** while every job succeeded. Fixed, job-aware (DEVIATIONS #187).
+
+**Still open:** nothing tells you the WATCHER stopped. A sleeping Mac is silent and launchd
+skips missed firings. That needs a dead-man's switch — `watch-health && curl hc-ping.com/<uuid>`
+— which is ~5 minutes once there is a healthchecks.io account.
+
+---
+
 ## The archive exists — 2026-08-23
 
 The oldest gap in this project is closed. `docs/s3-storage.md` is the plan and the running
@@ -801,6 +871,14 @@ exactly one host — and as of 2026-08-19 that host is the instance for both.
 becomes *disposable*: if it is down for a week you lose nothing, you re-run the rollups
 over the missed range afterwards. That is what idempotent-over-a-date-range was for. It
 also shrinks the always-on box's AWS permissions to `PutObject` on one prefix.
+
+**Update 2026-08-23: the config knob now exists.** `SCHEDULED_JOBS` (empty = all) selects a
+subset of the schedule by name, validated at boot against `runtime.SCHEDULED_JOB_NAMES`
+(DEVIATIONS #186). That removes the blocker below and makes the IAM boundary #181 gave up
+restorable: a collector run without `rollup_hourly`/`daily_maintenance` writes no derived data,
+so the collector policy could go back to `v2`. What is still undone is giving the batch stages a
+home with a scheduler on the Mac. `greenbutton_daily` must stay on the instance regardless —
+that is where the rotating LG&E refresh token lives.
 
 **What it costs to build:** `default_jobs()` (`runtime.py:557`) returns a hardcoded
 5-tuple with no filtering, so it needs a config knob selecting which jobs a process runs.

@@ -91,6 +91,11 @@ STATUS_SECTIONS: tuple[str, ...] = (
     "compactor",
     "rollup",
     "spool",
+    # Whether the INSTRUMENTS can be trusted, which no other section answers:
+    # every one above reports observation, and all of them stay green while a CT
+    # channel returns the same wrong number for hours (DEVIATIONS #180). Written
+    # by `check-channels`, and by the nightly digest that now runs it first.
+    "integrity",
 )
 
 #: Top-level key holding the computed liveness verdict in the ``/healthz`` body.
@@ -198,6 +203,19 @@ def default_status_document() -> dict[str, Any]:
             "consecutive_failures": 0,
         },
         "spool": {"pending_rows": 0, "oldest_pending_utc": None},
+        # `ok` starts as None, not True. "Nobody has checked the instruments"
+        # and "the instruments are sound" are different facts, and reading the
+        # first as the second is the exact bug watch-health exists to prevent
+        # (and the one that let DEVIATIONS #180 hide for six days).
+        "integrity": {
+            "last_success_utc": None,
+            "consecutive_failures": 0,
+            "ok": None,
+            "findings": 0,
+            "channels_checked": 0,
+            "hours_checked": 0,
+            "worst": None,
+        },
     }
 
 

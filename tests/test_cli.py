@@ -48,6 +48,10 @@ DOCUMENTED_COMMANDS = (
     "fetch-greenbutton",
     "greenbutton-authorize",
     "compare-meter",
+    "verify-bill",
+    "watch-health",
+    "digest",
+    "check-channels",
 )
 
 #: The commands that take a local date range (PLAN.md §10).
@@ -193,8 +197,12 @@ def test_dates_reach_the_stage_as_date_objects(monkeypatch: pytest.MonkeyPatch) 
         cli.app, ["rollup", "--start", "2026-03-07", "--end", "2026-03-09"]
     )
     assert result.exit_code == 0, result.output
-    assert captured == {"start": date(2026, 3, 7), "end": date(2026, 3, 9)}
+    assert captured["start"] == date(2026, 3, 7)
+    assert captured["end"] == date(2026, 3, 9)
     assert isinstance(captured["start"], date)
+    # The interval guard's knobs default to "unset" and "refuse".
+    assert captured["poll_interval_s"] is None
+    assert captured["allow_interval_mismatch"] is False
 
 
 def test_lone_start_means_a_single_local_day(monkeypatch: pytest.MonkeyPatch) -> None:

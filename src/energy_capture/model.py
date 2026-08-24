@@ -369,6 +369,16 @@ HOURLY_SCHEMA: pa.Schema = pa.schema(
         # NULL for every metric except `watts` — never 0, which would read as
         # "no energy used" instead of "not applicable".
         pa.field("kwh", pa.float64(), nullable=True),
+        # The denominator behind `kwh`: sample_count * the poll interval those
+        # rows were COLLECTED at, in seconds. Recorded because the interval is
+        # otherwise nowhere in the data -- it came from the environment at
+        # rollup time -- so a reader could not tell energy computed at 30s from
+        # the same rows re-priced at 60s. With this, `kwh` is self-describing:
+        #     kwh == mean * observed_seconds / 3.6e6
+        # holds for every row that has one. NULL exactly where `kwh` is NULL:
+        # a source with its own cadence (Bryant) must not have Leviton's
+        # interval asserted about it. DEVIATIONS #189/#190.
+        pa.field("observed_seconds", pa.int64(), nullable=True),
     ]
 )
 

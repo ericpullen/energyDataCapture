@@ -249,3 +249,6 @@ discover-raw*.json
 # NOTE: .env, .venv/ and __pycache__/ are already ignored above.
 # NOTE: uv.lock is deliberately NOT ignored — it must be committed, because the
 # Dockerfile builds with `uv sync --frozen` and will fail without it.
+
+# macOS Finder metadata
+.DS_Store

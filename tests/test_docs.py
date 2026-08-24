@@ -431,7 +431,10 @@ def test_the_readme_and_the_glue_comments_tell_the_same_stage_story(readme: str)
         assert glue.STAGE_REPRESENTATION_NOTE in _spec(table).description
 
     lowered = readme.lower()
-    assert "mutually exclusive" in lowered
+    # Was "mutually exclusive" until DEVIATIONS.md #179: the renderings are not
+    # exclusive per system, only per reading, and the README now says so. Both
+    # documents must carry the per-reading mechanism, not the old claim.
+    assert "per reading" in lowered
     assert glue.ODU_TYPE_OBSERVED in readme
     assert bryant.STAGE_PCT_METRIC in readme and bryant.STAGE_METRIC in readme
     # Both documents have to land the cardinal rule, not just the mechanism.
