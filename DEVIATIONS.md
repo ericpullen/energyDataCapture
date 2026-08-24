@@ -4874,3 +4874,38 @@ Also carried forward: N10 (store the measured median spacing beside
 in #181 about versioning's 30-day box), N9's `intervals > expected` acceptance
 and the CWD-relative channel-map degradation, and the older A4/A5/B3/B4/C2/C3/
 D3/D4/D5/D6.
+
+---
+
+## 195. One process was silently erasing another's `status.json` sections
+
+*Found by verifying the #194 deploy rather than trusting it: the digest ran
+successfully on the instance, and `/healthz` showed no `digest` section at all.*
+
+`StatusStore._flush` writes **the whole in-memory document** atomically, and the
+long-running collector re-flushes on every poll cycle. So a stage run as a
+one-shot — `docker compose run --rm energycap digest`, which is how every
+non-scheduled stage is invoked on the instance — wrote its section, and the
+collector overwrote the file from its own copy seconds later. The section
+reappeared only if the container happened to restart, because `_merge_existing`
+reads the file at startup; that is why `integrity` was present (left over from
+before the 23:38 restart) while a digest run two minutes old was not.
+
+**This mattered immediately.** #194 added a `watch-health` rule that alarms when
+the digest has not succeeded in 26 hours, keyed on that exact section. A
+watchdog reading a field another process quietly deletes is worse than no rule:
+it is a rule that alarms forever, gets muted, and takes the rest of the page
+with it.
+
+The scheduled path was never affected — `digest_daily` runs inside the collector
+process, so it writes to the collector's own store — which is precisely why this
+could have sat undiscovered until the first time someone re-ran a stage by hand
+and believed the result.
+
+**Fixed by tracking ownership.** A store now records which sections *it* has
+written; on every flush it re-reads the file and adopts any section it does not
+own. Our sections win over the file, so a stale file cannot resurrect a section
+this process has already moved past — the opposite bug, and a subtler one. Two
+processes writing the *same* section can still lose an update, which is inherent
+to a single-file status document and is why every section has exactly one writer
+in practice.

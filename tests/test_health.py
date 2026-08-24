@@ -621,3 +621,52 @@ def test_meter_freshness_measures_the_data_not_the_job(tmp_path: Path) -> None:
     _, doc = store.health_report()
     assert doc["greenbutton"]["last_success_utc"], "the job did succeed"
     assert doc[health.HEALTH_SECTION]["meter"]["stale"] is True
+
+
+def test_one_process_does_not_erase_another_processes_status_section(tmp_path) -> None:
+    """The collector was silently deleting every one-shot stage's status.
+
+    ``_flush`` writes the whole in-memory document, and the long-running
+    collector re-flushes on every poll cycle. So ``docker compose run --rm
+    energycap digest`` wrote its ``digest`` section and the collector overwrote
+    the file from its own copy seconds later. Measured on the live instance
+    2026-08-24: a digest that ran successfully left no trace in ``/healthz``.
+
+    It mattered at once, because ``watch-health``'s "has the digest run
+    recently?" rule keys on exactly such a section — a watchdog reading a field
+    another process quietly deletes is worse than no rule at all.
+    """
+    path = tmp_path / "status.json"
+
+    collector = health.StatusStore(path=path)
+    collector.record_success("uploader", rows=10)
+
+    # A separate process — its own store, same file.
+    oneshot = health.StatusStore(path=path)
+    oneshot.record_success("digest", findings=0)
+    assert json.loads(path.read_text())["digest"]["findings"] == 0
+
+    # The collector's very next flush must not take the digest section with it.
+    collector.record_success("uploader", rows=20)
+    document = json.loads(path.read_text())
+    assert document["digest"]["findings"] == 0, "the collector erased a foreign section"
+    assert document["uploader"]["rows"] == 20
+
+
+def test_a_process_keeps_its_own_section_over_whatever_is_on_disk(tmp_path) -> None:
+    """Ownership is tracked, not guessed.
+
+    Adopting every on-disk section unconditionally would let a stale file
+    resurrect a section this process has already moved past — the opposite bug,
+    and a subtler one.
+    """
+    path = tmp_path / "status.json"
+    collector = health.StatusStore(path=path)
+    collector.record_success("uploader", rows=99)
+
+    document = json.loads(path.read_text())
+    document["uploader"]["rows"] = 1
+    path.write_text(json.dumps(document))
+
+    collector.record_success("rollup", days=1)
+    assert json.loads(path.read_text())["uploader"]["rows"] == 99
