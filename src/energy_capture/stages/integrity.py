@@ -672,7 +672,47 @@ def run(
     always_notify: bool = False,
     map_path: Path | None = None,
 ) -> dict[str, Any]:
-    """``energycap check-channels`` — read-only, and pushed to Pushover."""
+    """``energycap check-channels`` — read-only, and pushed to Pushover.
+
+    The wrapper exists so the ``integrity`` status section is written when the
+    check **fails**, not only when it succeeds. A section that appears only on
+    success cannot be distinguished from a section that has never been written,
+    and both read as "no verdict" — which is the shape of every bug this project
+    keeps rediscovering.
+    """
+    try:
+        result = _run(
+            start=start,
+            end=end,
+            bucket=bucket,
+            notify=notify,
+            always_notify=always_notify,
+            map_path=map_path,
+        )
+    except Exception as exc:
+        try:
+            from energy_capture.health import get_status_store
+
+            get_status_store().record_failure("integrity", exc)
+        except Exception as status_exc:  # noqa: BLE001 - instrumentation only
+            log.warning(
+                "integrity_status_unavailable",
+                error=f"{type(status_exc).__name__}: {status_exc}",
+            )
+        raise
+    return result
+
+
+def _run(
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: str | None = None,
+    notify: bool = True,
+    always_notify: bool = False,
+    map_path: Path | None = None,
+) -> dict[str, Any]:
+    """The check proper. See :func:`run` for why the status wrapper is separate."""
     from energy_capture.aws import s3io
     from energy_capture.stages import compare, dim, rollup
 

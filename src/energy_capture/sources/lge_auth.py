@@ -22,9 +22,13 @@ Three things this will not do:
   redacted from ``__repr__`` — this object lives in local variables that a
   traceback would otherwise render (CLAUDE.md rule 8).
 * **Refresh forever against a rejection.** A refresh grant the server rejects
-  clears the cache and raises :class:`LgeAuthError` telling the operator to
-  re-authorise. Retrying a token the custodian has revoked is how an integration
-  gets its registration disabled.
+  raises :class:`LgeAuthError` rather than being retried; retrying a token the
+  custodian has revoked is how an integration gets its registration disabled.
+  Whether the cache is *cleared* depends on the RFC 6749 §5.2 error code:
+  ``invalid_grant``/``invalid_scope`` mean the customer's authorisation is over
+  and the token is dropped, while ``invalid_client`` and its neighbours mean our
+  own credentials or request are wrong and the token is KEPT — see
+  :data:`REAUTH_OAUTH_ERRORS` and :data:`CONFIG_OAUTH_ERRORS`.
 * **Guess the resource base.** ESPI's token response carries ``resourceURI`` —
   the Subscription the customer actually authorised. That is stored with the
   token and preferred over the configured base, because only the custodian knows
@@ -80,7 +84,38 @@ DEFAULT_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(30.0, connect=10.0)
 #: Statuses that mean "this credential is finished", not "try again later".
 AUTH_HTTP_STATUSES: Final[frozenset[int]] = frozenset({400, 401, 403})
 
+#: RFC 6749 §5.2 error codes on a REFRESH grant that mean the authorisation
+#: itself is over. Only these clear the token cache.
+#:
+#: ``invalid_grant`` — the refresh token is expired, revoked, or was already
+#: used. ``invalid_scope`` — the scope we ask for is no longer covered by what
+#: the resource owner granted, which is what LG&E returned on 2026-08-24
+#: ("The requested scope does not match the scope granted by the resource
+#: owner"). Both need a human and a browser; keeping the token would only
+#: re-present a credential the custodian has finished with.
+REAUTH_OAUTH_ERRORS: Final[frozenset[str]] = frozenset({"invalid_grant", "invalid_scope"})
+
+#: RFC 6749 §5.2 codes that are about OUR request or OUR client credentials,
+#: not about the customer's authorisation.
+#:
+#: These must NOT clear the cache, and that is the whole point of classifying at
+#: all. Every 400/401/403 used to be treated as a revocation, so a mistyped
+#: ``LGE_CLIENT_SECRET`` or a registration the custodian had disabled on their
+#: side destroyed a perfectly good refresh token — turning a config error that
+#: an operator could fix in ten seconds into a trip to a browser to re-consent.
+#: The failure is still raised loudly; only the destruction is withheld.
+CONFIG_OAUTH_ERRORS: Final[frozenset[str]] = frozenset(
+    {
+        "invalid_client",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_request",
+    }
+)
+
 __all__ = [
+    "CONFIG_OAUTH_ERRORS",
+    "REAUTH_OAUTH_ERRORS",
     "LgeAuth",
     "LgeAuthError",
     "LgeToken",
@@ -576,17 +611,36 @@ class LgeAuth:
                 client.close()
 
         if response.status_code in AUTH_HTTP_STATUSES:
-            # Drop the cache: continuing to present a credential the custodian
-            # has rejected is how a registration gets disabled.
-            if what == "refresh_token":
+            code = _oauth_error(response)
+            # Not every rejection is a revocation, and treating them alike is
+            # destructive in one direction only. `invalid_grant`/`invalid_scope`
+            # mean the customer's authorisation is over and the token is so much
+            # dead weight. `invalid_client` and friends mean OUR request or OUR
+            # credentials are wrong while their authorisation is untouched — and
+            # clearing the cache there throws away a working refresh token over
+            # a typo, which no amount of fixing the typo gets back.
+            if what == "refresh_token" and code not in CONFIG_OAUTH_ERRORS:
                 assert self.cache is not None
-                self.cache.clear(
-                    f"LG&E rejected the refresh_token grant with HTTP "
-                    f"{response.status_code}"
+                if code in REAUTH_OAUTH_ERRORS or code is None:
+                    self.cache.clear(
+                        f"LG&E rejected the refresh_token grant with HTTP "
+                        f"{response.status_code}"
+                        + (f" ({code})" if code else "")
+                    )
+            if code in CONFIG_OAUTH_ERRORS:
+                raise LgeAuthError(
+                    f"LG&E rejected the {what} grant ({response.status_code} "
+                    f"{code}): {_detail(response)}. This is about THIS client, "
+                    "not the customer's consent — check LGE_CLIENT_ID / "
+                    "LGE_CLIENT_SECRET and that the registration is still "
+                    "active. The cached token was KEPT: it is probably still "
+                    "good, and re-authorising would not fix a credential "
+                    "problem."
                 )
             raise LgeAuthError(
                 f"LG&E rejected the {what} grant "
-                f"({response.status_code}): {_detail(response)}. "
+                f"({response.status_code}{f' {code}' if code else ''}): "
+                f"{_detail(response)}. "
                 "Re-authorise with `energycap greenbutton-authorize`."
             )
         if response.status_code >= 500:
@@ -607,6 +661,24 @@ class LgeAuth:
         return LgeToken.from_response(
             payload, client_id=s.lge_client_id, now=datetime.now(UTC)
         )
+
+
+def _oauth_error(response: httpx.Response) -> str | None:
+    """The RFC 6749 §5.2 ``error`` code, or ``None`` if the body does not give one.
+
+    ``None`` is deliberately treated as "assume the authorisation is over" by the
+    caller: an unrecognised rejection from the custodian is more likely to be a
+    dead grant than a config slip, and the recovery (re-authorise) is available
+    where the alternative (a silently dead feed) is not.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("error")
+    return code.strip() if isinstance(code, str) and code.strip() else None
 
 
 def _detail(response: httpx.Response) -> str:

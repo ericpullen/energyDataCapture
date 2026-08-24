@@ -115,6 +115,19 @@ STUCK_MIN_WATTS: Final[float] = 200.0
 BARN_MIN_KWH: Final[float] = 3.6
 BARN_MAX_KWH: Final[float] = 40.0
 
+#: Consecutive days below :data:`BARN_MIN_KWH` before the quiet side of the
+#: envelope says anything. ONE quiet day is a day nobody drove, which is
+#: ordinary and must never page; four in a row, on a meter whose own history
+#: shows it normally charges, is a charger that has stopped. The
+#: history requirement is the same discipline that stopped ``stuck_load``
+#: alarming on every refrigerator: the finding is the CHANGE, and only the
+#: channel's own past can say what changed.
+BARN_QUIET_DAYS: Final[int] = 4
+
+#: Fraction of the baseline window that must be above the floor before "quiet"
+#: is abnormal for this meter at all.
+BARN_ACTIVE_FRACTION: Final[float] = 0.5
+
 #: Overnight window used for the phantom-load floor, local hours.
 NIGHT_HOURS: Final[tuple[int, int]] = (1, 5)
 #: Growth in that floor worth reporting.
@@ -477,7 +490,13 @@ def build_report(
 
     _strip_heat_rule(con, report, daily=daily, hourly=hourly, local_day=local_day, cost=cost)
     _barn_rule(
-        con, report, meter=meter, local_day=local_day, barn_device=barn_device, cost=cost
+        con,
+        report,
+        meter=meter,
+        local_day=local_day,
+        barn_device=barn_device,
+        cost=cost,
+        baseline_days=baseline_days,
     )
     # The overnight-floor rule reads the feed CTs directly, and those are
     # exactly the channels that freeze (#180). A stuck feed gives a perfectly
@@ -514,9 +533,27 @@ def _strip_heat_rule(con, report, *, daily, hourly, local_day, cost) -> None:
         weather = _rows(con, OUTDOOR_SQL, [hourly, lo, hi])
     except Exception as exc:  # noqa: BLE001 - a missing dataset is not a crash
         log.warning("digest_strip_heat_unavailable", error=f"{type(exc).__name__}: {exc}")
+        report.notes.append("strip-heat rule could not read its data")
         return
+
+    # NO Bryant daily rows at all is the collector not having fetched the day
+    # yet -- which was the normal state at the old 06:00 firing, since the fetch
+    # is at 08:30. `heat.get("eheat", 0.0)` turned that into "eheat used 0 kWh"
+    # and the rule returned silently: cardinal rule 1 violated inside the very
+    # tool written to enforce it. An absent day is now SAID, not assumed away.
+    if not heat:
+        report.notes.append(
+            f"strip-heat rule skipped: no Bryant daily rows for {local_day} yet"
+        )
+        return
+    if not weather:
+        report.notes.append("strip-heat rule skipped: no outdoor temperature for the day")
+        return
+
+    # An eheat key that is absent while OTHER components reported is Carrier
+    # omitting a structurally disabled component -- a real zero, not a gap.
     eheat = heat.get("eheat", 0.0)
-    if eheat < STRIP_HEAT_KWH or not weather:
+    if eheat < STRIP_HEAT_KWH:
         return
     low_f = weather[0].get("low_f")
     if low_f is None or float(low_f) <= MILD_OUTDOOR_LOW_F:
@@ -538,31 +575,92 @@ def _strip_heat_rule(con, report, *, daily, hourly, local_day, cost) -> None:
     )
 
 
-def _barn_rule(con, report, *, meter, local_day, barn_device, cost) -> None:
-    """The barn is ~100% EV charging and lives in a known envelope."""
+def _barn_rule(con, report, *, meter, local_day, barn_device, cost, baseline_days) -> None:
+    """The barn is ~100% EV charging and lives in a known envelope — both ends.
+
+    Only the HIGH end was implemented; :data:`BARN_MIN_KWH` was dead code, which
+    left "the EV silently stopped charging" — the failure a homeowner actually
+    wants to hear about — with no check at all.
+
+    The low end cannot be a simple threshold, because one quiet day is a day
+    nobody drove and paging on that is how a channel gets muted. So it needs
+    two things to be true at once: :data:`BARN_QUIET_DAYS` consecutive days below
+    the floor, and a baseline showing this meter normally charges
+    (:data:`BARN_ACTIVE_FRACTION`). New meters and genuinely idle ones say
+    nothing.
+    """
     if not barn_device:
+        report.notes.append(
+            "barn envelope skipped: no LG&E meter in the channel map is marked as the barn"
+        )
         return
     lo = timeutil.local_midnight_naive(local_day)
     hi = timeutil.local_midnight_naive(local_day + timedelta(days=1))
+    window_lo = timeutil.local_midnight_naive(local_day - timedelta(days=baseline_days))
     try:
-        rows = _rows(con, METER_DAILY_SQL, [meter, 900, lo, hi])
+        rows = _rows(con, METER_DAILY_SQL, [meter, 900, window_lo, hi])
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_barn_unavailable", error=f"{type(exc).__name__}: {exc}")
+        report.notes.append("barn envelope could not read the meter")
         return
-    for row in rows:
-        if row["device_id"] != barn_device:
-            continue
-        kwh = float(row["kwh"] or 0.0)
-        if kwh > BARN_MAX_KWH:
-            report.findings.append(
-                Finding(
-                    rule="barn_envelope",
-                    headline=f"Barn used {kwh:.1f} kWh (envelope {BARN_MIN_KWH:.1f}–{BARN_MAX_KWH:.0f})",
-                    detail="Above anything a normal charging day has drawn.",
-                    kwh=round(kwh, 2),
-                    cost_usd=cost(kwh),
-                )
+
+    by_day = {
+        r["local_day"]: float(r["kwh"] or 0.0)
+        for r in rows
+        if r["device_id"] == barn_device
+    }
+    today_kwh = by_day.get(local_day)
+    if today_kwh is None:
+        # The meter feed lags; at the old 06:00 firing this was the normal case
+        # and the rule simply produced nothing. Absence is reported now.
+        report.notes.append(f"barn envelope skipped: no meter intervals for {local_day} yet")
+        return
+
+    if today_kwh > BARN_MAX_KWH:
+        report.findings.append(
+            Finding(
+                rule="barn_envelope",
+                headline=(
+                    f"Barn used {today_kwh:.1f} kWh "
+                    f"(envelope {BARN_MIN_KWH:.1f}–{BARN_MAX_KWH:.0f})"
+                ),
+                detail="Above anything a normal charging day has drawn.",
+                kwh=round(today_kwh, 2),
+                cost_usd=cost(today_kwh),
             )
+        )
+        return
+
+    if today_kwh >= BARN_MIN_KWH:
+        return
+
+    history = {day: kwh for day, kwh in by_day.items() if day < local_day}
+    if len(history) < MIN_BASELINE_DAYS:
+        return
+    active = sum(1 for kwh in history.values() if kwh >= BARN_MIN_KWH)
+    if active < BARN_ACTIVE_FRACTION * len(history):
+        return  # this meter is not habitually charging; quiet is its normal
+
+    quiet = 0
+    day = local_day
+    while by_day.get(day, 0.0) < BARN_MIN_KWH and day in by_day:
+        quiet += 1
+        day -= timedelta(days=1)
+    if quiet < BARN_QUIET_DAYS:
+        return
+    report.findings.append(
+        Finding(
+            rule="barn_envelope",
+            headline=f"Barn has drawn under {BARN_MIN_KWH:.1f} kWh for {quiet} days running",
+            detail=(
+                "This meter is ~100% EV charging and normally charges most days "
+                f"({active} of the last {len(history)}). Several days at the floor "
+                "is a charger that stopped, a breaker that tripped, or a car that "
+                "is not plugging in — not a quiet week."
+            ),
+            kwh=round(today_kwh, 2),
+        )
+    )
 
 
 def _phantom_rule(con, report, *, hourly, local_day, lo, hi) -> None:
@@ -612,7 +710,79 @@ def run(
     always_notify: bool = False,
     map_path: Path | None = None,
 ) -> dict[str, Any]:
-    """``energycap digest`` — yesterday by default, pushed to Pushover."""
+    """``energycap digest`` — yesterday by default, pushed to Pushover.
+
+    A thin wrapper around :func:`_run` that exists only to give the digest **its
+    own** ``status.json`` section, written on failure as well as on success.
+
+    Without one, a digest that threw landed in the shared ``scheduler`` section
+    — which ``watch-health`` deliberately does not read, because that counter is
+    a convenience summary shared by six jobs. So a digest that had been crashing
+    every morning for a fortnight was invisible to both ``/healthz`` and the
+    watchdog, and looked exactly like a fortnight of quiet nights. The section is
+    what lets a watch rule ask the only question that matters here: *did this
+    run at all, recently?*
+    """
+    try:
+        result = _run(
+            local_day=local_day,
+            bucket=bucket,
+            notify=notify,
+            always_notify=always_notify,
+            map_path=map_path,
+        )
+    except Exception as exc:
+        _record_status(failure=exc, local_day=local_day)
+        raise
+    _record_status(result=result)
+    return result
+
+
+def _record_status(
+    *,
+    result: Mapping[str, Any] | None = None,
+    failure: BaseException | None = None,
+    local_day: date | None = None,
+) -> None:
+    """Publish the run to ``status.json``. Never raises: this is instrumentation."""
+    try:
+        from energy_capture.health import get_status_store
+
+        store = get_status_store()
+        if failure is not None:
+            store.record_failure(
+                "digest",
+                failure,
+                local_day=local_day.isoformat() if local_day else None,
+            )
+            return
+        body = dict(result or {})
+        findings = body.get("findings") or []
+        store.record_success(
+            "digest",
+            local_day=body.get("local_day"),
+            ok=body.get("ok"),
+            findings=len(findings),
+            compared=body.get("compared"),
+            skipped_incomplete=len(body.get("skipped_incomplete") or []),
+            skipped_unbaselined=len(body.get("skipped_unbaselined") or []),
+            skipped_untrusted=len(body.get("skipped_untrusted") or []),
+            worst=findings[0]["headline"] if findings else None,
+            notified=body.get("notified"),
+        )
+    except Exception as exc:  # noqa: BLE001 - a status write must not fail the digest
+        log.warning("digest_status_unavailable", error=f"{type(exc).__name__}: {exc}")
+
+
+def _run(
+    *,
+    local_day: date | None = None,
+    bucket: str | None = None,
+    notify: bool = True,
+    always_notify: bool = False,
+    map_path: Path | None = None,
+) -> dict[str, Any]:
+    """The digest proper. See :func:`run` for why the status wrapper is separate."""
     from energy_capture.aws import s3io
     from energy_capture.stages import compare, dim, integrity, rollup
 

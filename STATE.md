@@ -597,6 +597,40 @@ another day), and `deviceHistory`'s `point` vocabulary is unexplored. Also worth
 next time: these input types are **non-null** (`GetRuntimeUsageInput!`), and a nullable
 declaration is a 400 with a validation message.
 
+## The safety layer was reviewed against itself — 2026-08-24
+
+`docs/review-2026-08-24.md` re-reviewed yesterday's work. 17 of 28 findings verified fixed;
+the new findings were almost all faults *in the code written to catch faults*, which is the
+one category of bug that gets quieter the worse it is. Fixed in this pass (DEVIATIONS #194):
+
+- **The digest fired at 06:00 reviewing D-1 — before D-1's Bryant energy (08:30) and meter
+  intervals (09:15) existed.** Its three most valuable rules had never once run on the
+  schedule. Now 10:00, with the *ordering* pinned by test rather than the number.
+- **The digest read absence as zero**, inside the tool written to enforce that it never is.
+- **`_job_digest` caught every exception on import** and returned a skip, which the
+  scheduler records as SUCCESS — a broken digest was undetectable forever.
+- **Neither digest nor integrity could be watched**: failures landed only in the shared
+  `scheduler` section the watcher deliberately ignores. Both now have their own status
+  section, on failure as well as success, plus a "ran within 26h" rule and a Monday
+  heartbeat so a quiet night and a dead digest stop looking alike.
+- **A Pushover outage silenced the alarm it failed to deliver** for up to six hours.
+- **The `greenbutton` watch rule was unreachable** — nothing ever wrote that section, so a
+  repeat of #177 would still have taken three days.
+- **`primary` accepted `"no"` as true**, and nothing enforced at-most-one primary — which
+  matters more now the house is in the table under three device ids.
+- **D2 at last**: `invalid_client` no longer destroys a working refresh token, and today's
+  `invalid_scope` is classified explicitly.
+
+**Still true in production, and only you can change it.** None of this is running. The
+watchdog's launchd job has never been loaded, the instance is on a torn pre-merge image
+(no digest, no integrity, no `observed_seconds`), and LG&E's authorisation broke again on
+08-24 with `invalid_scope` — the meter feed has been dead since 08-23 16:30 and nothing
+paged. Three steps, all yours: rebuild/restart the instance on merged `main`, load the
+watchdog per `deploy/watchdog.md` (plus the hc-ping dead-man's switch), and re-authorize
+LG&E in a browser.
+
+---
+
 ## The catalog and the README were corrected — 2026-08-24
 
 The adversarial review's block F, all of it. Documentation only, but the Glue comments and

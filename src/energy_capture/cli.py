@@ -1089,8 +1089,17 @@ def verify_bill_cmd(
     are the utility's own readings, so a disagreement is arithmetic, not
     instrument tolerance -- none of the CT-side caveats apply here.
 
-    --end is the meter READ date and is EXCLUSIVE. A cycle read 6/26 and again
-    7/28 is 32 days:
+    --start and --end are the two meter READ dates off the bill, and the days
+    BILLED are (start, end] -- the start read date is excluded and the end read
+    date is included. A cycle read 6/26 and again 7/28 is the 32 days 6/27
+    through 7/28.
+
+    That convention was measured, not assumed: summing the barn's 15-minute
+    series over eight fully covered cycles gives 0.16% mean absolute error
+    against the billed kWh this way and 3.67% the other way. The day COUNT is
+    the same either way, so a bill still reconciles on the wrong convention and
+    only the kWh move -- which is why this sentence, which said "--end ... is
+    EXCLUSIVE" until 2026-08-24, is worth getting right.
 
         energycap verify-bill --start 2026-06-26 --end 2026-07-28 --meter 1308468
 
@@ -1136,16 +1145,30 @@ def watch_health_cmd(
             help="Push even when everything passes — for proving the channel works.",
         ),
     ] = False,
+    ping_url: Annotated[
+        str | None,
+        typer.Option(
+            "--ping-url",
+            help="Dead-man's-switch URL to ping on every completed run. "
+            "Default: HEALTHCHECKS_PING_URL.",
+        ),
+    ] = None,
 ) -> None:
     """Check a collector's /healthz and push what is wrong to Pushover.
 
-    Exits 1 when any check fails, so a scheduler (launchd, cron) sees the
-    failure even if the push itself could not be delivered.
+    Exits 1 when any check fails, so a scheduler (systemd, launchd, cron) sees
+    the failure even if the push itself could not be delivered.
 
         energycap watch-health --url http://<host>:8080/healthz
 
-    Run this on a DIFFERENT machine from the collector: a box that has died
-    cannot report that it died, which is why HEALTHZ_URL has no default.
+    WHERE TO RUN IT. On the collector's HOST, outside the container, pointed at
+    the running container -- and set HEALTHCHECKS_PING_URL. The older advice
+    here was "a different machine entirely", on the reasoning that a box which
+    has died cannot report that it died. That reasoning is right and the
+    conclusion did not follow: the second machine has its own availability, its
+    own IP allowlist, and its own way of being asleep, and nothing was watching
+    IT. The dead-man's switch covers the same failure from genuinely outside,
+    including this command's own death, which no placement can cover for itself.
 
     Every rule treats a MISSING field as a failure, never as a pass. That is
     the whole point -- `health.meter.stale` is absent until Green Button has
@@ -1156,7 +1179,11 @@ def watch_health_cmd(
     this cannot close on its own.
     """
     result = _run_stage(
-        "watch-health", url=url, notify=notify, always_notify=always_notify
+        "watch-health",
+        url=url,
+        notify=notify,
+        always_notify=always_notify,
+        ping_url=ping_url,
     )
     if isinstance(result, Mapping) and not result.get("ok", False):
         raise typer.Exit(EXIT_STAGE_FAILED)

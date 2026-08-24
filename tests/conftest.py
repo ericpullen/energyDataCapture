@@ -253,6 +253,16 @@ def test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
     spool_dir = tmp_path / "data"
     (spool_dir / "tokens").mkdir(parents=True)
 
+    # The process-wide StatusStore is a module-level singleton, so without this
+    # one test's status.json is read back by the next. It went unnoticed while
+    # nothing read the store -- every writer only ever wrote -- and surfaced the
+    # moment a stage started merging its previous value forward, which is the
+    # same shape as the environment leak below: state from outside the test,
+    # visible only when something finally looks at it.
+    from energy_capture.health import reset_status_store
+
+    reset_status_store(None)
+
     # Deny by default, then put back exactly what the suite asked for.
     _clear_settings_environment(monkeypatch)
     for key, value in _TEST_ENV.items():
@@ -267,6 +277,7 @@ def test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
         yield spool_dir
     finally:
         reset_settings_cache()
+        reset_status_store(None)
 
 
 @pytest.fixture

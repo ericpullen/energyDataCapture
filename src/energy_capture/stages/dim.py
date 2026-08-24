@@ -507,10 +507,30 @@ def _parse_entry(raw: Any, index: int, errors: list[str]) -> ChannelEntry | None
         priority=_text(raw.get("priority")),
         estimated_watts=estimated_watts,
         placeholder=flag,
-        primary=bool(raw.get("primary", False)),
+        primary=_flag(raw, "primary", index, errors),
         updated_at=updated_at,
         notes=_text(raw.get("notes")),
     )
+
+
+def _flag(raw: Mapping[str, Any], key: str, index: int, errors: list[str]) -> bool:
+    """A strict JSON boolean, or an error. Never a truthiness coercion.
+
+    ``bool(raw.get("primary"))`` accepted every string a hand-editor is likely to
+    type — ``"no"``, ``"false"``, ``"0"`` — and turned all three into **True**,
+    silently promoting the barn to the house. The consumers of this flag decide
+    which meter a bill is checked against and which one ``/ui`` calls "the
+    house", so a typo there is a wrong number with no symptom.
+    """
+    value = raw.get(key, False)
+    if isinstance(value, bool):
+        return value
+    errors.append(
+        f"entry {index}: '{key}' is {value!r}; it must be a JSON boolean "
+        "(true/false). A string here used to be coerced with bool(), which "
+        'makes "no" and "false" both mean TRUE.'
+    )
+    return False
 
 
 def load_channel_map(path: Path | str) -> list[ChannelEntry]:
@@ -573,6 +593,31 @@ def load_channel_map(path: Path | str) -> list[ChannelEntry]:
             )
             continue
         seen[entry.key] = entry
+
+    # AT MOST ONE primary per source. Nothing enforced this, and every consumer
+    # assumes it: `compare-meter` picks the primary to check a bill against,
+    # `meterview` labels it "the house", and `historyview` sums whatever it is
+    # handed. Two primaries there means house + barn added together and reported
+    # as the house — and because the interval-completeness gate uses `>=`, the
+    # doubled interval count passes as "complete", so the wrong number arrives
+    # wearing a coverage guarantee.
+    #
+    # The stakes rose when the LG&E import landed: the house now appears under
+    # THREE device ids (1308468 plus the retired 944006/944401, which republish
+    # the same series verbatim). One slipped `primary` among those trebles it.
+    by_source: dict[str, list[ChannelEntry]] = {}
+    for entry in entries:
+        if entry.primary and not entry.placeholder:
+            by_source.setdefault(entry.source, []).append(entry)
+    for source, claimants in sorted(by_source.items()):
+        if len(claimants) > 1:
+            where = ", ".join(f"{e.device_id}/{e.channel_id}" for e in claimants)
+            errors.append(
+                f"source '{source}' has {len(claimants)} channels marked "
+                f"primary ({where}); at most one is allowed. Consumers treat "
+                "the primary as THE meter for that source, so two of them are "
+                "summed and reported as one."
+            )
 
     if errors:
         raise DimBuildError(_problem_report(f"channel_map at {map_path}", errors))

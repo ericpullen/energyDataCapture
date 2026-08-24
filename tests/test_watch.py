@@ -13,10 +13,13 @@ with no clock and no network.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import httpx
 import pytest
+
+from energy_capture import watch
 
 from energy_capture.watch import (
     Alarm,
@@ -42,6 +45,9 @@ def healthy(**overrides) -> dict:
             "consecutive_failures": 0,
             "newest_interval_utc": "2026-08-23T03:45:00Z",
         },
+        # The daily digest completed this morning. A missing section here is
+        # "nobody reviewed yesterday", which is a WARNING, not a pass.
+        "digest": {"last_success_utc": "2026-08-23T14:00:00Z", "consecutive_failures": 0},
         "spool": {"pending_rows": 3612},
         "health": {
             "ok": True,
@@ -67,6 +73,7 @@ def test_a_fully_healthy_document_raises_nothing() -> None:
     # If this list shrinks, a rule was silently dropped.
     assert set(report.checked) == {
         "health.ok", "pollers", "uploader", "spool", "stage_failures", "meter",
+        "digest",
     }
 
 
@@ -81,7 +88,7 @@ def test_an_empty_document_alarms_on_everything_it_cannot_check() -> None:
     report = evaluate({}, now=NOW)
     assert not report.ok
     assert checks_that_fired(report) == {
-        "health.ok", "pollers", "uploader", "spool", "meter",
+        "health.ok", "pollers", "uploader", "spool", "meter", "digest",
     }
     assert report.worst is Severity.CRITICAL
 
@@ -380,8 +387,88 @@ def test_steady_health_never_notifies() -> None:
     assert not send and reason == "still-clear"
 
 
+def test_an_undelivered_push_leaves_the_alarm_set_unreported(tmp_path) -> None:
+    """A Pushover outage must not silence the alarm it failed to carry.
+
+    ``firing`` is the memory the change-detector compares against, so writing it
+    means "this has been reported". It was written unconditionally, including on
+    runs where the push was due and Pushover was down — so the next run compared
+    the new alarm set against itself, found no change, and went quiet under the
+    six-hour repeat timer. A brand-new CRITICAL during a Pushover outage stayed
+    silent for up to six hours.
+    """
+    path = tmp_path / "watch-state.json"
+    report = _report("uploader")
+
+    watch._write_state(path, report, now=NOW, notified=False, undelivered=True)
+    state = json.loads(path.read_text())
+    assert state["firing"] == [], "an undelivered alarm was recorded as reported"
+    # Kept for diagnosis, but deliberately NOT the field should_notify reads.
+    assert state["undelivered"] == ["uploader"]
+
+    send, reason = should_notify(report, state, now=NOW)
+    assert send and reason == "changed", "the retry did not re-fire"
+
+    # And once it lands, the state advances normally and the noise stops.
+    watch._write_state(path, report, now=NOW, notified=True)
+    landed = json.loads(path.read_text())
+    assert landed["firing"] == ["uploader"]
+    send, reason = should_notify(report, landed, now=NOW)
+    assert not send and reason == "unchanged"
+
+
 def test_a_corrupt_state_file_notifies_rather_than_suppressing() -> None:
     """Failing open is the only safe direction: a lost state file must never be
     able to silence a live alarm."""
     send, _ = should_notify(_report("uploader"), {"firing": ["uploader"], "notified_utc": "garbage"}, now=NOW)
     assert send
+
+
+# ------------------------------------------------- the dead-man's switch (N1)
+
+
+def test_the_switch_is_fed_even_when_the_verdict_is_alarming() -> None:
+    """Pushover carries what is wrong; this carries that the watcher still lives.
+
+    Tying the ping to a CLEAN verdict — the obvious ``watch-health && curl``
+    shell chain — makes a real, persistent fault silence the heartbeat too, so
+    the external service pages for the same fault a second time and the operator
+    learns that the heartbeat means nothing. It is fed on every run that
+    COMPLETES, including a run whose verdict is "the collector is unreachable":
+    that is precisely the run whose delivery matters most.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, text="OK")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert watch.ping("https://hc-ping.example/uuid", client=client) is True
+    assert seen == ["https://hc-ping.example/uuid"]
+
+
+def test_no_ping_url_is_not_a_failure() -> None:
+    """Unconfigured is an ordinary state — it must not look like a failed ping."""
+    assert watch.ping("") is None
+
+
+def test_a_ping_that_cannot_be_delivered_never_raises() -> None:
+    """The switch is instrumentation. A watchdog must not die feeding it.
+
+    And there is nothing to retry: the external service notices a missing beat
+    on its own schedule, which is the entire mechanism.
+    """
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    client = httpx.Client(transport=httpx.MockTransport(boom))
+    assert watch.ping("https://hc-ping.example/uuid", client=client) is False
+
+
+def test_a_rejected_ping_is_reported_as_failed_not_delivered() -> None:
+    def gone(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    client = httpx.Client(transport=httpx.MockTransport(gone))
+    assert watch.ping("https://hc-ping.example/uuid", client=client) is False

@@ -200,7 +200,9 @@ def test_a_circuit_with_no_history_is_named_not_judged(con, tmp_path) -> None:
 def test_an_empty_archive_says_so_rather_than_reporting_all_clear(con, tmp_path) -> None:
     report = digest.build_report(con, local_day=DAY, **sources(tmp_path, []))
     assert report.findings == []
-    assert report.notes and "archive" in report.notes[0]
+    # Any note, not notes[0]: the rules that cannot run now say so too, so the
+    # empty-archive note is no longer necessarily first.
+    assert any("archive" in note for note in report.notes), report.notes
 
 
 # --------------------------------------------------------------- the rules

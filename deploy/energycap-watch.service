@@ -1,0 +1,38 @@
+# energycap watchdog — one shot, fired by energycap-watch.timer.
+#
+# Runs on the collector's HOST, OUTSIDE the running container, via
+# `docker compose run --rm` — which starts a FRESH container from the same
+# image rather than executing inside the live one. That distinction is the
+# point: a collector wedged but not dead would swallow a check running inside
+# it, while this one still starts, still fails to read /healthz, and still
+# pages. It also needs no Python on the host (there is none).
+#
+# `--rm` and no `--service-ports`: the probe container is disposable and
+# publishes nothing, so it cannot collide with the collector's 8080.
+#
+# It reads and writes `watch-state.json` on the shared /data volume and never
+# touches spool.db — opening a live spool from a second process is how this
+# project has corrupted it twice.
+#
+# Install: see deploy/watchdog.md.
+
+[Unit]
+Description=energycap health watchdog (one shot)
+Documentation=file:///home/ubuntu/energyDataCapture/deploy/watchdog.md
+# Only meaningful once Docker is up; if it is not, the run fails, nothing is
+# delivered, and the dead-man's switch is what reports it. That is by design —
+# see watchdog.md, "what a watcher cannot do for itself".
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/energyDataCapture
+# `run` inherits the service's env_file, so HEALTHZ_URL, PUSHOVER_* and
+# HEALTHCHECKS_PING_URL all come from the same .env the collector uses.
+ExecStart=/usr/bin/docker compose run --rm -T energycap watch-health
+# Exit 1 means "checks failed", which is a delivered verdict, not a broken unit.
+# Left as a success so `systemctl status` reflects whether the WATCHER works.
+SuccessExitStatus=0 1
+TimeoutStartSec=180

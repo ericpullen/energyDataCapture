@@ -133,6 +133,37 @@ def fetch_espi(
     return response.text
 
 
+def _newer(stored: Any, fetched: Any) -> str | None:
+    """The later of two ISO-8601 UTC stamps; either may be missing.
+
+    These are PARSED, not compared as strings, and the difference is not
+    academic: the fetch summary carries microseconds
+    (``2026-08-16T16:00:00.000000Z``) while a stamp already in
+    ``status.json`` may not (``2026-08-16T16:00:00Z``). ``'.' < 'Z'``, so
+    lexically the microsecond form sorts BEFORE the identical
+    second-precision one — the same instant, ordered wrongly, in the one
+    comparison whose whole job is to move only forwards.
+
+    An unparseable value is not trusted to win, but is returned if it is all
+    there is, so a hand-edited status file is not silently discarded.
+    """
+    def _at(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return timeutil.ensure_utc(
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            )
+        except ValueError:
+            return None
+
+    pairs = [(value, _at(value)) for value in (stored, fetched)]
+    dated = [(value, when) for value, when in pairs if when is not None]
+    if dated:
+        return max(dated, key=lambda pair: pair[1])[0]
+    return next((value for value, _ in pairs if isinstance(value, str) and value), None)
+
+
 def run(
     *,
     start: date,
@@ -199,14 +230,32 @@ def run(
         # to expose. The watchdog would erase itself on duty.
         from energy_capture.health import get_status_store
 
-        freshness: dict[str, Any] = {}
-        if summary["last_ts_utc"] is not None:
-            freshness["newest_interval_utc"] = summary["last_ts_utc"]
+        store = get_status_store()
+        stored = store.section("greenbutton") or {}
 
-        get_status_store().record_success(
+        # NEWEST, not latest-written. A manual backfill of 2024 is a successful
+        # fetch whose `last_ts_utc` is two years old, and writing it verbatim
+        # REWINDS the freshness signal -- a false staleness alarm for a run that
+        # added data. Monotonic in the safe direction: the field means "the
+        # newest interval this deployment holds", and importing history does not
+        # make that older.
+        freshness: dict[str, Any] = {}
+        newest = _newer(stored.get("newest_interval_utc"), summary["last_ts_utc"])
+        if newest is not None:
+            freshness["newest_interval_utc"] = newest
+
+        # Same class as the zero-row `newest_interval_utc` bug above: a fetch
+        # that returned nothing knows of no meters, and `sorted(set())` is `[]`,
+        # which merges over the real roster and reports "this deployment has no
+        # meters" -- absence rendered as an emptiness.
+        meters = sorted(parsed.meters)
+        if not meters and isinstance(stored.get("meters"), list):
+            meters = list(stored["meters"])
+
+        store.record_success(
             "greenbutton",
             rows=parsed.rows,
-            meters=sorted(parsed.meters),
+            meters=meters,
             **freshness,
         )
 

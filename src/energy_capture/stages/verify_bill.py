@@ -64,6 +64,7 @@ from energy_capture.config import get_settings
 from energy_capture.logging import get_logger
 from energy_capture.stages.compare import (
     load_meter_tables,
+    primary_meter_from_map,
     resolve_interval,
     resolve_meter,
 )
@@ -407,6 +408,7 @@ def run(
     source: str = model.SOURCE_LGE,
     tolerance_pct: float = DEFAULT_TOLERANCE_PCT,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
+    map_path: Path | None = None,
 ) -> dict[str, Any]:
     """``energycap verify-bill --start … --end … [--meter …]``."""
     settings = get_settings()
@@ -418,7 +420,18 @@ def run(
             "series first (`energycap import-greenbutton`, `energycap fetch-greenbutton`)"
         )
 
-    device_id, note = resolve_meter(tables, requested=meter)
+    # Default to the map's primary, which is what --meter's help has always
+    # promised and what `compare-meter` already does (B6). Without it a bare run
+    # raised AmbiguousMeterError as soon as the archive held more than one
+    # meter -- and since the 2.6-year import the house alone appears under three
+    # device ids, so "more than one" is now always.
+    requested = meter
+    if requested is None:
+        try:
+            requested = primary_meter_from_map(map_path)
+        except Exception as exc:  # noqa: BLE001 - the map is a convenience here
+            log.warning("verify_bill_primary_unknown", error=f"{type(exc).__name__}: {exc}")
+    device_id, note = resolve_meter(tables, requested=requested)
     if device_id is None:
         raise FileNotFoundError(f"no meter readings under {directory}")
     if note:
