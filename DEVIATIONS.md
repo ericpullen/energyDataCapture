@@ -4909,3 +4909,65 @@ this process has already moved past — the opposite bug, and a subtler one. Two
 processes writing the *same* section can still lose an update, which is inherent
 to a single-file status document and is why every section has exactly one writer
 in practice.
+
+---
+
+## 196. The LG&E refresh grant needs `scope`, and never worked without it
+
+*The answer to "why don't the tokens auto-update". Measured against the live
+endpoint on 2026-08-24, not reasoned about.*
+
+**Every refresh this integration has ever attempted failed.** The only thing
+that has ever produced a working LG&E token is a human in a browser, and the
+three-day #177 lapse plus the 08-24 outage are both this, surfacing.
+
+RFC 6749 §6 makes `scope` **optional** on a refresh grant and says that omitting
+it means "the originally granted scope". So `refresh()` sent
+`grant_type`+`refresh_token` and nothing else, which is correct against the
+specification. This custodian does not implement it that way — it appears to
+compare the **client registration's** scope against the grant's and answers:
+
+```
+400 {"type": "...rfc9110#section-15.5.1", "title": "invalid_scope", "status": 400,
+     "detail": "The requested scope does not match the scope granted by the resource owner."}
+```
+
+Probed on a token **four minutes old**, whose granted scope was string-identical
+to the configured `LGE_SCOPE`:
+
+| request | result |
+|---|---|
+| `grant_type`, `refresh_token` | **400 `invalid_scope`** |
+| the same, plus `scope=<the token's own granted scope>` | **200**, new 24 h token, refresh token rotated |
+
+So the fix is one form field. The token's **own** granted scope is sent rather
+than the configured one: they are identical today, and if they ever diverge the
+grant is the truth while `LGE_SCOPE` is a stale local guess.
+
+This was invisible for a specific reason. The access token lasts 24 h and
+`greenbutton_daily` runs once a day, so a refresh is attempted roughly once per
+day, fails, clears the cache, and the next morning reports `not_authorized` —
+which is a *quiet skip*, the correct behaviour for a deployment that was never
+authorised. #177 fixed the reporting of that state and the underlying grant was
+never exercised in a test, because a unit test with a mock transport passes
+whatever the form body contains.
+
+### And a second bug, in yesterday's fix
+
+`_oauth_error` (DEVIATIONS #194) read the code from `payload["error"]`, per RFC
+6749 §5.2. **LG&E answers in RFC 9457 problem+json and puts it in `title`.** So
+the classification added specifically to stop destroying good tokens never saw a
+code from this custodian at all: every rejection fell through to the
+unrecognised branch and cleared the cache — including the `invalid_client` case
+the classification exists to protect. Both keys are read now.
+
+That is a fix shipped and disproved within the hour, and the only reason it was
+caught is that the deploy was *verified against the live endpoint* rather than
+against its own tests. Mock transports answer whatever you tell them to.
+
+### Cleanup
+
+The probe left `lge-refresh-probe*.json` on the instance volume; removed. The
+successful `scope`-bearing refresh rotated the live refresh token, and the new
+pair was written into the real cache rather than discarded, so no browser trip
+was spent on the diagnosis.

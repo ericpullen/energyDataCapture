@@ -534,3 +534,84 @@ def test_reauthorising_retires_the_breadcrumb(tmp_path: Path) -> None:
     cache.save(LgeToken(access_token="a2", refresh_token="r2", obtained_at=datetime.now(UTC)))
     assert cache.revoked() is None
     assert not cache.revoked_path.exists()
+
+
+# ------------------------------------------------ the refresh grant needs `scope`
+
+
+def test_the_refresh_grant_sends_the_granted_scope(settings: Settings) -> None:
+    """Measured against the live endpoint 2026-08-24, and it is the whole bug.
+
+    RFC 6749 §6 makes ``scope`` optional on a refresh and says an omitted scope
+    means "the originally granted scope". This custodian does not do that: it
+    answers a scope-less refresh with ``400 invalid_scope`` — "The requested
+    scope does not match the scope granted by the resource owner" — on a token
+    four minutes old whose granted scope was string-identical to the configured
+    one. With ``scope`` present the same request returns 200 and rotates.
+
+    So every refresh this integration ever attempted failed, the cache was
+    cleared each time, and only a human in a browser ever produced a working
+    token. That is "the tokens do not auto-update", in one missing form field.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json=token_response())
+
+    auth, cache = make_auth(settings, handler)
+    token = LgeToken(
+        access_token="old",
+        refresh_token=REFRESH,
+        client_id="gbc_test",
+        scope="FB=1_3_4_5;IntervalDuration=900_3600",
+    )
+    auth.refresh(token)
+
+    assert seen["grant_type"] == "refresh_token"
+    assert seen["scope"] == "FB=1_3_4_5;IntervalDuration=900_3600", (
+        "the refresh omitted `scope`, which this custodian rejects"
+    )
+
+
+def test_the_token_s_own_scope_wins_over_the_configured_one(settings: Settings) -> None:
+    """If they diverge, the GRANT is the truth and LGE_SCOPE is a stale guess."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json=token_response())
+
+    auth, _ = make_auth(settings, handler)
+    auth.refresh(
+        LgeToken(
+            access_token="old",
+            refresh_token=REFRESH,
+            client_id="gbc_test",
+            scope="FB=1_3_4_5;HistoryLength=100",
+        )
+    )
+    assert seen["scope"] == "FB=1_3_4_5;HistoryLength=100"
+    assert seen["scope"] != settings.lge_scope
+
+
+def test_an_rfc9457_problem_body_still_yields_its_error_code(settings: Settings) -> None:
+    """LG&E answers in problem+json and puts the code in `title`, not `error`.
+
+    Reading only `error` meant #194's classification never saw a code from this
+    custodian at all: every rejection fell through to the unrecognised branch
+    and cleared the cache — including the `invalid_client` case the
+    classification exists to protect. Checked against the live endpoint.
+    """
+    body = {
+        "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+        "title": "invalid_client",
+        "status": 401,
+        "detail": "Client authentication failed.",
+        "traceId": "00-1fcbb0e8-9b73cbc0",
+    }
+    auth, _ = make_auth(settings, lambda r: httpx.Response(401, json=body))
+    path = _stale_token(settings)
+    with pytest.raises(LgeAuthError, match="LGE_CLIENT_ID"):
+        auth.access_token()
+    assert path.exists(), "a problem+json invalid_client still destroyed the token"
