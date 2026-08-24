@@ -270,9 +270,13 @@ def primary_meter(
     """
     if not labels:
         return None
+    # `is True`, not truthiness. `build-dim` now rejects a non-boolean `primary`
+    # outright (a string "no" used to coerce to True), but this reads the label
+    # dict that other code assembles, and a wrong meter here is silent: the page
+    # simply calls the barn "the house". Only a real boolean true counts.
     for device in candidates:
         meta = _meta(labels, device)
-        if meta and meta.get("primary"):
+        if meta and meta.get("primary") is True:
             return device
     return None
 

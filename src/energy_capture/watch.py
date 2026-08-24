@@ -67,8 +67,15 @@ DEFAULT_TIMEOUT = 15.0
 #: "tell me once per working stretch", not "tell me every quarter hour".
 DEFAULT_REPEAT_AFTER_S = 6 * 3600
 
+#: How stale the last successful digest may be before the watchdog says so.
+#: The digest is daily, so 26 hours allows one missed firing plus the drift of a
+#: restart without alarming, and catches the second miss.
+DIGEST_STALE_AFTER_S = 26 * 3600
+
 __all__ = [
+    "DIGEST_STALE_AFTER_S",
     "Alarm",
+    "ping",
     "Severity",
     "WatchReport",
     "evaluate",
@@ -202,7 +209,16 @@ def evaluate(
     uploader_stale_after_s: int = 7200,
     spool_pending_ceiling: int = 45000,
     failure_streak_alarm: int = 2,
-    stage_sections: Sequence[str] = ("uploader", "rollup", "compactor", "bryant_daily", "greenbutton"),
+    stage_sections: Sequence[str] = (
+        "uploader",
+        "rollup",
+        "compactor",
+        "bryant_daily",
+        "greenbutton",
+        "digest",
+        "integrity",
+    ),
+    digest_stale_after_s: int = DIGEST_STALE_AFTER_S,
 ) -> WatchReport:
     """Apply every rule to a status document.
 
@@ -348,6 +364,30 @@ def evaluate(
             "process started, so meter staleness is UNKNOWN, not fine",
         )
 
+    # -- the digest is alive ----------------------------------------------
+    # A quiet night and a dead digest produce the same thing on a phone:
+    # nothing. So the watchdog asks the question the digest cannot ask about
+    # itself — did it run at all? — and treats a missing section as unknown
+    # rather than fine, like every other rule here.
+    report.checked.append("digest")
+    digest_age = _age_s(doc, "digest", "last_success_utc", moment)
+    if digest_age is None:
+        alarm(
+            "digest",
+            Severity.WARNING,
+            "no digest section with a last_success_utc — the daily anomaly "
+            "review has not completed since this process started, so whether "
+            "yesterday was normal is UNKNOWN, not fine",
+        )
+    elif digest_age > digest_stale_after_s:
+        alarm(
+            "digest",
+            Severity.WARNING,
+            f"the last successful digest was {_hms(digest_age)} ago (limit "
+            f"{_hms(digest_stale_after_s)}) — a daily job that has not run in "
+            "over a day is not reviewing anything",
+        )
+
     return report
 
 
@@ -410,15 +450,40 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
-def _write_state(path: Path, report: WatchReport, *, now: datetime, notified: bool) -> None:
+def _write_state(
+    path: Path,
+    report: WatchReport,
+    *,
+    now: datetime,
+    notified: bool,
+    undelivered: bool = False,
+) -> None:
+    """Persist what was reported, and — when a push failed — what was NOT.
+
+    ``firing`` is the memory the change-detector compares against, so advancing
+    it is the act of saying "this has been reported". It used to advance
+    unconditionally, including on runs where the push was due and Pushover was
+    unreachable: the next run then compared the new alarm set against itself,
+    found no change, and stayed quiet under the six-hour repeat timer. A
+    brand-new CRITICAL raised during a Pushover outage was therefore silent for
+    up to six hours — the notifier's own outage suppressing the notification, in
+    a command whose entire purpose is delivery.
+
+    So an undelivered push leaves ``firing`` exactly as it was. The very next
+    run sees the same state change again and tries again. Failing open, like the
+    corrupt-state path above.
+    """
     previous = _read_state(path) or {}
+    firing = sorted({a.check for a in report.alarms})
     state = {
-        "firing": sorted({a.check for a in report.alarms}),
+        "firing": previous.get("firing", []) if undelivered else firing,
         "checked_utc": timeutil.format_utc(now),
         "notified_utc": timeutil.format_utc(now)
         if notified
         else previous.get("notified_utc"),
     }
+    if undelivered:
+        state["undelivered"] = firing
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2) + "\n")
@@ -500,6 +565,38 @@ def push(
     )
 
 
+def ping(url: str, *, client: httpx.Client | None = None) -> bool | None:
+    """Tell a dead-man's switch this watcher is still alive. Never raises.
+
+    Pinged on every run that COMPLETES, whatever the verdict — including a run
+    whose verdict is "the collector is unreachable". That distinction is the
+    whole design: Pushover carries what is wrong with the *collector*, and this
+    carries the fact that the *watcher* is still there to say so. Tying the ping
+    to a clean verdict instead would make a real, persistent alarm silence the
+    heartbeat as well, and page twice for one fault.
+
+    Returns True/False, or None when no URL is configured.
+    """
+    if not url:
+        return None
+    http = client or httpx.Client(timeout=DEFAULT_TIMEOUT)
+    owned = client is None
+    try:
+        response = http.get(url)
+    except httpx.HTTPError as exc:
+        # A failed ping is not a failed check. The external service will notice
+        # the missing beat on its own schedule, which is exactly its job.
+        log.warning("deadman_ping_failed", error=f"{type(exc).__name__}: {exc}")
+        return False
+    finally:
+        if owned:
+            http.close()
+    if response.status_code < 400:
+        return True
+    log.warning("deadman_ping_rejected", status=response.status_code)
+    return False
+
+
 def run(
     *,
     url: str | None = None,
@@ -507,6 +604,7 @@ def run(
     always_notify: bool = False,
     state_path: Path | str | None = None,
     repeat_after_s: int | None = None,
+    ping_url: str | None = None,
 ) -> dict[str, Any]:
     """``energycap watch-health``. Returns the report; exit code is the caller's.
 
@@ -591,10 +689,38 @@ def run(
                 ),
             )
     log.info("watch_notify", send=send, reason=reason, delivered=delivered)
-    _write_state(path, report, now=now, notified=bool(delivered))
+    # A push that was DUE and did not land must not be recorded as reported.
+    undelivered = bool(send) and delivered is not True
+    if undelivered:
+        log.warning(
+            "watch_state_not_advanced",
+            reason=reason,
+            detail=(
+                "a notification was due but not delivered; the previous alarm "
+                "set is kept so the next run re-detects the change and retries"
+            ),
+        )
+    _write_state(
+        path,
+        report,
+        now=now,
+        notified=bool(delivered),
+        undelivered=undelivered,
+    )
+
+    # Last, and unconditionally: the run completed, so the switch is fed. It is
+    # deliberately after delivery, so a ping means "the whole cycle ran", not
+    # merely "the process started".
+    target_ping = (
+        ping_url
+        if ping_url is not None
+        else settings.healthchecks_ping_url.get_secret_value()
+    )
+    pinged = ping(target_ping)
 
     result = report.to_dict()
     result["notified"] = delivered
     result["notify_reason"] = reason
     result["state_path"] = str(path)
+    result["deadman_pinged"] = pinged
     return result

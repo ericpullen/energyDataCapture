@@ -1171,3 +1171,86 @@ def test_both_lge_meters_are_mapped_and_distinguishable() -> None:
     assert {"944006", "944401"} <= set(meters)
     assert all(e["category"] == "meter" for e in meters.values())
     assert all(e["channel_id"] == "electric_main" for e in meters.values())
+
+
+# ------------------------------------------------- at most one primary (N8)
+
+
+def _map_with(tmp_path, mappings) -> Path:
+    path = tmp_path / "channel_map.json"
+    path.write_text(json.dumps({"mappings": mappings}))
+    return path
+
+
+def _meter(device_id: str, **extra) -> dict:
+    entry = {
+        "source": "lge",
+        "device_id": device_id,
+        "channel_id": "electric_main",
+        "label": f"Meter {device_id}",
+        "short_label": device_id,
+        "category": "meter",
+    }
+    entry.update(extra)
+    return entry
+
+
+def test_two_channels_marked_primary_is_a_build_error(tmp_path) -> None:
+    """Every consumer treats the primary as THE meter for its source.
+
+    `compare-meter` checks a bill against it, `meterview` labels it "the house",
+    and `historyview` sums what it is handed — so two primaries are added
+    together and reported as one number. Worse, `historyview`'s completeness
+    gate compares with `>=`, so the doubled interval count passes as "complete"
+    and the wrong number arrives wearing a coverage guarantee.
+
+    The urgency rose with the 2.6-year import: the house is in the table under
+    three device ids (1308468 plus retired 944006/944401 republishing the same
+    series), and one slipped flag among those trebles it.
+    """
+    path = _map_with(
+        tmp_path,
+        [_meter("1308468", primary=True), _meter("1326254", primary=True)],
+    )
+    with pytest.raises(dim.DimBuildError) as excinfo:
+        dim.load_channel_map(path)
+    message = str(excinfo.value)
+    assert "primary" in message
+    assert "1308468" in message and "1326254" in message
+
+
+def test_one_primary_per_source_is_fine(tmp_path) -> None:
+    path = _map_with(
+        tmp_path,
+        [_meter("1308468", primary=True), _meter("1326254")],
+    )
+    entries = dim.load_channel_map(path)
+    assert [e.device_id for e in entries if e.primary] == ["1308468"]
+
+
+def test_a_primary_that_is_not_a_boolean_is_rejected_not_coerced(tmp_path) -> None:
+    """``bool("no")`` is True, and that is how the barn becomes the house.
+
+    The old parser coerced with ``bool()``, so every string a hand-editor is
+    likely to type — "no", "false", "0" — meant TRUE. There is no symptom: the
+    map still loads, the page still renders, and the wrong meter is compared
+    against the panels from then on.
+    """
+    path = _map_with(tmp_path, [_meter("1308468", primary="no")])
+    with pytest.raises(dim.DimBuildError) as excinfo:
+        dim.load_channel_map(path)
+    assert "JSON boolean" in str(excinfo.value)
+
+
+def test_a_placeholder_does_not_consume_the_one_primary_slot(tmp_path) -> None:
+    """A placeholder describes a channel that does not exist yet, so it cannot
+    be the primary anything — and must not block the real one from being it."""
+    path = _map_with(
+        tmp_path,
+        [
+            _meter("1308468", primary=True),
+            _meter("PLACEHOLDER", primary=True, placeholder=True),
+        ],
+    )
+    entries = dim.load_channel_map(path)
+    assert [e.device_id for e in entries if e.primary and not e.placeholder] == ["1308468"]

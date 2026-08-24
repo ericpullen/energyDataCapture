@@ -116,6 +116,7 @@ __all__ = [
     "BRYANT_DAILY_AT",
     "DAILY_MAINTENANCE_AT",
     "DIGEST_DAILY_AT",
+    "DIGEST_HEARTBEAT_WEEKDAY",
     "GREENBUTTON_DAILY_AT",
     "UPLOAD_MINUTE",
     "ROLLUP_MINUTE",
@@ -158,10 +159,32 @@ BRYANT_DAILY_AT = (8, 30)
 #: after that and does not collide with the 08:30 Carrier fetch.
 GREENBUTTON_DAILY_AT = (9, 15)
 
-#: The nightly anomaly digest. AFTER 01:30 compaction and the re-roll, so it
-#: reads a finished D-1 rather than a partly written one, and early enough that
-#: the notification is waiting at breakfast rather than arriving mid-morning.
-DIGEST_DAILY_AT = (6, 0)
+#: The daily anomaly digest, and the ONE constraint that decides this number:
+#: it must fire after every job that supplies D-1's data, not merely after the
+#: compaction that tidies it.
+#:
+#: It was 06:00 — after the 01:30 compaction and re-roll, which is the part
+#: everyone thinks of, and *before* both of the fetches that land D-1's most
+#: valuable inputs. Bryant's ``eheat`` for D-1 arrives at 08:30
+#: (:data:`BRYANT_DAILY_AT`) and LG&E's meter intervals at 09:15
+#: (:data:`GREENBUTTON_DAILY_AT`). So on every scheduled night the strip-heat
+#: rule read an absent ``eheat`` row, the barn envelope saw no meter rows, and
+#: the meter-vs-panels check — the only one that can see a mis-scaled clamp —
+#: skipped itself for "no overlap". The digest never re-checks a day once its
+#: data lands, so the three most valuable rules had never once executed on the
+#: schedule. Manual runs worked, which is exactly why it went unnoticed.
+#:
+#: 10:00 is after both fetches with 45 minutes of slack, and still late enough
+#: in the morning to be read over coffee. ``test_runtime`` asserts the ordering
+#: rather than the literal, so moving a fetch cannot silently re-open this.
+DIGEST_DAILY_AT = (10, 0)
+
+#: One firing a week pushes even with nothing to report — Monday. A digest that
+#: only ever speaks when something is wrong is indistinguishable, on a phone,
+#: from a digest that died three weeks ago; the weekly "all quiet" is what makes
+#: the silence on the other six days mean something. ``0`` is Monday
+#: (``date.weekday()``).
+DIGEST_HEARTBEAT_WEEKDAY = 0
 #: Days of overlap re-read on every run, so a revised interval lands.
 GREENBUTTON_LOOKBACK_DAYS = 3
 
@@ -537,6 +560,25 @@ async def _job_bryant_daily(
     return await _call(entry, start=start, end=end, now=fetch_at)
 
 
+def _record_stage_failure(section: str, error: BaseException | str) -> None:
+    """Record a failure in a stage's OWN status section. Never raises.
+
+    Used where a job fails *before* its stage runs, so the stage has no chance to
+    record anything itself and the failure would otherwise exist only in the
+    shared `scheduler` section that the watchdog does not read.
+    """
+    try:
+        from energy_capture.health import get_status_store
+
+        get_status_store().record_failure(section, error)
+    except Exception as exc:  # pragma: no cover - instrumentation only
+        _log.warning(
+            "status_update_failed",
+            section=section,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
 class GreenbuttonAuthorizationRevoked(RuntimeError):
     """LG&E revoked a working authorisation — loud on purpose.
 
@@ -588,12 +630,25 @@ async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
         # consecutive_failures and /healthz. DEVIATIONS.md #177.
         revoked = cache.revoked()
         if revoked:
-            raise GreenbuttonAuthorizationRevoked(
+            error = GreenbuttonAuthorizationRevoked(
                 "LG&E authorisation was revoked at "
                 f"{revoked.get('revoked_at', 'an unknown time')} "
                 f"({revoked.get('reason', 'no reason recorded')}). Meter data has "
                 "stopped. Re-authorise: `energycap greenbutton-authorize`."
             )
+            # Write the failure into greenbutton's OWN section before raising.
+            #
+            # Raising alone was not enough, and the gap was invisible from
+            # either side. The scheduler records a job failure in the shared
+            # `scheduler` section — which `watch-health` deliberately ignores,
+            # because that counter is shared by six jobs. Meanwhile the watcher
+            # HAS a `greenbutton` streak rule, and nothing in the codebase ever
+            # called `record_failure("greenbutton")`: the rule could not fire.
+            # Two correct-looking halves that never met, so a repeat of #177
+            # would have fallen through to meter staleness — three days and a
+            # WARNING, which is exactly the lapse #177 was written to end.
+            _record_stage_failure("greenbutton", error)
+            raise error
         return {"skipped": "not_authorized"}
 
     today = timeutil.local_date_of(now)
@@ -602,22 +657,49 @@ async def _job_greenbutton_daily(now: datetime) -> dict[str, Any]:
 
 
 async def _job_digest(now: datetime) -> Any:
-    """The nightly anomaly digest for D-1 (PLAN.md has no §; review item E).
+    """The daily anomaly digest for D-1 (PLAN.md has no §; review item E).
 
     Skips quietly when there is no archive to read: a deployment without S3 is
     an ordinary state, not a failure, and failing here every morning would put
     permanent noise in the very counters the watchdog reads.
+
+    The import guard is **narrow**, and that is the whole point of it. It used to
+    be ``except Exception``, which caught a ``SyntaxError`` in ``digest.py``, an
+    ``ImportError`` from a missing dependency, and a typo in a module-level
+    constant — and turned every one of them into ``{"skipped":
+    "not_implemented"}``, which the scheduler records as a **success**. A
+    genuinely broken digest was therefore indistinguishable from a deployment
+    that simply lacks the stage, forever, on both ``/healthz`` and the phone. Its
+    neighbour :func:`_job_bryant_daily` had the correct form all along and says
+    why; this now matches it. Only "the submodule is not in this image" is
+    survivable — anything else propagates and is recorded as the failure it is.
+
+    ``always_notify`` on one weekday makes the digest its own heartbeat. A quiet
+    night and a dead digest are the same silence otherwise, and the point of
+    #191 was to stop treating silence as health.
     """
     module_name = "energy_capture.stages.digest"
     try:
         digest = importlib.import_module(module_name)
-    except Exception:  # pragma: no cover - defensive, matches the other jobs
-        _log.warning("scheduled_job_not_implemented", job="digest_daily", module=module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise  # a real broken import inside the stage — do not disguise it
+        _log.warning(
+            "scheduled_job_not_implemented",
+            job="digest_daily",
+            module=module_name,
+            detail="the digest stage is not in this image; skipping this firing",
+        )
         return {"skipped": "not_implemented", "module": module_name}
 
     if not get_settings().s3_bucket:
         return {"skipped": "no_bucket"}
-    return await _call(digest.run, local_day=timeutil.local_date_of(now) - timedelta(days=1))
+    local_day = timeutil.local_date_of(now) - timedelta(days=1)
+    return await _call(
+        digest.run,
+        local_day=local_day,
+        always_notify=timeutil.local_date_of(now).weekday() == DIGEST_HEARTBEAT_WEEKDAY,
+    )
 
 
 def default_jobs(
@@ -709,8 +791,35 @@ def default_jobs(
             f"SCHEDULED_JOBS names {unknown} which are not scheduled jobs. "
             f"Known jobs: {sorted(known)}. Leave SCHEDULED_JOBS empty to run all."
         )
+    selected = set(wanted)
+
+    # A process that WRITES to the spool but runs nothing that empties it will
+    # fill its disk, quietly, over months.
+    #
+    # `SCHEDULED_JOBS` selects whole jobs, and `daily_maintenance` is a bundle:
+    # upload catch-up, compact, re-roll, AND the retention purge — which is the
+    # only caller of `SpoolDB.purge` anywhere. So the poller/batch split this
+    # knob exists to enable, in exactly the form the docstring and
+    # `.env.example` recommend it, leaves the poller with an unbounded spool.
+    # Job granularity is not responsibility granularity; that was A2's lesson
+    # and this is the same shape one layer down. It cannot be a hard failure —
+    # a legitimately split deployment does want the purge on the batch host —
+    # so it is the loudest warning the boot has.
+    if "upload_hourly" in selected and "daily_maintenance" not in selected:
+        _log.warning(
+            "scheduled_jobs_no_purge",
+            jobs=sorted(selected),
+            detail=(
+                "this process spools rows but runs no daily_maintenance, which "
+                "is the ONLY job that purges the spool past SPOOL_RETENTION_DAYS "
+                "— the spool will grow without bound here. Make sure another "
+                "process on this SAME spool volume runs daily_maintenance, or "
+                "add it to SCHEDULED_JOBS."
+            ),
+        )
+
     # Preserve firing-time order rather than the order they were listed in.
-    return tuple(job for job in every if job.name in set(wanted))
+    return tuple(job for job in every if job.name in selected)
 
 
 # ------------------------------------------------------------------ scheduler

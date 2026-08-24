@@ -388,3 +388,41 @@ def test_an_import_never_fans_out_to_s3_on_its_own(
 
     assert "not uploaded" in str(summary["s3"])
     assert not s3io.key_exists(BUCKET, s3io.meter_key(date(2026, 8, 1)), client=s3)
+
+
+# --------------------------------------------------- freshness only moves forward
+
+
+def test_a_historical_backfill_does_not_rewind_the_freshness_signal(
+    tmp_path, monkeypatch
+) -> None:
+    """Importing 2024 is a successful fetch whose newest row is two years old.
+
+    ``newest_interval_utc`` means "the newest interval this deployment holds",
+    and it is what ``/healthz`` measures meter staleness against. Writing the
+    fetch's own ``last_ts_utc`` verbatim made a backfill REWIND it — a false
+    staleness alarm raised by a run that added data. Monotonic in the safe
+    direction.
+    """
+    from energy_capture.health import get_status_store
+
+    store = get_status_store()
+    store.record_success("greenbutton", newest_interval_utc="2026-08-24T03:45:00Z")
+
+    fresh = greenbutton_fetch._newer("2026-08-24T03:45:00Z", "2024-01-01T05:00:00.000000Z")
+    assert fresh == "2026-08-24T03:45:00Z"
+
+
+def test_microsecond_and_second_precision_stamps_compare_by_instant() -> None:
+    """The two formats really do both occur, and '.' sorts before 'Z'.
+
+    The fetch summary carries microseconds; a stamp already in ``status.json``
+    may not. Compared as strings, ``2026-08-16T16:00:00.000000Z`` sorts BEFORE
+    ``2026-08-16T16:00:00Z`` — the same instant, ordered wrongly, in the one
+    comparison whose entire job is to move only forwards.
+    """
+    assert "2026-08-16T16:00:00.000000Z" < "2026-08-16T16:00:00Z"  # the trap
+    newer = greenbutton_fetch._newer(
+        "2026-08-16T16:00:00Z", "2026-08-16T16:00:01.000000Z"
+    )
+    assert newer == "2026-08-16T16:00:01.000000Z"

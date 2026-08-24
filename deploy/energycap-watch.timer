@@ -1,0 +1,23 @@
+# Fires deploy/energycap-watch.service every 15 minutes.
+#
+# 15 minutes is chosen against the push policy, not against how fast a fault
+# appears: watch.should_notify only pushes on a CHANGE of the failing set (plus
+# a six-hourly reminder), so a tighter cadence costs nothing in notifications
+# and buys a faster first page. See watchdog.md.
+
+[Unit]
+Description=Run the energycap health watchdog every 15 minutes
+Documentation=file:///home/ubuntu/energyDataCapture/deploy/watchdog.md
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+# Catch up ONCE after downtime rather than replaying every missed firing: the
+# point is to check the CURRENT state, and a burst of identical historical
+# checks would only exercise the anti-fatigue logic.
+Persistent=true
+AccuracySec=30s
+Unit=energycap-watch.service
+
+[Install]
+WantedBy=timers.target

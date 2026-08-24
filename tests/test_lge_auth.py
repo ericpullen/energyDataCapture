@@ -235,6 +235,81 @@ def test_a_rejected_refresh_clears_the_cache(settings: Settings) -> None:
     assert not path.exists()
 
 
+def _stale_token(settings: Settings):
+    path = settings.spool_dir / "tokens" / "lge.json"
+    LgeTokenCache(path).save(
+        LgeToken(
+            access_token="old",
+            refresh_token=REFRESH,
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            client_id="gbc_test",
+        )
+    )
+    return path
+
+
+def test_an_invalid_scope_rejection_clears_the_cache(settings: Settings) -> None:
+    """The 2026-08-24 incident, byte for byte.
+
+    LG&E answered the refresh grant with ``invalid_scope`` — "The requested
+    scope does not match the scope granted by the resource owner". That means
+    the customer's consent no longer covers what we ask for, so only a browser
+    can fix it and the token is dead weight. It is classified explicitly rather
+    than falling through an unknown-error default.
+    """
+    auth, _ = make_auth(
+        settings,
+        lambda r: httpx.Response(
+            400,
+            json={
+                "error": "invalid_scope",
+                "error_description": (
+                    "The requested scope does not match the scope granted by "
+                    "the resource owner"
+                ),
+            },
+        ),
+    )
+    path = _stale_token(settings)
+    with pytest.raises(LgeAuthError, match="greenbutton-authorize"):
+        auth.access_token()
+    assert not path.exists()
+
+
+def test_an_invalid_client_rejection_keeps_the_token(settings: Settings) -> None:
+    """A wrong client secret must not cost the customer's authorisation.
+
+    Every 400/401/403 used to clear the cache. ``invalid_client`` is about OUR
+    credentials — a mistyped ``LGE_CLIENT_SECRET``, a registration disabled on
+    the custodian's side — and the refresh token is untouched by any of that.
+    Deleting it turned a ten-second config fix into a trip to a browser to
+    re-consent, and nothing about that trip would have fixed the secret.
+    """
+    auth, _ = make_auth(
+        settings,
+        lambda r: httpx.Response(401, json={"error": "invalid_client"}),
+    )
+    path = _stale_token(settings)
+    with pytest.raises(LgeAuthError, match="LGE_CLIENT_ID"):
+        auth.access_token()
+    assert path.exists(), "a client-credential error destroyed a good refresh token"
+    assert LgeTokenCache(path).revoked() is None
+
+
+def test_an_unrecognised_rejection_still_clears(settings: Settings) -> None:
+    """The safe default when the custodian says something we do not model.
+
+    An unknown rejection is more likely a dead grant than a config slip, and the
+    recovery for guessing wrong (re-authorise) exists, where the recovery for a
+    silently dead feed does not.
+    """
+    auth, _ = make_auth(settings, lambda r: httpx.Response(400, text="not json at all"))
+    path = _stale_token(settings)
+    with pytest.raises(LgeAuthError):
+        auth.access_token()
+    assert not path.exists()
+
+
 def test_no_cached_token_says_how_to_get_one(settings: Settings) -> None:
     auth, _ = make_auth(settings, lambda r: httpx.Response(200, json=token_response()))
     with pytest.raises(LgeAuthError, match="greenbutton-authorize"):

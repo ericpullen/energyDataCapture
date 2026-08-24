@@ -4692,3 +4692,185 @@ consequence directly: any setting the suite did not ask for holds its declared
 default. Verified by sabotage — stubbing the clear out makes it fail on
 `LGE_CLIENT_ID` — and the suite is green for the first time in three sessions:
 **1,845 passed, 0 failed.**
+
+---
+
+## 194. The safety layer reviewed against itself — `docs/review-2026-08-24.md`
+
+*Items N2–N9, N12 and the long-deferred D2. Everything here is a fault in code
+written to catch faults, which is the only category of bug that gets quieter the
+worse it is.*
+
+### The digest fired before the data it reviews (N2)
+
+`digest_daily` ran at **06:00** reviewing D-1. D-1's Bryant `eheat` lands at
+08:30 and D-1's LG&E intervals at 09:15. The digest never re-checks a day once
+its data arrives, so on every scheduled night:
+
+- `strip_heat_in_mild_weather` read an absent `eheat` row,
+- `barn_envelope` saw no meter rows,
+- `meter_disagreement` — **the only check that can see a mis-scaled clamp** —
+  skipped itself for "no overlap".
+
+The three most valuable rules in the digest had never once executed on the
+schedule. Manual runs worked perfectly, which is exactly why nobody noticed.
+
+Moved to **10:00**, and the *ordering* is what a test now pins — not the
+literal — so moving a fetch later fails with this explanation instead of
+silently re-opening the hole.
+
+### The digest violated rule 1 inside itself (N2, second half)
+
+`heat.get("eheat", 0.0)` turned "the Bryant day has not been fetched" into
+"eheat used 0 kWh", and the rule returned silently. That is **absence read as
+zero**, in the tool written to enforce that it never is. The rules now
+distinguish an absent dataset from a measured zero and put the skip in
+`report.notes` where the digest body prints it. An `eheat` key missing while
+*other* components reported is still a real zero — that is Carrier omitting a
+structurally disabled component, which is a different fact.
+
+### `_job_digest` disguised every possible breakage as success (N3)
+
+The import guard was `except Exception`. A `SyntaxError` in `digest.py`, a
+missing dependency, a typo in a module constant — all became
+`{"skipped": "not_implemented"}`, which the scheduler records as a **success**.
+A genuinely broken digest was indistinguishable from a deployment that simply
+lacks the stage, forever, on `/healthz` and on the phone alike. Narrowed to
+`ModuleNotFoundError` naming the module itself, matching `_job_bryant_daily`,
+which had the correct form all along and documents why.
+
+### Neither digest nor integrity could be watched (N3)
+
+A digest that threw landed in the shared `scheduler` section, which
+`watch-health` deliberately ignores (it is shared by six jobs — #187). So a
+digest crashing every morning for a fortnight looked exactly like a fortnight of
+quiet nights. Both stages now write their own `status.json` section **on failure
+as well as success**, both joined the watcher's per-stage streak roster, and
+there is a new rule: *the last successful digest must be under 26 hours old*,
+with a missing section reading as unknown rather than fine.
+
+And because a quiet night and a dead digest are the same silence on a phone, one
+firing a week (**Monday**) pushes even with nothing to report.
+
+### A Pushover outage suppressed the alarm it failed to carry (N4)
+
+`_write_state` advanced `firing` — the set the change-detector compares against,
+i.e. the record of "this has been reported" — whether or not the push landed. So
+after a failed delivery the next run compared the new alarm set against itself,
+found no change, and went quiet under the six-hour repeat timer. A brand-new
+CRITICAL raised during a Pushover outage stayed silent for up to six hours: the
+notifier's own outage suppressing the notification, in a command whose entire
+purpose is delivery. An undelivered push now leaves `firing` untouched (the set
+is kept under `undelivered` for diagnosis) so the next run re-detects and
+retries.
+
+### The `greenbutton` watch rule was unreachable (N5)
+
+`GreenbuttonAuthorizationRevoked` raises *before* the stage runs, so the stage
+never records anything and the failure existed only in the ignored `scheduler`
+section. Meanwhile `watch.py` **has** a `greenbutton` streak rule and nothing in
+the codebase ever called `record_failure("greenbutton")`. Two correct-looking
+halves that never met: a repeat of #177 would have fallen through to meter
+staleness — three days, WARNING — which is the lapse #177 was written to end.
+The revocation now writes greenbutton's own section before raising.
+
+### `BARN_MIN_KWH` was dead code (N6, partial)
+
+Only the high end of the barn envelope was implemented, leaving "the EV silently
+stopped charging" — the failure a homeowner actually wants to hear about — with
+no check. The low end cannot be a bare threshold: one quiet day is a day nobody
+drove, and paging on that is how a channel gets muted. It now needs two things
+at once — `BARN_QUIET_DAYS` (4) consecutive days at the floor, **and** a
+baseline showing this meter normally charges (`BARN_ACTIVE_FRACTION`). Same
+discipline that stopped `stuck_load` alarming on every refrigerator: the finding
+is the CHANGE, and only the channel's own past can say what changed.
+
+### The recommended `SCHEDULED_JOBS` split disabled the spool purge (N7)
+
+The knob selects whole jobs, and `daily_maintenance` is a bundle: upload
+catch-up, compact, re-roll, **and the retention purge** — the only caller of
+`SpoolDB.purge` anywhere. The poller config the docstring and `.env.example`
+both showcase omits `daily_maintenance`, so that collector never purges and its
+spool grows without bound. Job granularity is not responsibility granularity;
+that was A2's lesson arriving one layer down. It cannot be a hard failure — a
+real split deployment does want the purge on the batch host — so a process that
+spools without a purge job now emits the loudest warning the boot has.
+
+### At most one primary, and `primary` must be a boolean (N8)
+
+`bool(raw.get("primary"))` accepted every string a hand-editor is likely to
+type — `"no"`, `"false"`, `"0"` — and made all three **True**, silently
+promoting the barn to the house. And *nothing* enforced at-most-one primary per
+source, while every consumer assumes it: `compare-meter` checks a bill against
+the primary, `meterview` labels it "the house", `historyview` sums what it is
+handed. Two primaries means house + barn added together and reported as the
+house — and because the completeness gate uses `>=`, the doubled interval count
+passes as "complete", so the wrong number arrives wearing a coverage guarantee.
+
+The stakes rose with the 2.6-year import (#185): the house is now in the table
+under **three** device ids, so one slipped flag trebles it. Both are build
+errors now, and `meterview` tests `is True` rather than truthiness.
+
+### `verify-bill`'s help described a default it did not have, and the convention backwards (N9)
+
+`--meter`'s help promised "Default: the map's primary" while a bare run raised
+`AmbiguousMeterError` — and since the import, "more than one meter" is always.
+It now defaults to the primary, matching `compare-meter` (B6).
+
+Worse, the command docstring said "`--end` is the meter READ date and is
+**EXCLUSIVE**". The code, `tariff.billing_days`, and every other document treat
+the days billed as `(start, end]` — start excluded, end included. That is the
+exact off-by-one the module was written to kill, printed in its own `--help`.
+Corrected, with the measurement (0.16% vs 3.67% MAE) that settled it.
+
+### Freshness could move backwards (N12)
+
+A manual backfill of 2024 is a successful fetch whose `last_ts_utc` is two years
+old, and writing it verbatim **rewound** `newest_interval_utc` — a false
+staleness alarm raised by a run that added data. Now monotonic. A zero-row fetch
+also overwrote the stored `meters` roster with `[]`, the same class as the D1 bug
+one field over.
+
+The comparison **parses** rather than comparing strings, and that is not
+academic: the fetch summary carries microseconds and a stored stamp may not, and
+`'.' < 'Z'`, so `2026-08-16T16:00:00.000000Z` sorts *before* the identical
+second-precision stamp. The same instant, ordered wrongly, in the one comparison
+whose whole job is to move only forwards.
+
+**Found on the way:** the process-wide `StatusStore` is a module-level singleton
+and was never reset between tests, so one test's `status.json` was read back by
+the next. It went unnoticed while every user of the store only ever *wrote* to
+it; it surfaced the moment a stage started merging its previous value forward.
+Same shape as #193's environment leak — state from outside the test, invisible
+until something finally looks at it. `conftest` now resets it per test.
+
+### D2 at last — not every rejection is a revocation
+
+Every 400/401/403 on a refresh grant cleared the token cache. Classified by the
+RFC 6749 §5.2 `error` code now:
+
+| code | cache | why |
+|---|---|---|
+| `invalid_grant` | **cleared** | the refresh token is expired, revoked or replayed |
+| `invalid_scope` | **cleared** | 2026-08-24's incident: "the requested scope does not match the scope granted by the resource owner" — the consent no longer covers what we ask |
+| `invalid_client`, `unauthorized_client`, `unsupported_grant_type`, `invalid_request` | **kept** | about OUR credentials or OUR request; the customer's authorisation is untouched |
+| unrecognised / no JSON | **cleared** | an unknown rejection is likelier a dead grant, and re-authorising is a recovery that exists where a silently dead feed is not |
+
+`invalid_client` mattering is the point: a mistyped `LGE_CLIENT_SECRET` used to
+destroy a working refresh token, turning a ten-second config fix into a trip to
+a browser to re-consent — and nothing about that trip would have fixed the
+secret.
+
+### Deliberately not addressed here
+
+**N1 is not a code problem and cannot be fixed from this repository.** The
+watchdog's launchd job has never been loaded, the instance runs a torn pre-merge
+image, and LG&E needs a browser re-authorisation. Until those three happen the
+operational value of everything above — and of everything in #187 and #191 — is
+still zero. That is stated plainly rather than counted as progress.
+
+Also carried forward: N10 (store the measured median spacing beside
+`observed_seconds`, which records the pricing *assumption*), N11 (one sentence
+in #181 about versioning's 30-day box), N9's `intervals > expected` acceptance
+and the CWD-relative channel-map degradation, and the older A4/A5/B3/B4/C2/C3/
+D3/D4/D5/D6.

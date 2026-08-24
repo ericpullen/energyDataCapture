@@ -81,6 +81,9 @@ SECRET_SETTING_FIELDS: tuple[str, ...] = (
     "lge_registration_access_token",
     "pushover_token",
     "pushover_user",
+    # A capability URL: anyone holding it can fake this watcher's heartbeat and
+    # so suppress the alert that it died.
+    "healthchecks_ping_url",
 )
 
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
@@ -234,6 +237,12 @@ class Settings(BaseSettings):
     #: and sets its exit code -- useful for a dry run, useless as an alarm.
     pushover_token: SecretStr = SecretStr("")
     pushover_user: SecretStr = SecretStr("")
+    #: Dead-man's switch. `watch-health` pings this on every run it COMPLETES,
+    #: whatever the verdict, and the external service alarms when the pings
+    #: stop. It is the only thing that can report the watcher's own death --
+    #: and a watcher that cannot be seen to have died is the silent-failure
+    #: hole rebuilt one level up. Empty disables it.
+    healthchecks_ping_url: SecretStr = SecretStr("")
     #: An uploader that has not succeeded in this long means the archive has
     #: stopped growing. It runs hourly at :05, so two hours is one clean miss.
     uploader_stale_after_s: int = Field(default=7200, ge=60)

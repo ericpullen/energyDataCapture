@@ -372,10 +372,34 @@ def test_default_jobs_are_exactly_the_schedule_in_plan_section_5() -> None:
     assert jobs["bryant_daily_energy"].schedule == DailyAt(8, 30)
     # LG&E publishes overnight and lags; 09:15 is after that and clear of 08:30.
     assert jobs["greenbutton_daily"].schedule == DailyAt(9, 15)
-    # After 01:30 compaction and the re-roll, so D-1 is finished when read.
-    assert jobs["digest_daily"].schedule == DailyAt(6, 0)
+    assert jobs["digest_daily"].schedule == DailyAt(10, 0)
     # dim_channel is rebuilt on demand only (PLAN.md §5) — never scheduled.
     assert not any("dim" in name for name in jobs)
+
+
+def test_the_digest_fires_after_every_job_that_supplies_the_day_it_reviews() -> None:
+    """The constraint behind ``DIGEST_DAILY_AT``, asserted instead of the literal.
+
+    At 06:00 the digest reviewed D-1 *before* the two fetches that land D-1's
+    most valuable inputs: Bryant's ``eheat`` at 08:30 and LG&E's meter intervals
+    at 09:15. Because it never re-checks a day once the data arrives, the
+    strip-heat rule, the barn envelope and the meter-vs-panels check had never
+    once run on the schedule — only in manual runs, which is why it looked fine.
+
+    Pinning the ordering rather than the number means moving a fetch later
+    fails HERE, with this explanation, instead of silently re-opening the hole.
+    """
+    fetches = {
+        "bryant_daily_energy": runtime.BRYANT_DAILY_AT,
+        "greenbutton_daily": runtime.GREENBUTTON_DAILY_AT,
+    }
+    for name, at in fetches.items():
+        assert runtime.DIGEST_DAILY_AT > at, (
+            f"the digest fires at {runtime.DIGEST_DAILY_AT} but {name} lands "
+            f"its data at {at}; the rules that read it would see nothing"
+        )
+    # And still after the 01:30 compaction/re-roll it also depends on.
+    assert runtime.DIGEST_DAILY_AT > runtime.DAILY_MAINTENANCE_AT
 
 
 async def test_a_recovered_job_clears_the_shared_scheduler_counter(
@@ -2012,3 +2036,31 @@ def test_a_revoked_then_reauthorised_deployment_stops_shouting(
     )
     result = asyncio.run(runtime._job_greenbutton_daily(timeutil.now_utc()))
     assert "skipped" not in result
+
+
+def test_a_spooling_process_without_the_purge_job_warns_loudly(caplog) -> None:
+    """The recommended split config silently disabled the retention purge.
+
+    ``SCHEDULED_JOBS`` selects whole jobs, and ``daily_maintenance`` is a bundle
+    — upload catch-up, compact, re-roll, and the purge, which is the only caller
+    of ``SpoolDB.purge`` anywhere in the codebase. The poller config the
+    docstring and ``.env.example`` both showcase omits ``daily_maintenance``, so
+    that collector never purges and its spool grows without bound.
+
+    It cannot be a hard failure: a genuinely split deployment does want the
+    purge on the batch host. So it is a warning, and it names the consequence.
+    """
+    with caplog.at_level("WARNING"):
+        default_jobs(jobs=["upload_hourly", "bryant_daily_energy"])
+    assert any("scheduled_jobs_no_purge" in record.getMessage() for record in caplog.records), (
+        [r.getMessage() for r in caplog.records]
+    )
+
+
+def test_a_batch_only_process_does_not_get_the_purge_warning(caplog) -> None:
+    """It does not spool, so nothing accumulates for it to purge."""
+    with caplog.at_level("WARNING"):
+        default_jobs(jobs=["rollup_hourly", "daily_maintenance"])
+    assert not any(
+        "scheduled_jobs_no_purge" in record.getMessage() for record in caplog.records
+    )
