@@ -545,12 +545,38 @@ class LgeAuth:
         return self.refresh(token, now=moment)
 
     def refresh(self, token: LgeToken, *, now: datetime | None = None) -> LgeToken:
-        """Exchange the refresh token. Cached before use, rotation assumed."""
+        """Exchange the refresh token. Cached before use, rotation assumed.
+
+        **`scope` is sent, and must be.** RFC 6749 6 makes it optional and says
+        an omitted scope means "the originally granted scope" -- so this sent
+        nothing, which is correct against the spec and does not work here. This
+        custodian appears to compare the *client registration's* scope instead,
+        and answers a scope-less refresh with:
+
+            400 invalid_scope -- "The requested scope does not match the scope
+            granted by the resource owner."
+
+        Measured 2026-08-24 against the live endpoint on a token four minutes
+        old, whose granted scope was string-identical to the configured one:
+        without `scope`, 400; with it, 200 and a rotated refresh token. So every
+        refresh this integration has ever attempted failed, the cache was
+        cleared each time, and the only thing that ever produced a working token
+        was a human in a browser. That is the whole of "the tokens do not
+        auto-update".
+
+        The token's OWN granted scope is sent, not the configured one: they are
+        the same today, and if they ever diverge the grant is the truth and
+        `LGE_SCOPE` is a stale local guess.
+        """
         assert self.cache is not None
-        refreshed = self._token_request(
-            {"grant_type": "refresh_token", "refresh_token": token.refresh_token or ""},
-            what="refresh_token",
-        )
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": token.refresh_token or "",
+        }
+        scope = token.scope or self.settings.lge_scope
+        if scope:
+            data["scope"] = scope
+        refreshed = self._token_request(data, what="refresh_token")
         # The custodian may or may not rotate; carry the old one forward only if
         # it did not send a new one, so a rotation is never lost.
         if not refreshed.refresh_token:
@@ -677,8 +703,22 @@ def _oauth_error(response: httpx.Response) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
-    code = payload.get("error")
-    return code.strip() if isinstance(code, str) and code.strip() else None
+    # RFC 6749 5.2 puts the code in `error`. This custodian answers in RFC 9457
+    # problem+json and puts it in `title`:
+    #
+    #   {"type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+    #    "title": "invalid_scope", "status": 400, "detail": "...", "traceId": ...}
+    #
+    # Reading only `error` meant the classification added for DEVIATIONS #194
+    # never saw a code from LG&E at all -- every rejection fell through to the
+    # unrecognised branch and cleared the cache, including the `invalid_client`
+    # case that classification exists to protect. Checked against the live
+    # endpoint 2026-08-24.
+    for key in ("error", "title"):
+        code = payload.get(key)
+        if isinstance(code, str) and code.strip():
+            return code.strip()
+    return None
 
 
 def _detail(response: httpx.Response) -> str:
