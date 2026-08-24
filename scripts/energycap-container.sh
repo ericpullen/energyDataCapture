@@ -12,9 +12,13 @@
 # See deploy/README.md. docker-compose.yml stays valid and is the fallback path
 # (and the only path on non-Apple-silicon hosts).
 #
-# NOTHING IN THIS FILE HAS EVER BEEN EXECUTED. The `container` CLI is not
-# installed on the development machine and there is no Docker daemon there
-# either, so the image has never been built by either runtime.
+# STATUS: this file HAS been executed. It was written before either runtime was
+# available anywhere and carried a "nothing here has ever run" banner for that
+# reason; the banner outlived its truth once the collector moved to Lightsail and
+# the measurement log further down this file was recorded. What is still true is
+# narrower and worth keeping: the *development Mac* has no `container` CLI and no
+# Docker daemon, so nothing here can be exercised from there — check on the host
+# that actually runs the collector, not on the machine you are editing from.
 #
 # Usage:
 #   scripts/energycap-container.sh build

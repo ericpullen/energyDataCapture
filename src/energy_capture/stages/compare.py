@@ -12,8 +12,12 @@ the wrong conductor.
 
 Why it does not just query S3
 -----------------------------
-Because there is no S3 yet. This reads the SQLite spool directly and the meter
-Parquet that ``energycap import-greenbutton`` writes locally, so the comparison
+Not because there is no S3 — there is, and has been since 2026-08-19 — but
+because the freshest panel data is not in it. The uploader runs hourly, so the
+last hour of 30s rows lives only in the spool, and a comparison that queried S3
+would silently be comparing an incomplete final hour. This reads the SQLite
+spool directly, plus the meter Parquet that ``energycap import-greenbutton``
+writes locally, so the comparison is exact to the last completed poll cycle and
 works on a laptop with nothing but the collector running.
 
 **It must therefore run inside the container** while the collector holds the

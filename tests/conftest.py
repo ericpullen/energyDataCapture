@@ -2,11 +2,16 @@
 
 Three guarantees this file makes for every test, everywhere:
 
-1. **No real credentials.** ``.env`` loading is switched off (the ``env_file``
-   entry of :attr:`Settings.model_config` is blanked for the duration of each
-   test), and every credential setting is replaced with an obviously-fake value.
-   A developer's real ``.env`` can therefore never reach a test, and a leaked
-   secret in an assertion message is impossible.
+1. **No real credentials, and no real configuration.** ``.env`` loading is
+   switched off (the ``env_file`` entry of :attr:`Settings.model_config` is
+   blanked for the duration of each test) **and every environment variable that
+   :class:`Settings` reads is deleted** before the fake values are set --
+   see :func:`_clear_settings_environment`. Blanking ``env_file`` alone was not
+   enough: pydantic-settings still reads ``os.environ``, so an exported
+   ``LGE_CLIENT_ID`` reached the suite for as long as ``_TEST_ENV`` did not
+   happen to name that setting. A developer's real ``.env`` -- or their real
+   shell -- can therefore never reach a test, and a leaked secret in an
+   assertion message is impossible.
 2. **No network, no AWS.** ``AWS_*`` credentials are pinned to moto's
    conventional dummies and ``AWS_PROFILE`` is removed, so a stray boto3 call
    cannot pick up a real profile — it fails loudly instead of touching an
@@ -31,6 +36,7 @@ only wall-clock read in the package, and pure-logic tests never need it.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
@@ -91,12 +97,39 @@ _TEST_ENV: dict[str, str] = {
 }
 
 #: Removed outright: a bogus profile name would break moto-backed clients, and
-#: an inherited real one is exactly what we are guarding against.
+#: an inherited real one is exactly what we are guarding against. These are not
+#: ``Settings`` fields, so :func:`_clear_settings_environment` does not reach
+#: them.
 _REMOVED_ENV: tuple[str, ...] = (
     "AWS_PROFILE",
     "AWS_ENDPOINT_URL",
-    "BLACKSTART_INVENTORY_PATH",
 )
+
+
+def _clear_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delete every ``Settings`` field's variable from the process environment.
+
+    ``_TEST_ENV`` is an ALLOWLIST, and an allowlist that has to be extended by
+    hand is a guarantee that decays. It named 16 of the 48 settings; the other 32
+    -- every ``LGE_*``, both ``PUSHOVER_*``, ``HEALTHZ_URL``, ``SCHEDULED_JOBS``,
+    the integrity thresholds -- were inherited straight from whatever the
+    developer had exported. Three tests failed loudly because of it (a real
+    ``LGE_CLIENT_ID`` in the shell made "no credential has a default" false);
+    the rest simply ran against one machine's configuration and passed anyway,
+    which is worse.
+
+    So the rule is inverted: the environment starts EMPTY of anything
+    ``Settings`` reads, and ``_TEST_ENV`` puts back only what the suite chose.
+    The field list is read from the model, so a new setting is isolated the day
+    it is added rather than the day someone remembers this file.
+
+    ``Settings`` is ``case_sensitive=False``, so every case variant present has
+    to go, not just the upper-case spelling.
+    """
+    fields = {name.lower() for name in Settings.model_fields}
+    for key in list(os.environ):
+        if key.lower() in fields:
+            monkeypatch.delenv(key, raising=False)
 
 
 # --------------------------------------------------------------------------
@@ -220,11 +253,11 @@ def test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
     spool_dir = tmp_path / "data"
     (spool_dir / "tokens").mkdir(parents=True)
 
+    # Deny by default, then put back exactly what the suite asked for.
+    _clear_settings_environment(monkeypatch)
     for key, value in _TEST_ENV.items():
         monkeypatch.setenv(key, value)
-        monkeypatch.delenv(key.lower(), raising=False)
     monkeypatch.setenv("SPOOL_DIR", str(spool_dir))
-    monkeypatch.delenv("spool_dir", raising=False)
     for key in _REMOVED_ENV:
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv(key.lower(), raising=False)

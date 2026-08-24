@@ -374,11 +374,12 @@ def test_the_readme_and_the_hourly_comment_give_the_same_enum_warning(readme: st
 # ------------------------- stage vs stage_pct: one field, two metrics, one house
 #
 # `odu.opstat` renders as EITHER `stage` (enum code) or `stage_pct` (0-100
-# capacity percentage) — never both, and the hardware decides. This house is
-# variable-capacity, so `WHERE metric = 'stage'` matches nothing, for all time.
-# Both metrics are in the vocabulary lists, so the lists cannot express that;
-# only prose can, and only if the prose says the same thing in both documents and
-# stays tied to what the live capture actually showed.
+# capacity percentage) at any one instant, and the shape is chosen PER READING by
+# what the compressor is doing — not, as this block asserted until 2026-08-24,
+# fixed for the life of the hardware. This house emits both, interleaved, all
+# day (DEVIATIONS.md #179). Both metrics are in the vocabulary lists, so the
+# lists cannot express that; only prose can, and only if the prose says the same
+# thing in both documents and stays tied to what the archive actually holds.
 
 _VARCAP_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "bryant" / "status_varcap.json"
@@ -400,26 +401,34 @@ def _readme_section(readme: str, heading: str) -> str:
 
 
 def test_the_readme_documents_the_rendering_the_live_capture_showed(readme: str) -> None:
-    """Which metric THIS system emits is a fact about one response, so check it.
+    """Which shape a given reading takes is a fact about that reading, so check one.
 
-    The README states an outcome (``stage_pct``, never ``stage``) that is only
-    true because ``odu.type``/``odu.opstat`` came back the way they did. Pinning
-    the prose to the capture means a replaced outdoor unit — new fixture, new
-    rendering — makes the documentation fail rather than quietly mislead.
+    The committed capture's ``odu.opstat`` is a number, so it classifies as
+    ``stage_pct`` — and the README has to quote that capture, so a replaced
+    outdoor unit (new fixture, new value) makes the documentation fail rather
+    than quietly mislead.
+
+    What this test deliberately no longer asserts is that the *other* rendering
+    never appears. It used to require the word "never" in the section, which was
+    the pre-#179 claim written into a test: one reading cannot establish what a
+    system does for all time, and six days of archive said the opposite.
     """
     odu = _observed_odu()
-    emitted = bryant.stage_metric_for(odu["opstat"])
-    assert emitted == bryant.STAGE_PCT_METRIC
-    absent = bryant.STAGE_METRIC
+    this_reading = bryant.stage_metric_for(odu["opstat"])
+    assert this_reading == bryant.STAGE_PCT_METRIC
+    other = bryant.STAGE_METRIC
 
     section = _readme_section(readme, "## Compressor stage")
-    assert f"`{emitted}`" in section and f"`{absent}`" in section
+    assert f"`{this_reading}`" in section and f"`{other}`" in section
     assert odu["type"] in section, "the README does not name the odu.type observed"
     assert odu["opstat"] in section, "the README does not quote the observed opstat"
     assert "variable-capacity" in section.lower()
-    assert "never" in section.lower(), (
-        "the README names both renderings without saying the other one never "
-        "appears here — which is the whole trap"
+    assert "per reading" in section.lower(), (
+        "the README names both renderings without saying the shape is chosen "
+        "per reading — which is the whole trap"
+    )
+    assert "select both" in section.lower(), (
+        "the README stops short of the instruction that follows from it"
     )
 
 
@@ -461,23 +470,142 @@ def test_no_example_query_asks_for_one_stage_rendering_alone(readme: str) -> Non
     )
 
 
-def test_the_correlation_query_returns_the_rendering_this_system_emits(
+def test_the_correlation_query_returns_both_renderings_interleaved(
     readme: str, corpus: Path, con: duckdb.DuckDBPyConnection
 ) -> None:
     """Query 4, run against a corpus shaped like the real house.
 
-    The corpus emits ``stage_pct`` and no ``stage`` row, exactly as the live
-    system does. So the query's ``stage`` column comes back NULL in every row —
-    that is the trap, reproduced — while ``stage_pct`` carries the compressor
-    signal. If somebody ever "simplifies" the query back to ``stage`` only, this
-    test reports a column of nothing instead of shrugging.
+    The corpus flips ``odu.opstat`` between its two shapes partway through the
+    window, as the real one does several times a day. So the query has to return
+    buckets of each kind, and exactly one of the two columns is populated in any
+    given bucket — one field, one reading, one metric.
+
+    The assertion that matters is the last one: if somebody "simplifies" the
+    query back to a single rendering, a whole stretch of the window goes NULL and
+    this test says so. Its predecessor asserted the opposite — that ``stage`` is
+    NULL in *every* row — which was the pre-#179 claim baked into a fixture.
     """
     rows = _rows(con, _localise(_query_containing(readme, "hvac_instants"), corpus))
     assert rows
-    assert all(row["stage"] is None for row in rows), (
-        "a corpus with no 'stage' rows produced a non-null stage column"
+
+    worded = [row for row in rows if row["stage"] is not None]
+    percent = [row for row in rows if row["stage_pct"] is not None]
+    assert worded, "no bucket came back with the word rendering of odu.opstat"
+    assert percent, "no bucket came back with the percentage rendering"
+
+    # One reading yields one metric, so a bucket carries both only if the flip
+    # happened inside it -- at most one bucket in this corpus.
+    both = [row for row in rows if row["stage"] is not None and row["stage_pct"] is not None]
+    assert len(both) <= 1, "more than one bucket carried both renderings"
+    assert {row["stage_pct"] for row in percent} == {VARCAP_STAGE_PCT}
+    assert {row["stage"] for row in worded} == {"off"}
+    # And the trap itself: asking for one rendering loses real buckets.
+    assert len(worded) < len(rows) and len(percent) < len(rows)
+
+
+# ------------------------- the nesting hierarchy: the biggest wrong-number risk
+#
+# `sum(kwh)` across every channel is 2-3x the house, because a breaker is
+# physically inside its panel's feed CT. Until 2026-08-24 that was documented
+# only in `config/channel_map.json` notes -- which are stripped out of the
+# Parquet -- and in `historyview`'s module docstring, which is source code. An
+# LLM reading the catalog or the README could not have known.
+
+
+def test_both_documents_carry_the_nesting_hierarchy(readme: str) -> None:
+    """Same rule, README and Glue: a reader consults one and acts on the other."""
+    from energy_capture.aws import glue
+
+    lowered = readme.lower()
+    assert "never sum across levels" in lowered or "nest" in lowered
+    section = _readme_section(readme, "## Reading this data honestly")
+    assert "nest" in section.lower(), (
+        "the honesty section -- the one an LLM is pointed at before turning a "
+        "number into a sentence -- omits the nesting hierarchy"
     )
-    assert {row["stage_pct"] for row in rows} == {VARCAP_STAGE_PCT}
+    # Every level historyview classifies has to be named in the README, or the
+    # table tells a reader to total "within a level" without saying which.
+    for level in ("feed", "subfeed", "branch", "reference"):
+        assert level in section, f"the README's level table omits {level!r}"
+
+    for table in (glue.TABLE_ENERGY_RAW_30S, glue.TABLE_ENERGY_HOURLY):
+        assert glue.NESTING_WARNING_SHORT in _spec(table).description
+    assert glue.NESTING_WARNING in _spec(glue.TABLE_DIM_CHANNEL).description
+    assert glue.NESTING_WARNING in glue.DATABASE_DESCRIPTION
+
+
+def test_the_readme_level_table_matches_what_historyview_classifies(readme: str) -> None:
+    """The prose and the code that enforces it have to name the same levels.
+
+    ``historyview.LEVELS`` is what ``/ui/history`` actually groups by, so a
+    README that invented a level -- or omitted one -- would describe a rule
+    nobody implements.
+    """
+    from energy_capture import historyview
+
+    section = _readme_section(readme, "## Reading this data honestly")
+    for level in historyview.LEVELS:
+        if level == "other":  # Bryant status, not an energy level
+            continue
+        assert level in section, f"{level} is a real level and the README omits it"
+    # The feed level is ct_1_* on BOTH hubs; an earlier draft of this table said
+    # ct_1_* and ct_3_*, which is not what LEVEL_SQL classifies.
+    assert "ct_3_" not in section
+    assert "ct_1_a" in section
+
+
+def test_the_readme_counts_the_enum_metrics_correctly(readme: str) -> None:
+    """It said three for months while six metrics carried unit='enum'.
+
+    Naming only ``mode``/``stage``/``fan`` left ``op_status``, ``odu_mode`` and
+    ``idu_status`` looking like ordinary numbers, so ``avg(value)`` over them
+    read as a legitimate question. It is not: those are integer codes too.
+    """
+    from energy_capture.aws import glue
+
+    enum_metrics = sorted(m for m in model.UNIT_FOR_METRIC if model.UNIT_FOR_METRIC[m] == "enum")
+    assert len(enum_metrics) == 6
+    for metric in enum_metrics:
+        assert f"`{metric}`" in readme, f"{metric} carries unit='enum' and the README omits it"
+    assert glue._ENUM_METRIC_NAMES.count("/") + 1 == len(enum_metrics)
+    # The scope has to be stated positively, not left to be inferred from a
+    # list: the old text said the warning applied to three metrics "only",
+    # which actively excluded the other three.
+    assert "all six enum metrics" in readme
+
+
+def test_the_mwbc_volts_trap_is_in_the_readme(readme: str) -> None:
+    """Published nowhere queryable until 2026-08-24; now on dim_channel.category.
+
+    ``sources/leviton`` sums both poles of a 2-pole breaker for every metric.
+    Right for watts, wrong for volts on a multi-wire branch circuit.
+    """
+    from energy_capture.aws import glue
+
+    section = _readme_section(readme, "## Reading this data honestly")
+    assert "mwbc" in section.lower()
+    assert "240" in section and "volts" in section
+    spec = _spec(glue.TABLE_DIM_CHANNEL)
+    assert glue.MWBC_VOLTS_WARNING in spec.description
+
+
+def test_the_readme_does_not_deny_the_meter_dataset(readme: str) -> None:
+    """It denied it in three places while 183,711 rows sat in S3.
+
+    An LLM following the README concluded that verifying a bill against the
+    utility's own measurement was impossible.
+    """
+    from energy_capture.aws import glue
+
+    assert "designed but not built" not in readme
+    assert "designed for, not yet collected" not in readme
+    assert "energy_meter" in readme and "interval_s" in readme
+    assert glue.TABLE_ENERGY_METER in glue.DATABASE_DESCRIPTION or "energy_meter" in (
+        glue.DATABASE_DESCRIPTION
+    ), "the database description omits the meter dataset"
+    assert "interval_s" in glue.DATABASE_DESCRIPTION, (
+        "the database description names the meter dataset without its one trap"
+    )
 
 
 def test_the_odu_opstat_question_is_no_longer_listed_as_unproven(readme: str) -> None:
@@ -697,24 +825,48 @@ def _leviton_day(local_day: date) -> list[model.Observation]:
 #: ``odu.opstat = "35"``. See ``_bryant_status``.
 VARCAP_STAGE_PCT = 35.0
 
+#: ``stage`` code 0 — ``off``, from ``bryant.ENUM_TABLES``. The archive's two
+#: observed word-form values are ``off`` and ``dehumidify``; ``off`` is the one
+#: that most looks like "the compressor never ran" if a query drops it.
+VARCAP_STAGE_CODE = 0.0
+
+#: Local hour the corpus flips rendering on. Real flips track compressor state
+#: and happen several times a day; one clean flip is enough to catch a query
+#: that asks for a single rendering. It has to land INSIDE query 4's window
+#: (13:00-19:00 local) or the query sees only one shape and the flip proves
+#: nothing -- which is exactly how the first attempt at this failed.
+_STAGE_FLIP_LOCAL_HOUR = 16
+
 
 def _bryant_status(local_day: date, first_hour: int, last_hour: int) -> list[model.Observation]:
     """System + zone status for part of a local day (query 4's window).
 
-    The system channel emits ``stage_pct`` and **no ``stage`` row**, because that
-    is what this house's outdoor unit does: it is variable-capacity
-    (``odu.type = gs3ngiphp``), so ``odu.opstat`` is a capacity percentage and
-    the enum rendering never occurs (DEVIATIONS.md #59/#75.1). Building the
-    corpus the other way round would let an example query that only asks for
-    ``stage`` look correct here while returning an empty column against the real
-    bucket — the exact trap the README now warns about.
+    The system channel emits **both** renderings of ``odu.opstat``, interleaved,
+    because that is what this house's outdoor unit actually does. It is
+    variable-capacity (``odu.type = gs3ngiphp``), so ``opstat`` is a capacity
+    percentage *while the compressor modulates* and one of the enum words when
+    it is not — and the archive settles it: 8,091 ``stage`` rows beside 9,010
+    ``stage_pct`` rows over six days on one serial (DEVIATIONS.md #179).
+
+    This corpus was built the other way round until 2026-08-24 — ``stage_pct``
+    only, on the strength of #59/#75.1's prediction that the hardware picks one
+    rendering for life. That made every ``stage`` column in the README come back
+    uniformly NULL and, worse, made a test *assert* it, so the docs and the
+    fixtures agreed with each other and with nothing else. Both renderings are
+    present now, and a query that asks for one of them loses rows here exactly
+    as it does against the real bucket.
     """
     start, _ = timeutil.local_day_bounds_utc(local_day, tz=LOCAL_TZ)
     rows: list[model.Observation] = []
     for tick in range(first_hour * 120, last_hour * 120):
         ts = start + timedelta(seconds=30 * tick)
         rows.append(_obs(ts, "bryant", SERIAL, "system", "mode", 2.0))
-        rows.append(_obs(ts, "bryant", SERIAL, "system", "stage_pct", VARCAP_STAGE_PCT))
+        # One field, one reading, exactly one of the two metrics -- never both
+        # at the same instant, which is why they can never share a dedupe key.
+        if tick // 120 < _STAGE_FLIP_LOCAL_HOUR:
+            rows.append(_obs(ts, "bryant", SERIAL, "system", "stage_pct", VARCAP_STAGE_PCT))
+        else:
+            rows.append(_obs(ts, "bryant", SERIAL, "system", "stage", VARCAP_STAGE_CODE))
         rows.append(_obs(ts, "bryant", SERIAL, "system", "outdoor_temp_f", 88.0 + tick % 5))
         rows.append(_obs(ts, "bryant", SERIAL, "system", "blower_rpm", 900.0))
         rows.append(_obs(ts, "bryant", SERIAL, "system", "cfm", 1150.0))

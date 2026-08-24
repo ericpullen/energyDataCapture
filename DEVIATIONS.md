@@ -4520,3 +4520,175 @@ useful now.
 
 Verified end to end against the real archive and the real Pushover account:
 `digest_done findings=0 compared=0 skipped_unbaselined=28`, delivered.
+
+---
+
+## 192. The documentation sweep — what the catalog said that the archive did not
+
+*Review `docs/review-2026-08-23.md` block F. Six findings, all documentation, all
+in the two places an LLM actually reads: the Glue table/column comments and the
+README. None of them changes a byte of data; all of them change what a reader
+concludes from it.*
+
+### F1 — the nesting hierarchy was published nowhere (HIGH)
+
+**`sum(kwh)` across every channel is 2–3× the house.** A smart breaker is
+physically *inside* its panel's feed CT, and the HVAC subpanel feeder (`ct_2_*`)
+carries a blower that some branch breakers also see. Add them all up and the same
+electrons are counted two or three times — `historyview`'s own first draft
+returned about 3× the house total, and the number looked entirely plausible.
+
+This was known and written down. It was written down in `config/channel_map.json`
+notes, which are **stripped out of the Parquet**, and in `historyview`'s module
+docstring, which is source code. Neither reaches a catalog reader. `SHOW CREATE
+TABLE energy.energy_hourly` — the thing this project's own README tells an LLM to
+read first — said nothing about it.
+
+Now stated in five places, all of them queryable:
+
+| where | form |
+|---|---|
+| `DATABASE_DESCRIPTION` | `NESTING_WARNING`, full — it is the first document read |
+| `energy_raw_30s`, `energy_hourly` | `NESTING_WARNING_SHORT` (the budget is 2048 chars) |
+| `dim_channel` | `NESTING_WARNING`, full — this is the table readers are told to start from |
+| the canonical `channel_id` **column** comment | leads with it, because that is the column a reader `GROUP BY`s |
+| README "Reading this data honestly" + query rule 2 | with the level table |
+
+The README's level table is pinned by a test to `historyview.LEVELS`, so prose
+and the code that enforces it cannot drift apart. A first draft of that table
+said the feed level is `ct_1_*` and `ct_3_*`; `LEVEL_SQL` classifies `ct_1_*` on
+both hubs as feed and every other `ct_*` as subfeed. The test caught it.
+
+### F2 — the README denied a dataset that has 183,711 rows in it
+
+`energy_meter` was described as "designed but not built" in one place, `lge` as
+"designed for, not yet collected" in another, and the Athena section listed four
+tables. `DATABASE_DESCRIPTION` omitted the dataset entirely. An LLM following any
+of them concludes that checking a bill against the utility's own measurement is
+impossible — which is goal 3 of this project.
+
+Fixed in all four, and the database description now carries the `interval_s`
+trap, because naming the dataset without it is worse than not naming it.
+
+### F3 — #179's correction missed seven spots
+
+DEVIATIONS #179 established that `stage` and `stage_pct` are one field rendered
+two ways, chosen **per reading**, and that this house emits both interleaved —
+8,091 and 9,010 rows over six days. The correction reached
+`STAGE_REPRESENTATION_NOTE` and the README's own `## Compressor stage` section
+and stopped there. Still asserting the pre-#179 claim:
+
+- the README's **enum-decode table** — "**Not emitted on this system**" — the
+  single most likely lookup target in the document;
+- the README's "Reading this data honestly" — "`WHERE metric = 'stage'` matches
+  **zero rows for all time**";
+- both worked query examples (DuckDB and Athena), in three comments each;
+- `glue.py`'s `ODU_TYPE_OBSERVED` docstring, the `metric` column comment's
+  "mutually exclusive stage pair", and the `energy_raw_30s` inline comment
+  claiming one metric "can never appear at all";
+- `config/channel_map.json`'s `hvac_status` note — "may be permanently empty".
+
+**And the test fixtures.** `tests/test_docs.py`'s corpus emitted `stage_pct` and
+no `stage` row, with a docstring explaining that this is "exactly as the live
+system does", and a test *asserted* that query 4's `stage` column is NULL in
+every row. So the documentation, the fixtures and the tests all agreed with each
+other and with nothing else. The corpus now flips rendering at 16:00 local —
+inside query 4's 13:00–19:00 window, which the first attempt got wrong and the
+test caught — and the assertion is now that **both** columns carry signal in
+different buckets, which is the trap a reader actually needs reproduced.
+
+### F4 — `dim_channel.category`'s examples were invented
+
+The published comment offered `kitchen`, `lighting` and `backup-feed`. Not one is
+a value this pipeline can produce; the real spelling is `backup_feed`, with an
+underscore. `WHERE category = 'lighting'` returns zero rows and reads as "this
+house has no lighting circuits". The examples are generated from
+`dim.KNOWN_CATEGORIES` now, and a test asserts every member appears.
+
+### F5 — two traps published nowhere queryable
+
+**The enum warning was scoped to three of six metrics.** `op_status`, `odu_mode`
+and `idu_status` all carry `unit = 'enum'`, and the README said the "mean and p95
+are meaningless" warning "applies to `mode`, `stage` and `fan` **only**". Stating
+it as three-of-six is worse than stating it vaguely: it actively licenses
+`avg(value)` over the other three.
+
+**The MWBC volts trap.** `breaker_p5`, `breaker_p10` and `breaker_p13` are
+multi-wire branch circuits, and `sources/leviton` sums both poles for *every*
+metric. Right for `watts` — two independent 120 V legs, so the sum is the real
+load — wrong for `volts`, which comes back ~240. This lived only in
+`channel_map.json` notes. `dim_channel.category = 'mwbc'` is the only queryable
+way to find these channels, so the warning now lives on that column's comment and
+in the `dim_channel` table description.
+
+### F6 — four smaller ones
+
+- `compare.py`'s "Because there is no S3 yet" — there has been since 2026-08-19.
+  The real reason it reads the spool is better than the stale one: the uploader
+  is hourly, so the last hour exists only in the spool and an S3-backed
+  comparison would silently compare an incomplete final hour.
+- `energycap-container.sh`'s "NOTHING IN THIS FILE HAS EVER BEEN EXECUTED",
+  sitting directly above its own measurement log. Narrowed to what is still true:
+  the *development Mac* cannot exercise it.
+- `.env.example`'s four `LGE_*` lines carried trailing `# from the approval
+  email`. python-dotenv strips that; **Apple `container run --env-file` and
+  Docker's `--env-file` do not**, so the client id would have been read with the
+  comment attached and the token exchange would have failed with an opaque 401.
+- README's "the only placeholder left in `channel_map.json` is the future LG&E
+  meter" — the meters became real entries on 2026-08-23.
+
+### Budget note
+
+The Glue description limit is 2048 characters and three of the five tables are now
+within 25 of it (`energy_raw_30s` has **9** characters of headroom, `energy_hourly`
+10, `dim_channel` 23). Several of
+these strings are *generated* — the enum decode grows with `bryant.ENUM_TABLES`,
+the category list with `dim.KNOWN_CATEGORIES`, the metric list with the schema —
+so the next appended enum code will overflow `energy_raw_30s`. That fails loudly
+(`_fit` raises, `create-glue-tables` stops) rather than silently truncating, which
+is the designed behaviour, but the next person to add a metric should expect to
+tighten prose in the same commit.
+
+---
+
+## 193. Test isolation was an allowlist, and it covered 16 of 48 settings
+
+*Review block G. Three tests had been failing on this machine for two sessions;
+the failures were the visible tenth of it.*
+
+`tests/conftest.py` opens by promising that "a developer's real `.env` can never
+reach a test". It blanks `Settings.model_config["env_file"]`, which does stop
+dotenv loading — and **pydantic-settings still reads `os.environ`**. The actual
+defence was `_TEST_ENV`, a hand-maintained dict of fake values, and it named 16
+of `Settings`' 48 fields.
+
+The other 32 came from whatever the developer had exported. On this machine that
+included a real `LGE_CLIENT_ID=gbc_18`, which made three tests fail outright:
+
+- `test_no_lge_credential_has_a_default_value` — asserting `lge_client_id == ""`
+  against a shell that had set it;
+- `test_no_client_id_is_a_clear_error_not_a_broken_url` — the error it exists to
+  prove could not be raised, because the id was present;
+- `test_greenbutton_daily_skips_quietly_when_connect_is_not_configured` — got
+  `not_authorized` instead of `not_configured`, because from the suite's point of
+  view Connect *was* configured.
+
+**The loud failures were the good case.** `LEVITON_INGEST`, `SCHEDULED_JOBS`,
+both `PUSHOVER_*`, `HEALTHZ_URL`, `BLACKSTART_INVENTORY_PATH` and the five
+integrity thresholds were inherited the same way and simply passed — the suite
+was running against one machine's configuration and reporting green. A test that
+passes for a reason that is not in the repository is not a test.
+
+**Fixed by inverting the rule.** `_clear_settings_environment` deletes every
+variable `Settings` reads before `_TEST_ENV` puts back what the suite chose. The
+field list comes from `Settings.model_fields`, so a new setting is isolated the
+day it is added rather than the day someone remembers this file — which is the
+failure mode that produced this in the first place. `Settings` is
+`case_sensitive=False`, so every case variant present in `os.environ` is removed,
+not just the upper-case spelling.
+
+`test_no_setting_can_be_inherited_from_the_developers_shell` asserts the
+consequence directly: any setting the suite did not ask for holds its declared
+default. Verified by sabotage — stubbing the clear out makes it fail on
+`LGE_CLIENT_ID` — and the suite is green for the first time in three sessions:
+**1,845 passed, 0 failed.**

@@ -113,11 +113,14 @@ from energy_capture.config import get_settings
 from energy_capture.logging import get_logger
 from energy_capture.sources import bryant
 from energy_capture.stages.daily import COMPONENTS as DAILY_COMPONENTS
-from energy_capture.stages.dim import DIM_SCHEMA
+from energy_capture.stages.dim import DIM_SCHEMA, KNOWN_CATEGORIES
 
 __all__ = [
     "CANONICAL_COLUMN_COMMENTS",
     "DATABASE_DESCRIPTION",
+    "MWBC_VOLTS_WARNING",
+    "NESTING_WARNING",
+    "NESTING_WARNING_SHORT",
     "DIM_CHANNEL_SCHEMA",
     "ENUM_ROLLUP_WARNING",
     "GLUE_COMMENT_MAX_LEN",
@@ -363,17 +366,21 @@ _ENUM_METRIC_NAMES: Final[str] = "/".join(
 #: integer codes, and two of those four are arithmetic on a label.
 ENUM_ROLLUP_WARNING: Final[str] = (
     f"ENUM ROWS ARE ROLLED UP HERE: {_ENUM_METRIC_NAMES} carry unit='enum', so "
-    "mean/min/max/p95 aggregate integer CODES; mean and p95 over codes are "
-    "MEANINGLESS (no midpoint between 'cool' and 'auto'). For those rows only "
+    "mean/min/max/p95 aggregate integer CODES. mean and p95 over codes are "
+    "MEANINGLESS (no midpoint between 'cool' and 'auto'); for those rows only "
     "min, max and sample_count carry meaning."
 )
 
 #: The outdoor unit this pipeline actually polls, read off the first live
 #: ``getInfinityStatus`` response (``odu.type``). ``gs3ngiphp`` is a Greenspeed
 #: variable-capacity heat pump, which is what settled DEVIATIONS.md #59/#75.1:
-#: its ``opstat`` is a capacity percentage, not one of the words in the enum
-#: table. Named here because "which rendering does THIS system emit" is the one
-#: question the vocabulary lists cannot answer.
+#: its ``opstat`` is a capacity percentage *while the compressor modulates*, and
+#: one of the enum table's words when it does not. Named here because "which
+#: renderings does THIS system emit" is the one question the vocabulary lists
+#: cannot answer -- and DEVIATIONS.md #179 is why the answer is "both": six days
+#: of archive on this serial hold 8,091 ``stage`` rows beside 9,010 ``stage_pct``
+#: ones. It is NOT the "hardware picks one for life" fact this comment used to
+#: assert.
 ODU_TYPE_OBSERVED: Final[str] = "gs3ngiphp"
 
 #: ``odu.opstat`` — the compressor's operating state, and the HVAC signal that
@@ -584,8 +591,8 @@ def _local_partition_clause(partition_keys: tuple[str, ...], source_column: str)
     )
     return (
         f"PARTITIONED ON LOCAL DATE ({_TZ}), not UTC: {which} from "
-        f"{source_column} — a UTC partition would cut the local day at 19:00 or "
-        "20:00, per DST."
+        f"{source_column} — a UTC partition would cut the local day at 19:00 "
+        "or 20:00."
     )
 
 
@@ -595,25 +602,25 @@ def _local_partition_clause(partition_keys: tuple[str, ...], source_column: str)
 #: states the same qualified form — the two documents have to agree.
 _DEDUPE_CLAUSE = (
     "Dedupe key: (ts_utc, source, device_id, channel_id, metric). Every writer "
-    "dedupes on it: at most one row per key, so no query over a settled "
-    "partition needs DISTINCT."
+    "dedupes on it: one row per key, so no query over a settled partition "
+    "needs DISTINCT."
 )
 _GAP_CLAUSE = (
     "GAPS MEAN COLLECTOR DOWNTIME, NEVER ZERO LOAD. Nothing is interpolated, "
     "zero-filled or held over: a null API field emits no row, a failed poll "
-    "cycle emits none at all. An absent row means 'not observed', NOT 'the load "
-    "was 0' — never read one as an appliance being off, and never SUM across one "
-    "as if continuous. A recorded 0.0 is different and real: Leviton fw v2 emits "
-    "genuine spurious zeros, archived verbatim, unfiltered."
+    "cycle none at all. An absent row means 'not observed', NOT 'the load was "
+    "0' — never read one as an appliance off, never SUM across one as if "
+    "continuous. A recorded 0.0 is different and real: Leviton fw v2 emits "
+    "genuine spurious zeros, archived verbatim."
 )
 #: The same rule stated for the derived hourly grain, where a gap shows up as an
 #: absent bucket or a low sample_count rather than as a dropped poll cycle. The
 #: "do not read it as zero" half is HOURLY_GAP_WARNING, one paragraph up in the
 #: same comment, so it is not repeated here.
 _GAP_CLAUSE_HOURLY = (
-    "GAPS MEAN COLLECTOR DOWNTIME, NEVER ZERO LOAD: nothing is interpolated, "
-    "zero-filled or held over. A recorded 0.0 is real: Leviton fw v2 spurious "
-    "zeros are archived verbatim."
+    "GAPS MEAN COLLECTOR DOWNTIME, NEVER ZERO LOAD: nothing is interpolated or "
+    "zero-filled. A recorded 0.0 is real: Leviton fw v2 spurious zeros are "
+    "archived verbatim."
 )
 #: The same rule for the day-grain table, where "a failed poll cycle" is not the
 #: shape the gap takes and the 2048-character description budget is tighter.
@@ -622,6 +629,52 @@ _GAP_CLAUSE_DAY = (
     "interpolated or zero-filled: a day the collector or the Carrier cloud did "
     "not deliver is simply absent, and an absent day must never be read as zero "
     "consumption."
+)
+
+
+#: The single biggest wrong-number risk in this archive, and until 2026-08-24 it
+#: was published nowhere a reader of the catalog could see it: it lived in
+#: ``config/channel_map.json`` notes (stripped from the Parquet) and in
+#: ``historyview``'s module docstring (source, not data). A smart breaker is
+#: physically INSIDE its panel's feed CT, so an unqualified ``sum(kwh)`` over
+#: every channel counts the same electrons two or three times — it returned 3x
+#: the house total in historyview's own first draft, and it looks entirely
+#: plausible. Stated on the database, both time-series tables and dim_channel,
+#: because a reader can enter the catalog at any one of them.
+#: Every category this pipeline can emit, generated so the published examples
+#: cannot drift from ``dim.KNOWN_CATEGORIES`` the way the hand-written ones did.
+_CATEGORY_LIST: Final[str] = ", ".join(sorted(KNOWN_CATEGORIES))
+
+NESTING_WARNING: Final[str] = (
+    "CHANNELS NEST — NEVER SUM ACROSS LEVELS. A breaker is physically inside "
+    "its panel's feed CT, so an unqualified SUM over every channel counts the "
+    "same energy 2-3x and looks plausible. Levels, outermost first: ct_1_* is "
+    "the panel feed, any other ct_* a subfeed inside it, breaker_p* the "
+    "circuits inside that, and panel_leg_* volts/hz with no energy at all. "
+    "Total within ONE level. The house is the sum of the ct_1_* feeds, and only "
+    "that is comparable to energy_meter."
+)
+
+#: The same rule where the 2048-character budget has no room for the full one.
+#: The load-bearing halves are "do not sum across levels" and "the feed CTs are
+#: the house"; everything else is elaboration and is what gets dropped first.
+NESTING_WARNING_SHORT: Final[str] = (
+    "CHANNELS NEST — NEVER SUM ACROSS LEVELS: a breaker sits inside its panel's "
+    "feed CT, so a SUM over all channels reads 2-3x the truth; the ct_1_* feeds "
+    "are the house."
+)
+
+#: Three Panel A breakers are multi-wire branch circuits, and ``sources/leviton``
+#: sums both poles of a 2-pole breaker for EVERY metric. That is right for watts
+#: — the two legs are independent circuits, so their sum is the breaker's real
+#: load — and wrong for volts, which comes back ~240 on a pair of 120 V legs.
+#: Published on ``dim_channel.category``, because ``category = 'mwbc'`` is the
+#: only queryable way to find these channels: nothing in the fact tables marks
+#: them, and the channel_map notes that explain it never reach Parquet.
+MWBC_VOLTS_WARNING: Final[str] = (
+    "TRAP on category='mwbc': both poles are summed for every metric, so watts "
+    "is correct but volts reads ~240 on two 120 V legs. Never read volts there "
+    "as the circuit voltage."
 )
 
 
@@ -664,18 +717,23 @@ CANONICAL_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
         "dim_channel join key (source, device_id, channel_id)."
     ),
     "channel_id": (
-        "Channel in the device. Leviton: breaker_p{position} (2-pole = ONE "
-        "channel), ct_{channel}_{a,b} per CT leg, panel_leg_{a,b} for hub "
-        "volts/hz. Bryant: zone_{n}, system; daily energy uses "
-        f"{_DAILY_CHANNELS}."
+        # Leads with the nesting rule because this is the column a reader
+        # GROUP BYs, and grouping is one step from summing across levels. The
+        # daily-energy channel names left with it: energy_daily overrides this
+        # comment with its own, so naming them here reached no table.
+        "Channel in the device; THESE NEST: breaker_p* sit inside their "
+        "panel's ct_* feed — summing across them double counts. Leviton: "
+        "breaker_p{position} (2-pole = ONE channel), ct_{channel}_{a,b} per CT "
+        "leg, panel_leg_{a,b} = volts/hz. Bryant: zone_{n}, system"
     ),
     "metric": (
         # The full catalog stopped fitting at 28 metrics: the raw_30s names alone
         # are 251 of the 255 characters allowed, leaving no room for a word of
         # prose. So this enumerates the metrics a reader gets WRONG — watts, the
-        # mutually exclusive stage pair, and the day-grain pair that is barred
-        # from this table — names the rest by family, and points at the one
-        # enumeration that cannot go stale. Day-grain names are generated.
+        # stage pair (both renderings occur, interleaved: DEVIATIONS.md #179),
+        # and the day-grain pair that is barred from this table — names the rest
+        # by family, and points at the one enumeration that cannot go stale.
+        # Day-grain names are generated.
         "What is measured; enumerate with SELECT DISTINCT metric. "
         "watts/amps/volts/hz (leviton); temperatures, setpoints, humidity, mode, "
         "stage|stage_pct, fan, rpm, cfm, static_pressure (bryant status); "
@@ -880,9 +938,18 @@ _DIM_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
         "trivially printable and joinable. Matches the blackstart slot numbers."
     ),
     "category": (
-        "Normalized role of the circuit (e.g. hvac, kitchen, lighting, "
-        "backup-feed), derived from the blackstart circuitType/role unless "
-        "channel_map.json overrides it. Use it to group circuits in a query."
+        # The examples used to be hand-written -- `kitchen`, `lighting`,
+        # `backup-feed` -- and not one of the three was a value this pipeline
+        # can produce (the real spelling is backup_feed, with an underscore).
+        # A reader who trusted them wrote WHERE category='lighting', got zero
+        # rows, and read that as "no lighting circuits in this house". They are
+        # generated from dim.KNOWN_CATEGORIES now, so the comment cannot drift
+        # from the vocabulary again -- and the enumeration a query should
+        # actually trust is named first, because a channel MAY carry a category
+        # outside the known set (it is normalised and kept, with a WARN).
+        "Circuit role (blackstart; channel_map.json overrides). SELECT "
+        f"DISTINCT enumerates; set: {_CATEGORY_LIST}. 'mwbc' hides a volts "
+        "trap: see table comment."
     ),
     "room": "Room or area the circuit serves, where the inventory records one.",
     "priority": (
@@ -915,10 +982,22 @@ DATABASE_DESCRIPTION: Final[str] = _fit(
         "Household energy and HVAC time series from the energyDataCapture "
         "pipeline (energycap): 30-second Leviton LWHEM-2 load-center and "
         "Bryant/Carrier Infinity readings, an hourly rollup derived from them, "
-        "Bryant daily energy totals, and dim_channel, the semantic layer that "
-        "says what each channel actually is.",
+        "Bryant daily energy totals, LG&E utility revenue-meter intervals, and "
+        "dim_channel, the semantic layer that says what each channel actually "
+        "is.",
+        # energy_meter is the one dataset that is not ours, and the one whose
+        # trap is invisible from the schema: it was omitted from this
+        # description entirely until 2026-08-24, so a reader who started here
+        # concluded that verifying a bill was impossible.
+        "energy_meter is the UTILITY's own measurement — the independent check "
+        "on everything else. It publishes the SAME energy at several interval "
+        "lengths, so SUM(value) without a WHERE on interval_s multiple-counts; "
+        "its dedupe key is the canonical tuple PLUS interval_s.",
         f"Everything is partitioned on the LOCAL date in {_TZ}, never on UTC.",
         "Start from dim_channel and join on (source, device_id, channel_id).",
+        # First document read, so the two rules that produce a WRONG NUMBER
+        # rather than a missing one go here, ahead of any table.
+        NESTING_WARNING,
         _GAP_CLAUSE,
         # The database description is the first thing an LLM reads, and this is
         # the one gap that looks like a vocabulary question rather than a gap.
@@ -934,19 +1013,24 @@ _RAW_30S_DESCRIPTION = _paragraphs(
     "new sensor adds rows, not columns.",
     _local_partition_clause(("year", "month", "day"), "ts_local"),
     _DEDUPE_CLAUSE,
-    "A local day normally holds EITHER hourly part-*.parquet files OR the "
-    "compacted day-*.parquet, never both: the compactor writes day-{D}.parquet, "
-    "then archives the parts to energy/raw_30s_parts_archive/ (not a table "
-    "here), so nothing is double counted. THE ONE EXCEPTION: both are present "
-    "while a compaction is in flight, and stay so if it died between those "
-    "steps; rows they share "
-    "count twice. The tell is part-*.parquet beside day-*.parquet, or totals ~2x "
-    "neighbouring days'. Re-run `energycap compact-daily --start D --end D`; "
-    "until then, dedupe that day on the key above.",
+    # Tightened again 2026-08-24 to make room for NESTING_WARNING_SHORT. The
+    # facts are unchanged; the words are fewer.
+    "A local day normally holds EITHER part-*.parquet OR the compacted "
+    "day-*.parquet, never both: the compactor writes day-{D}.parquet then "
+    "archives the parts to energy/raw_30s_parts_archive/ (not a table here). "
+    "THE ONE EXCEPTION is a compaction in flight, or one that died between "
+    "those steps: shared rows count twice. The tell is part-*.parquet beside "
+    "day-*.parquet, or totals ~2x neighbours. Re-run `energycap compact-daily "
+    "--start D --end D`; until then dedupe that day.",
+    # The wrong-number rule, stated where a reader meets `watts` — summing
+    # instantaneous power across channels double counts exactly as kWh does.
+    NESTING_WARNING_SHORT,
     _GAP_CLAUSE,
     # The gap rule has a metric-shaped instance here, and it is invisible from
-    # the metric list: on this system one of the two `stage` metrics can never
-    # appear at all, so filtering on it returns an empty result forever.
+    # the metric list: `stage` and `stage_pct` are one field rendered two ways,
+    # chosen per reading, so filtering on either alone silently drops about half
+    # the compressor's day (DEVIATIONS.md #179 — this comment used to claim the
+    # far worse thing, that one of them never appears here at all).
     STAGE_REPRESENTATION_NOTE,
     # The roster is already on this table's `value` column; the description only
     # needs to say where the codes are decoded.
@@ -954,19 +1038,20 @@ _RAW_30S_DESCRIPTION = _paragraphs(
     # Tightened 2026-08-22 to leave headroom: this description sits within a few
     # characters of the 2048 budget, and every new metric grows the comments
     # around it. The facts are unchanged; the words are fewer.
-    "Day-grain rows (kwh_day, cost_day_usd) are barred here — they live in "
-    "energy_daily. Join dim_channel on (source, device_id, channel_id); prefer "
-    "energy_hourly beyond a day.",
+    "Day-grain rows (kwh_day, cost_day_usd) are barred — see energy_daily. "
+    "Join dim_channel on (source, device_id, channel_id); beyond a day use "
+    "energy_hourly.",
 )
 
 _HOURLY_DESCRIPTION = _paragraphs(
     "GRAIN: one row per (hour bucket, source, device, channel, metric) derived "
     "from energy_raw_30s. Regenerable: `energycap rollup --start D --end D` "
-    "rebuilds whole local days, healing late data and bug fixes.",
+    "rebuilds whole local days, healing late data and bugs.",
     f"{HOURLY_GAP_WARNING}",
     "sample_count is on every row for that reason; kwh is observed-time-only — "
     "mean * sample_count * poll_interval_s / 3.6e6, never extrapolated across a "
     "gap — and NULL (not 0) for every metric but watts.",
+    NESTING_WARNING_SHORT,
     # The rollup excludes only DAY_GRAIN_METRICS, so the enum metrics ARE here,
     # aggregated over their integer codes. There is no `value` column to hang
     # the decode on, so it lives here — where a reader meets it before writing
@@ -974,14 +1059,13 @@ _HOURLY_DESCRIPTION = _paragraphs(
     # warning from swallowing stage_pct, which really is averageable.
     f"{ENUM_ROLLUP_WARNING} {STAGE_MEAN_NOTE} {_DECODE_POINTER.capitalize()}.",
     STAGE_REPRESENTATION_NOTE,
-    "Buckets are LOCAL-day hours keyed by hour_start_utc: 25 per series on the "
-    "DST fall-back day, 23 on spring-forward; local_hour_start is the label, "
-    "ambiguous there.",
+    "Buckets are LOCAL-day hours keyed by hour_start_utc: 25 per series on DST "
+    "fall-back, 23 on spring-forward; local_hour_start is the label, ambiguous "
+    "there.",
     _local_partition_clause(("year", "month"), "local_hour_start"),
     _GAP_CLAUSE_HOURLY,
     "Dedupe key: (hour_start_utc, source, device_id, channel_id, metric). "
-    "Day-grain metrics (kwh_day, cost_day_usd) are excluded from the rollup "
-    "input.",
+    "Day-grain metrics (kwh_day, cost_day_usd) are excluded from the rollup.",
 )
 
 _DAILY_DESCRIPTION = _paragraphs(
@@ -1088,19 +1172,23 @@ _METER_COLUMN_COMMENTS: Final[Mapping[str, str]] = {
 
 _DIM_DESCRIPTION = _paragraphs(
     "GRAIN: one row per channel — (source, device_id, channel_id). The semantic "
-    "layer: what each Leviton breaker/CT and each Bryant channel actually is. "
-    "THIS IS THE TABLE TO START FROM; join it to energy_raw_30s, energy_hourly "
-    "and energy_daily on (source, device_id, channel_id).",
-    "Not time series and not partitioned: a single Parquet file, rebuilt and "
-    "atomically overwritten by `energycap build-dim` from the hand-maintained "
-    "config/channel_map.json joined to the blackstart panel inventory. "
-    "Blackstart is the source of truth for label/panel/slots/category/priority/"
-    "estimated_watts; explicit fields in channel_map.json override it.",
-    "COVERAGE IS NOT GUARANTEED. A live channel nobody has mapped yet is simply "
-    "absent (build-dim warns about it), so use a LEFT JOIN — an unmapped "
-    "channel must never drop a real measurement from a result.",
+    "layer: what each Leviton breaker/CT, each Bryant channel and each LG&E "
+    "meter actually is. THIS IS THE TABLE TO START FROM; join it to every other "
+    "table here on (source, device_id, channel_id).",
+    "Not time series and not partitioned: one Parquet file, rebuilt and "
+    "atomically overwritten by `energycap build-dim` from "
+    "config/channel_map.json joined to the blackstart panel inventory, the "
+    "source of truth for label/panel/slots/category/priority/estimated_watts; "
+    "explicit channel_map.json fields override it.",
+    "COVERAGE IS NOT GUARANTEED. A live channel nobody has mapped is simply "
+    "absent (build-dim warns), so LEFT JOIN — an unmapped channel must never "
+    "drop a real measurement.",
     "estimated_watts is a planning estimate from the inventory, never a "
     "measurement; use energy_hourly for what actually happened.",
+    # This is the table a reader is told to start from, so the rule that turns
+    # a correct-looking query into a 2-3x wrong number belongs here in full.
+    NESTING_WARNING,
+    MWBC_VOLTS_WARNING,
     # The single authoritative home for the enum decode, and deliberately here:
     # this is the semantic-layer table, the decode is a dictionary, and one copy
     # in a 2048-character field beats two copies that both overflow. Every

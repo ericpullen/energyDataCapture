@@ -53,6 +53,7 @@ from energy_capture.sources.leviton import (
     panel_leg_channel_id,
 )
 from energy_capture.stages.daily import COMPONENTS as DAILY_COMPONENTS
+from energy_capture.stages.dim import KNOWN_CATEGORIES
 from tests.conftest import BUCKET, utc
 
 DATABASE = "energy_test"
@@ -1218,11 +1219,80 @@ def test_the_channel_id_comment_matches_the_functions_that_mint_the_ids() -> Non
     assert bryant.SYSTEM_CHANNEL in comment
 
 
-def test_the_channel_id_comment_lists_every_bryant_daily_component() -> None:
+def test_the_channel_id_comment_warns_that_the_channels_nest() -> None:
+    """The single biggest wrong-number risk, on the column a reader GROUP BYs.
+
+    Until 2026-08-24 the nesting hierarchy was documented only in
+    ``config/channel_map.json`` notes -- which are stripped from the Parquet --
+    and in ``historyview``'s module docstring, which is source. Nothing an LLM
+    reading the catalog could see said that ``sum(kwh)`` over every channel
+    returns two to three times the house.
+
+    This is the canonical comment, so it reaches every table that does not
+    override it: raw_30s, hourly and dim_channel -- the three where a channel is
+    a physical thing that can contain another one.
+    """
     comment = glue.CANONICAL_COLUMN_COMMENTS["channel_id"]
-    for spec in DAILY_COMPONENTS:
-        assert spec.channel_id in comment, f"{spec.channel_id} missing from channel_id comment"
-    assert len(DAILY_COMPONENTS) == 8
+    assert "NEST" in comment
+    assert "double counts" in comment
+    for table in (
+        glue.TABLE_ENERGY_RAW_30S,
+        glue.TABLE_ENERGY_HOURLY,
+        glue.TABLE_DIM_CHANNEL,
+    ):
+        spec = next(s for s in glue.table_specs() if s.name == table)
+        assert spec.comment_for("channel_id") == comment
+
+
+def test_every_table_that_holds_energy_states_the_nesting_rule() -> None:
+    """A reader can enter the catalog at any table; each has to carry the rule.
+
+    ``energy_daily`` is exempt: its channels are Carrier's HVAC components, which
+    do not contain one another. ``energy_meter`` is exempt for the same reason --
+    one revenue meter per service, no hierarchy -- and it carries its own
+    never-sum-two-meters warning instead.
+    """
+    for table, expected in (
+        (glue.TABLE_ENERGY_RAW_30S, glue.NESTING_WARNING_SHORT),
+        (glue.TABLE_ENERGY_HOURLY, glue.NESTING_WARNING_SHORT),
+        (glue.TABLE_DIM_CHANNEL, glue.NESTING_WARNING),
+    ):
+        spec = next(s for s in glue.table_specs() if s.name == table)
+        assert expected in spec.description, f"{table} omits the nesting rule"
+    assert glue.NESTING_WARNING in glue.DATABASE_DESCRIPTION
+
+
+def test_the_category_comment_names_only_categories_that_can_occur() -> None:
+    """It used to invent three: ``kitchen``, ``lighting`` and ``backup-feed``.
+
+    Not one was a value this pipeline can produce -- the real spelling is
+    ``backup_feed``, with an underscore -- so ``WHERE category = 'lighting'``
+    returned nothing and read as "this house has no lighting circuits". The
+    examples are generated from :data:`dim.KNOWN_CATEGORIES` now.
+    """
+    spec = next(s for s in glue.table_specs() if s.name == glue.TABLE_DIM_CHANNEL)
+    comment = spec.comment_for("category")
+    for invented in ("kitchen", "lighting", "backup-feed"):
+        assert invented not in comment
+    for category in sorted(KNOWN_CATEGORIES):
+        assert category in comment, f"{category} is missing from the category comment"
+
+
+def test_the_mwbc_volts_trap_is_published_where_it_can_be_queried() -> None:
+    """``sources/leviton`` sums both poles of a 2-pole breaker for EVERY metric.
+
+    Right for watts -- the two legs of a multi-wire branch circuit are
+    independent, so their sum is the breaker's real load -- and wrong for volts,
+    which comes back ~240 on a pair of 120 V legs. Three Panel A breakers are
+    MWBCs, and ``category = 'mwbc'`` is the only way to find them from a query:
+    nothing in the fact tables marks them, and the ``channel_map.json`` notes
+    that explain it never reach Parquet.
+    """
+    assert "mwbc" in KNOWN_CATEGORIES
+    spec = next(s for s in glue.table_specs() if s.name == glue.TABLE_DIM_CHANNEL)
+    assert glue.MWBC_VOLTS_WARNING in spec.description
+    assert "mwbc" in spec.comment_for("category")
+    assert "volts trap" in spec.comment_for("category")
 
 
 def test_the_daily_channel_id_comment_lists_exactly_the_eight_components() -> None:

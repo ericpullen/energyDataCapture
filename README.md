@@ -29,7 +29,7 @@ locally, Athena remotely, or by an LLM over MCP.
 - [Commands](#commands)
 - [Querying with DuckDB](#querying-with-duckdb)
 - [The same queries in Athena](#the-same-queries-in-athena)
-- [Enum decodes: `mode`, `stage`, `fan`](#enum-decodes-mode-stage-fan)
+- [Enum decodes: the six `unit = 'enum'` metrics](#enum-decodes-the-six-unit--enum-metrics)
 - [Compressor stage: `stage` vs `stage_pct`](#compressor-stage-stage-vs-stage_pct)
 - [Reading this data honestly](#reading-this-data-honestly)
 - [Settled by the first live run](#settled-by-the-first-live-run-2026-08-17)
@@ -54,11 +54,11 @@ Every dataset shares the same eight columns. A new sensor adds **rows, never col
 |---|---|---|
 | `ts_utc` | `timestamp[us, tz=UTC]` | **The canonical instant.** All sorting, hourly bucketing and dedupe use this. |
 | `ts_local` | `timestamp[us]`, naive | Wall clock in `America/Kentucky/Louisville`, for humans and LLMs. No offset attached; deliberately ambiguous for one hour each November. |
-| `source` | string | `leviton`, `bryant`, or `lge` (designed for, not yet collected). |
+| `source` | string | `leviton` (LWHEM-2 load centres), `bryant` (Carrier Infinity HVAC), `lge` (the utility revenue meter — collected since 2026-08-23, in `energy_meter` only). |
 | `device_id` | string | Leviton hub id (= panel serial), Bryant system serial, LG&E meter id. |
 | `channel_id` | string | Leviton: `breaker_p{position}` (a 2-pole breaker is **one** channel), `ct_{channel}_{a,b}`, `panel_leg_{a,b}`. Bryant: `system`, `zone_{n}`, and the lowercase energy components (`cooling`, `hpheat`, `eheat`, `fan`, `fangas`, `looppump`, `gas`, `reheat`). |
 | `metric` | string | `watts`, `amps`, `volts`, `hz`, `indoor_temp_f`, `outdoor_temp_f`, `setpoint_heat_f`, `setpoint_cool_f`, `humidity_pct`, `mode`, `stage`, `stage_pct`, `fan`, `blower_rpm`, `cfm`, `compressor_rpm`, `outdoor_coil_temp_f`, `static_pressure`, `idu_cfm`, `idu_iducfm`, `odu_iducfm`, `op_status`, `odu_mode`, `idu_status`, `kwh_day`, `cost_day_usd`, `kwh_interval`, `ccf_interval`. The Glue metric column comment no longer lists all of them (28 names overflow the 255-character limit); SELECT DISTINCT on this column is the authoritative enumeration. The last two live only in the meter table, and LG&E Connect has only ever served electric — so the gas one has a table and a unit but no rows yet. |
-| `value` | double | The number. Enum metrics store a small integer code — see [the decodes](#enum-decodes-mode-stage-fan). |
+| `value` | double | The number. Enum metrics store a small integer code — see [the decodes](#enum-decodes-the-six-unit--enum-metrics). |
 | `unit` | string | `W`, `A`, `V`, `Hz`, `degF`, `rpm`, `CFM`, `inwc`, `pct`, `enum`, `kWh`, `USD`, `CCF`. Constant per metric. |
 
 Those two lists are the **complete** vocabularies, not a sample: they are pinned
@@ -93,13 +93,14 @@ writer dedupes on exactly that tuple, so a query over a settled partition never 
 `DISTINCT`.
 **Sort order inside every file:** `(ts_utc, source, device_id, channel_id)`. ZSTD compressed.
 
-### The four datasets
+### The five datasets
 
 | S3 prefix | Glue table | grain | partitioned by | file name |
 |---|---|---|---|---|
 | `energy/raw_30s/` | `energy_raw_30s` | one 30s observation | local `year`/`month`/`day` | `part-{YYYYMMDD}T{HH}.parquet`, compacted to `day-{YYYYMMDD}.parquet` |
 | `energy/hourly/` | `energy_hourly` | one hour × channel × metric (derived, disposable) | local `year`/`month` | `rollup-{YYYYMMDD}.parquet` |
 | `energy/daily/` | `energy_daily` | one local day × HVAC component × metric | local `year` | `bryant-{YYYYMM}.parquet` |
+| `energy/meter/` | `energy_meter` | one LG&E metering interval × meter × metric × **`interval_s`** | local `year` | `lge-{YYYYMM}.parquet` |
 | `energy/dim_channel/` | `dim_channel` | one channel — the semantic layer | not partitioned | `dim_channel.parquet` |
 
 `energy/raw_30s_parts_archive/` also exists and is **deliberately not a table**: once a
@@ -116,8 +117,14 @@ archive and resolve it; until then, dedupe that day on `(ts_utc, source, device_
 channel_id, metric)` — which is exactly what the rollup does, unconditionally, for this
 reason.
 
-`energy/meter/` (`energy_meter`) is designed but not built: LG&E Green Button interval
-data, adding an `interval_s` column where `ts_utc` is the interval *start* (PLAN.md §13).
+`energy/meter/` (`energy_meter`) is the one dataset that is **not** ours: it is LG&E's
+own revenue-meter reading, imported from Green Button (PLAN.md §13). It adds an
+`interval_s` column, `ts_utc` is the interval *start*, and its dedupe key is the canonical
+tuple **plus `interval_s`** — because every meter publishes the same energy at more than
+one interval length, and summing without pinning one silently triples the answer. It is
+the independent check on everything else here: `energycap compare-meter` measures our
+panels against it, and `energycap verify-bill` prices it against what LG&E actually
+charged. See [Is the bill right?](#is-the-bill-right-verify-bill).
 
 ### Partitioning is on the LOCAL date
 
@@ -145,18 +152,21 @@ extrapolated across a gap. `kwh` is `NULL` (never `0`) for every metric except `
 The SQL that does this is a single readable file: [`src/energy_capture/stages/rollup.sql`](src/energy_capture/stages/rollup.sql).
 
 **Enum rows are rolled up here too.** The rollup excludes only the day-grain metrics, so
-`mode`, `stage` and `fan` (`unit = 'enum'`) get a row per hour like everything else — and
-`mean` and `p95` over them are **meaningless**, because they are arithmetic on integer
-codes and there is no midpoint between `cool` and `auto`. For those rows only `min`, `max`
-and `sample_count` carry meaning (`max` is genuinely useful *on a staged unit*: the top
-stage the outdoor unit reached in the hour). The same warning and the same decode table
-are carried in the `energy_hourly` **table** comment in Glue, because that table has no
+every `unit = 'enum'` metric — all **six** of `mode`, `stage`, `fan`, `op_status`,
+`odu_mode` and `idu_status` — gets a row per hour like everything else, and `mean` and
+`p95` over them are **meaningless**, because they are arithmetic on integer codes and
+there is no midpoint between `cool` and `auto`. For those rows only `min`, `max` and
+`sample_count` carry meaning (`max` is genuinely useful *on a staged unit*: the top stage
+the outdoor unit reached in the hour). The same warning and the same decode table are
+carried in the `energy_hourly` **table** comment in Glue, because that table has no
 `value` column to hang them on.
 
 **`stage_pct` is not one of them.** It carries `unit = 'pct'`, not `'enum'` — it is a real
 0–100 compressor capacity, so its hourly `mean` is a genuine *mean capacity for the hour*
-and is the natural join partner for mean `watts`. The enum warning above applies to
-`mode`, `stage` and `fan` only, and both documents say so in the same words.
+and is the natural join partner for mean `watts`. That is the only exception: the enum
+warning applies to all six enum metrics and to nothing else, and both documents say so in
+the same words. (It said "`mode`, `stage` and `fan` only" until 2026-08-24, which was
+three metrics short.)
 
 ### The semantic layer
 
@@ -811,7 +821,7 @@ If you query interactively a lot, define views once
 the repetition. The queries below are written self-contained so they can be pasted
 anywhere.
 
-### Three rules the queries below obey — break them and you get a wrong number
+### Four rules the queries below obey — break them and you get a wrong number
 
 **1. A channel is `(source, device_id, channel_id)`, never `channel_id` alone.**
 `channel_id` is unique only *within* a device. This house has **two** Leviton hubs, so
@@ -824,13 +834,23 @@ of two unrelated loads. This bites hardest on unmapped channels, where the label
 back to the bare `channel_id` — and per [Known-unproven](#known-unproven), a channel stays
 unmapped until someone re-runs `energycap discover` and edits `channel_map.json`.
 
-**2. The literal `30` in these queries is `POLL_INTERVAL_S`.** It appears in every
+**2. The channels nest — never sum across levels.** The measurement hierarchy is
+physical: a smart breaker sits *inside* its panel's feed CT, and the HVAC subpanel feeder
+(`ct_2_*`) carries the blower that some branch breakers also see. So an unqualified
+`sum(kwh)` over every channel counts the same electrons two or three times — it returned
+about 3× the house total the first time `/ui/history` tried it, and it looks entirely
+plausible. Total **within one level**: the feed CTs are the panel (and, summed, the
+house); `breaker_p*` are the circuits inside them; `panel_leg_*` reports only `volts` and
+`hz` and carries no energy at all. The house-level total is the one that is comparable to
+`energy_meter` — everything else is a subset of it, not an addend.
+
+**3. The literal `30` in these queries is `POLL_INTERVAL_S`.** It appears in every
 `samples_expected`, every `pct_of_hour_observed`, and in the observed-time kWh arithmetic.
 If you change that setting, change it here too — and remember that rows collected before
 the change were sampled at the old interval, so a range spanning it has no single correct
 literal.
 
-**3. Expected sample counts come from real elapsed time, not from `24`.** An hourly rollup
+**4. Expected sample counts come from real elapsed time, not from `24`.** An hourly rollup
 bucket is always exactly one real hour (it is keyed on `hour_start_utc`), so `3600 / 30`
 is always right per hour. A local **day** is not: it is 23 hours on the March
 spring-forward Sunday and 25 on the November fall-back Sunday, so the honest daily
@@ -1061,11 +1081,12 @@ hvac AS (
     GROUP BY 1
 ),
 sys_state AS (
-    -- BOTH renderings of odu.opstat are selected on purpose. A staged outdoor
-    -- unit fills stage_code and leaves stage_pct NULL; a variable-capacity one
-    -- (this house — odu.type gs3ngiphp) fills stage_pct and NEVER writes a
-    -- 'stage' row at all. Ask for only one and you may get a column of nulls
-    -- that looks like "the compressor was off".
+    -- BOTH renderings of odu.opstat are selected on purpose. The field changes
+    -- shape with what the compressor is doing, per reading, not per system:
+    -- a percentage while it modulates, a word when it does not. This house
+    -- (odu.type gs3ngiphp) produces both all day, interleaved, so exactly one
+    -- of these two columns is non-null in any given bucket. Ask for only one
+    -- and you lose about half the day with no gap to show for it.
     SELECT time_bucket(INTERVAL 5 MINUTE, ts_utc) AS bucket,
            max(CASE WHEN metric = 'mode'  THEN value END) AS mode_code,
            max(CASE WHEN metric = 'stage' THEN value END) AS stage_code,
@@ -1084,8 +1105,8 @@ zone_state AS (
 SELECT
     s.bucket AT TIME ZONE 'America/Kentucky/Louisville' AS local_time,
     m.name AS mode,
-    st.name AS stage,        -- NULL here: this outdoor unit is variable-capacity
-    s.stage_pct,             -- 0-100 compressor capacity: the signal this house emits
+    st.name AS stage,        -- non-null in the buckets that used the word form
+    s.stage_pct,             -- 0-100 capacity: non-null in the buckets that did not
     s.outdoor_f, z.indoor_f, z.setpoint_cool_f,
     h.hvac_watts, h.watt_samples, h.hvac_channels
 FROM sys_state AS s
@@ -1104,9 +1125,9 @@ Enum metrics are averaged at your peril: the mean of `mode` codes is meaningless
 changed inside the bucket. Never take `avg()` of `mode`, `stage` or `fan`. `stage_pct` is
 the exception and is aggregated with `avg()` above deliberately — it is a real percentage,
 so its bucket mean is the mean compressor capacity, which is exactly what you want beside
-`hvac_watts`. On this system `stage` comes back NULL and `stage_pct` carries the signal;
-on a staged unit it is the reverse. See
-[Compressor stage](#compressor-stage-stage-vs-stage_pct).
+`hvac_watts`. On this system both columns carry signal, in alternating stretches — the one
+that is NULL in a bucket is telling you which rendering `odu.opstat` used, not that the
+compressor was idle. See [Compressor stage](#compressor-stage-stage-vs-stage_pct).
 
 The bucket key is `ts_utc`, deliberately — `ts_local` would merge the two 01:00 local
 hours of the November fall-back Sunday into one set of buckets, averaging watts across two
@@ -1164,8 +1185,9 @@ double-counts.
 
 ## The same queries in Athena
 
-The tables (`energy_raw_30s`, `energy_hourly`, `energy_daily`, `dim_channel` in the
-`energy` database) are created by `energycap create-glue-tables`, with partition
+The tables (`energy_raw_30s`, `energy_hourly`, `energy_daily`, `energy_meter`,
+`dim_channel` in the `energy` database) are created by `energycap create-glue-tables`,
+with partition
 projection — so there is **no crawler, no `MSCK REPAIR TABLE`, and no partition to
 register, ever**. Their table and column comments carry the same warnings this README
 does; `SHOW CREATE TABLE energy.energy_hourly` is a good first thing for an LLM to read.
@@ -1190,8 +1212,9 @@ timestamp literals — is identical.
 November fall-back Sunday the two 01:00–01:59 local hours then land in the same buckets,
 so watts are averaged across two physically different hours and every sample count
 doubles. Bucket on `ts_utc` and derive a local **label** from the bucket afterwards. The
-three rules above the DuckDB queries — channel identity, the `POLL_INTERVAL_S` literal,
-and real-elapsed-time sample expectations — apply here unchanged.
+four rules above the DuckDB queries — channel identity, the nesting hierarchy, the
+`POLL_INTERVAL_S` literal, and real-elapsed-time sample expectations — apply here
+unchanged.
 
 **0. Orientation**
 
@@ -1337,8 +1360,8 @@ hvac AS (
 ),
 sys_state AS (
     -- Both renderings of odu.opstat, for the reason the DuckDB version gives:
-    -- this outdoor unit is variable-capacity, so 'stage' rows do not exist and
-    -- stage_pct is the compressor signal.
+    -- the field changes shape per reading, this house emits both interleaved,
+    -- and either one alone drops about half the compressor's day.
     SELECT bucket,
            max(CASE WHEN metric = 'mode'  THEN value END) AS mode_code,
            max(CASE WHEN metric = 'stage' THEN value END) AS stage_code,
@@ -1359,8 +1382,8 @@ SELECT s.bucket AS bucket_utc,
        with_timezone(s.bucket, 'UTC') AT TIME ZONE 'America/Kentucky/Louisville'
            AS local_time,
        m.name AS mode,
-       st.name AS stage,     -- NULL here: this outdoor unit is variable-capacity
-       s.stage_pct,          -- 0-100 compressor capacity: what this house emits
+       st.name AS stage,     -- non-null in the buckets that used the word form
+       s.stage_pct,          -- 0-100 capacity: non-null in the buckets that did not
        s.outdoor_f, z.indoor_f, z.setpoint_cool_f,
        h.hvac_watts, h.watt_samples, h.hvac_channels
 FROM sys_state AS s
@@ -1402,10 +1425,13 @@ ORDER BY 1 DESC, kwh DESC;
 
 ---
 
-## Enum decodes: `mode`, `stage`, `fan`
+## Enum decodes: the six `unit = 'enum'` metrics
 
-Three metrics store a small integer in `value` with `unit = 'enum'` (the long schema has
-no string column). These tables live in
+**Six** metrics store a small integer in `value` with `unit = 'enum'` (the long schema has
+no string column): `mode`, `stage`, `fan`, `op_status`, `odu_mode` and `idu_status`. This
+section used to say three, and name only the first three everywhere it mattered — which
+left `avg(value)` over `op_status`, `odu_mode` or `idu_status` looking like a legitimate
+question. It is not: those are codes too. These tables live in
 [`src/energy_capture/sources/bryant.py`](src/energy_capture/sources/bryant.py) and are
 quoted verbatim into the Glue comment on `value` (on `energy_raw_30s`) and into the
 `energy_hourly` **table** comment, which has no `value` column but does aggregate enum
@@ -1414,7 +1440,7 @@ rows. Both quotations, and this table, are pinned to that source by tests.
 | metric | `channel_id` | `value` → meaning |
 |---|---|---|
 | `mode` | `system` | `0` = off, `1` = heat, `2` = cool, `3` = auto, `4` = fanonly, `5` = hpheat, `6` = electric, `7` = gasheat, `8` = dehumidify |
-| `stage` | `system` | `0` = off, `1` = low, `2` = high, `3` = idle, `4` = dehumidify — the **outdoor unit's** operating stage (`odu.opstat`). **Not emitted on this system** — see the next section |
+| `stage` | `system` | `0` = off, `1` = low, `2` = high, `3` = idle, `4` = dehumidify — the **outdoor unit's** operating stage (`odu.opstat`). **Emitted here, interleaved with `stage_pct`** — `off` and `dehumidify` observed; see the next section before filtering on it |
 | `fan` | `zone_{n}` | `0` = off, `1` = low, `2` = med, `3` = high |
 | `op_status` | `system` | `0` = idle, `1` = cooling, `2` = heating, `3` = fanonly, `4` = defrost, `5` = dehumidify, `6` = off — the system's own one-word account (`oprstsmsg`) |
 | `odu_mode` | `system` | `0` = off, `1` = cooling, `2` = heating, `3` = defrost, `4` = dehumidify, `5` = idle, `6` = cool, `7` = heat — the **outdoor** unit's `opmode`, distinct from its stage. Two spellings of cooling are live in the wild (`1` and `6`) and both are kept: the table is append-only |
@@ -1535,13 +1561,17 @@ came back null, an enum string was unrecognised, or the channel is not wired at 
 Query 3 above distinguishes the two shapes of gap. When summing across a range, check
 whether the hours you expected are actually present before reporting a total.
 
-**A metric that this hardware never emits also returns nothing.** The sharpest case is
-`stage` versus `stage_pct`: they are two renderings of one field and this outdoor unit is
-variable-capacity, so `WHERE metric = 'stage'` matches **zero rows for all time** while
-`stage_pct` carries the compressor signal. An empty result set is a statement about the
-query, not about the compressor — check
-[Compressor stage](#compressor-stage-stage-vs-stage_pct) before reporting that the heat
-pump never ran.
+**Half a metric can go missing without a gap anywhere.** The sharpest case is `stage`
+versus `stage_pct`: they are two renderings of one field, `odu.opstat`, and the shape is
+chosen **per reading** by what the compressor is doing — a percentage while it modulates,
+a word when it does not. This house emits both, interleaved, all day: 8,091 `stage` rows
+beside 9,010 `stage_pct` rows over 2026-08-17→23. So `WHERE metric = 'stage'` silently
+drops about half the compressor's day and `WHERE metric = 'stage_pct'` drops the other
+half, and neither leaves a gap you could notice — `sample_count` on the rows you do get is
+perfectly normal. Select **both**, and let the NULL say which rendering that cycle used;
+check [Compressor stage](#compressor-stage-stage-vs-stage_pct) before reporting that the
+heat pump never ran. (This paragraph asserted the opposite — "zero rows for all time" —
+until the archive was actually looked at; DEVIATIONS.md #179.)
 
 **A recorded `0.0` is a real, different thing.** Leviton firmware v2 emits genuine
 spurious zero power readings, and they are archived verbatim, unfiltered — recording what
@@ -1579,6 +1609,34 @@ hours, averages watts across them, and doubles every sample count in them.
 zero-fill, no carry-forward, no hour spine, no `COALESCE` in the rollup. If you need a
 continuous series for a chart, build the spine **in your query** (as query 3 does) and
 keep the fabricated points visibly distinct from the observed ones.
+
+**The channels nest, so summing across them counts the same electrons twice.** This is the
+easiest wrong number to produce here, because nothing about the query looks wrong. The
+hierarchy is physical: the feed CTs measure a whole panel, the smart breakers measure
+circuits *inside* that panel, and the HVAC subpanel feeder (`ct_2_*`) carries a blower that
+some branch breakers also see. So `sum(kwh)` over every channel in an hour is roughly 2–3×
+the house — it returned about 3× the first time `/ui/history` tried it, and the number
+looked entirely plausible. Total **within one level**:
+
+| level | channels | what the total means |
+|---|---|---|
+| feed | `ct_1_a` / `ct_1_b` on **both** hubs | that panel's whole load; summed across both panels, the house |
+| subfeed | any other `ct_*` (here `ct_2_*`, the HVAC subpanel) | already inside its panel's feed |
+| branch | `breaker_p*` | one circuit each — already inside a feed, and partly inside the subfeed too |
+| reference | `panel_leg_*` | `volts` and `hz` only; **no energy at all**, so it contributes nothing and a UI that expected it to sum shows zero |
+
+The house-level total is the only one comparable to `energy_meter`; everything else is a
+subset of it, not something to add to it. `energycap compare-meter` and `/ui/history` both
+classify every series by level for exactly this reason, and neither ever reports a total
+that crosses one.
+
+**Three Panel A breakers are MWBCs, and their `volts` reads double.** `breaker_p5`,
+`breaker_p10` and `breaker_p13` are multi-wire branch circuits — two 120 V legs sharing a
+neutral under one common-trip handle — and the Leviton adapter sums both poles for *every*
+metric. That is right for `watts` (the legs are independent circuits, so the sum is the
+breaker's real load) and wrong for `volts`, which comes back ~240 on a pair of 120 V legs.
+Find them with `dim_channel.category = 'mwbc'`; never read `volts` there as the circuit
+voltage.
 
 **`estimated_watts` in `dim_channel` is a planning estimate from the panel inventory, not
 a measurement.** It can legitimately be 0 or null where nobody ever measured the circuit.
@@ -1638,8 +1696,10 @@ Carrier clouds. What that settled, so nobody re-litigates it from the list below
 - **`cfgem = "F"`**, so `outdoor_temp_f` is emitted and no Celsius conversion is in play.
 - **One zone is enabled** of the eight the payload reports, so `zone_1` is the only zone
   channel that produces rows.
-- **The Leviton hub ids are real** in `config/channel_map.json`, pasted from that run;
-  the only placeholder left there is the future LG&E meter (PLAN.md §13).
+- **The Leviton hub ids are real** in `config/channel_map.json`, pasted from that run.
+  Nothing in that file is a placeholder any more: the LG&E meters were added as real
+  entries on 2026-08-23, and the house is marked `primary: true` so `compare-meter`
+  knows which of the two services to compare against the panels.
 - **`getInfinityEnergy` still resolves** with the field set this pipeline asks for:
   `energyPeriods` values arrive as JSON numbers and `energyConfig.<name>.enabled` as a
   JSON boolean. Only `looppump` is disabled on this system — `gas`, `fangas` and `reheat`
