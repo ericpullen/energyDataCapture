@@ -630,12 +630,18 @@ digest on the box: it found the Panel B CT fault (2 × `frozen_channel`, 4 ×
 `feed_below_children`) and the B2 coverage gate correctly refused the meter comparison for
 a day with 16/24 intervals.
 
-**Two things still need you.** (1) `HEALTHCHECKS_PING_URL` is empty in the box's `.env` —
-until a healthchecks.io check is created and pasted there, nothing reports the watchdog's
-own death, which is the one failure no placement can cover for itself. (2) **LG&E needs a
-browser re-authorisation**: it broke 08-24 with `invalid_scope` and the meter feed has been
-dead since 08-23 16:30. Run `docker compose exec energycap energycap greenbutton-authorize`
-on the instance. Until then the `meter` WARNING is a true positive and will keep firing.
+**LG&E auto-refresh works for the first time — 2026-08-25.** The reason it never did is
+one missing form field: this custodian rejects a scope-less refresh grant with
+`invalid_scope`, though RFC 6749 §6 says an omitted scope means "the originally granted
+scope". So *every refresh this integration ever attempted had failed*, and a human in a
+browser was the only thing that had ever produced a working token — #177's three-day lapse
+and the 08-24 outage were both that, surfacing. Measured, fixed and verified against the
+live endpoint (DEVIATIONS #196). The watchdog is now at **0 alarms**, and the meter feed is
+current.
+
+**One thing still needs you:** `HEALTHCHECKS_PING_URL` is empty in the box's `.env`. Until
+a healthchecks.io check is created and pasted there, nothing reports the watchdog's own
+death — the one failure no placement can cover for itself.
 
 ---
 
