@@ -4971,3 +4971,86 @@ The probe left `lge-refresh-probe*.json` on the instance volume; removed. The
 successful `scope`-bearing refresh rotated the live refresh token, and the new
 pair was written into the real cache rather than discarded, so no browser trip
 was spent on the diagnosis.
+
+---
+
+## 197. `LEVITON_INGEST=ws` — the hybrid fallback fabricates coverage, measured against known ground truth
+
+*#180 asked whether Panel B's latched zeros were a stale store or a real reading,
+and the A/B probe was inconclusive because a busy panel cannot latch. On
+2026-08-25 the owner de-energised Panel B for eleven minutes to reposition the
+CTs, which handed us the experiment: a window where the true reading is known to
+be **zero**.*
+
+### What the archive recorded during a dark panel
+
+`leviton/1000_0046_1D48/ct_1_a`, watts, 30-second cadence:
+
+```
+16:33:17  715.31
+16:33:47  715.31
+   ... thirty-two consecutive identical rows ...
+16:48:47  715.31
+16:49:17  696.27      <- steps once, then flat again
+```
+
+`sample_count` for the 16:00 local hour: **120**. A full hour. No gap, no low
+count, no warning, and a perfectly plausible number — for a panel with the power
+off.
+
+Meanwhile the logs show the hub in trouble across exactly that span:
+`leviton_ws_stalled` at 16:37:47, six stall/reconnect cycles about ninety
+seconds apart, `leviton_ws_connect_failed` at 16:48:30, recovered 16:48:46.
+
+So the answer to #180 is **explanation A**, demonstrated rather than inferred:
+the value is stale, not the sensor. `hybrid` falls back to REST when the socket
+is unusable, Leviton's cloud serves a cached reading rather than an error, and
+the collector records it faithfully — full coverage, no signal that anything is
+wrong. It also explains the "spontaneous recovery" at 13:00 that day, which was
+the cache refreshing rather than the hardware healing.
+
+### Why `hybrid` was the default, and why that is now wrong here
+
+The reasoning was sound: a cached REST value "is what this pipeline collected
+before the socket existed, so it is strictly better than nothing", and the
+fallback is recorded per cycle in `status.json` and at INFO on transition.
+
+Both halves fail in practice. A cached value is **worse** than nothing when it
+is indistinguishable from a measurement — it defeats every gap-aware check in
+the project, all of which are built on the rule that an absent row means "not
+observed". And the provenance lives only in counters and a log line, never in
+the rows, so a query cannot tell fabricated coverage from real.
+
+### The measured cost of switching
+
+From `leviton_ingest` after ~21.4 hours of running:
+
+| counter | value |
+|---|---|
+| `cycles_ws` | 2,563 |
+| `cycles_rest_fallback` | **21** |
+| `cycles_rest` | 0 |
+
+21 cycles is 0.8%, and 21 × 30 s = 10.5 minutes — which is the outage window,
+almost to the cycle. The fallback is used **essentially only** when the hub is
+genuinely unreachable, which is precisely when its values are worthless. So the
+trade is: lose 0.8% of samples as honest gaps, stop recording fabricated ones.
+
+### What is given up
+
+`ws` does no periodic REST reconcile, so `last_reconcile_drift` (65 fields
+compared, 23 differing at the time of the switch) stops being collected. That
+was the only running cross-check between the two transports. Worth revisiting if
+the drift figure ever needs explaining — but a cross-check whose fallback path
+manufactures data is not a good trade for the manufacturing.
+
+Set in the instance's `.env` (not in code): the default stays `hybrid` for
+anyone whose socket is less reliable than this one, and `rest` remains available
+unchanged.
+
+### Still open
+
+**The rewiring is unverified.** Every Panel B reading after 16:49 is a cached
+value from the same stale store, so nothing since the repair tests the CTs. The
+first honest measurement is whatever `ws` mode records from now on, and the first
+real verdict is tomorrow's 10:00 digest over a full day.
