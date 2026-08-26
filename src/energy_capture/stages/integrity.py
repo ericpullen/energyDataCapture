@@ -323,6 +323,18 @@ def frozen_runs(
     real data (``breaker_p19``, 340 such hours on the healthy hub). The
     stuck-at-zero failure mode is real but belongs to ``feed_below_children``,
     which catches it without having to guess whether a zero is honest.
+
+    Runs of length **one** are returned. They used to be dropped here, which
+    silently made :data:`Settings.integrity_frozen_min_hours` unable to mean
+    what it says: the setting accepts ``1``, and at ``1`` nothing changed,
+    because a single pinned hour never became a run in the first place.
+
+    A one-hour run is a real signal for a CT, and this filters to CTs. An
+    analog clamp under load does not report one value 120 times — the healthy
+    hub's feed produced **82 distinct values** in the hour its faulty twin
+    produced one. Whether one hour is enough to *act* on is the caller's
+    judgement, which is what ``frozen_min`` is for; it is not this function's
+    business to decide by discarding the evidence.
     """
     runs: list[tuple[int, list[Mapping[str, Any]]]] = []
     current: list[Mapping[str, Any]] = []
@@ -337,11 +349,11 @@ def frozen_runs(
         if pinned and (not current or contiguous):
             current.append(row)
         else:
-            if len(current) > 1:
+            if current:
                 runs.append((len(current), current))
             current = [row] if pinned else []
         previous = row["local_hour_start"]
-    if len(current) > 1:
+    if current:
         runs.append((len(current), current))
     return runs
 
@@ -497,19 +509,25 @@ def _frozen_check(
             value = run[0]["mean_w"]
             first = run[0]["local_hour_start"]
             last = run[-1]["local_hour_start"]
+            span = (
+                f"the hour of {first}"
+                if length == 1
+                else f"{length} consecutive hours"
+            )
+            window = f"{first}" if length == 1 else f"{first} through {last}"
             report.findings.append(
                 Finding(
                     rule="frozen_channel",
-                    headline=(
-                        f"{name} reported exactly {value:.2f} W for "
-                        f"{length} consecutive hours"
-                    ),
+                    headline=f"{name} reported exactly {value:.2f} W for {span}",
                     detail=(
-                        f"{first} through {last}, {len(run) * 120} samples, one "
-                        "value. A channel that stops updating keeps full "
-                        "sample_count and a plausible number, so nothing else "
-                        "here notices (DEVIATIONS #180). Compare it against "
-                        "another channel on the same device before believing it."
+                        f"{window}, {len(run) * 120} samples, one value. A "
+                        "channel that stops updating keeps full sample_count "
+                        "and a plausible number, so nothing else here notices "
+                        "(DEVIATIONS #180). A healthy CT under load does not do "
+                        "this: the good hub's feed produced 82 distinct values "
+                        "in the hour its faulty twin produced one. Compare it "
+                        "against another channel on the same device before "
+                        "believing it."
                     ),
                 )
             )
@@ -671,6 +689,7 @@ def run(
     notify: bool = True,
     always_notify: bool = False,
     map_path: Path | None = None,
+    frozen_min_hours: int | None = None,
 ) -> dict[str, Any]:
     """``energycap check-channels`` — read-only, and pushed to Pushover.
 
@@ -688,6 +707,7 @@ def run(
             notify=notify,
             always_notify=always_notify,
             map_path=map_path,
+            frozen_min_hours=frozen_min_hours,
         )
     except Exception as exc:
         try:
@@ -711,6 +731,7 @@ def _run(
     notify: bool = True,
     always_notify: bool = False,
     map_path: Path | None = None,
+    frozen_min_hours: int | None = None,
 ) -> dict[str, Any]:
     """The check proper. See :func:`run` for why the status wrapper is separate."""
     from energy_capture.aws import s3io
@@ -744,6 +765,7 @@ def _run(
             end=last,
             labels=labels,
             meter_device=primary,
+            frozen_min_hours=frozen_min_hours,
         )
     finally:
         con.close()

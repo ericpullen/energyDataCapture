@@ -470,3 +470,71 @@ def test_a_report_with_findings_is_not_ok(con, tmp_path) -> None:
     assert not rep.ok
     assert rep.to_dict()["ok"] is False
     assert rep.to_dict()["counts"]["frozen_channel"] == 1
+
+
+# ----------------------------------------- a single pinned hour is a real signal
+
+
+def _hour(day_hour: int, lo: float, hi: float, samples: int = 120) -> dict:
+    from datetime import datetime
+
+    return {
+        "source": "leviton",
+        "device_id": "hub",
+        "channel_id": "ct_2_a",
+        "local_hour_start": datetime(2026, 8, 26, day_hour),
+        "lo": lo,
+        "hi": hi,
+        "mean_w": lo,
+        "sample_count": samples,
+    }
+
+
+def test_a_single_pinned_hour_is_returned_as_a_run() -> None:
+    """It was silently discarded, which made the setting unable to mean what it says.
+
+    ``INTEGRITY_FROZEN_MIN_HOURS`` accepts 1 and documents 1 as "catch it within
+    the hour" — but ``frozen_runs`` only ever recorded runs of two or more, so
+    setting it to 1 changed nothing at all. The threshold and the evidence
+    collector disagreed, and the threshold lost silently.
+    """
+    runs = integrity.frozen_runs([_hour(5, 418.6, 418.6)], min_samples=60)
+    assert [n for n, _ in runs] == [1]
+
+
+def test_one_pinned_hour_is_conclusive_enough_for_a_ct_to_report() -> None:
+    """A real clamp under load does not report one value 120 times.
+
+    Measured 2026-08-26: the faulty hub's subpanel CT produced **1** distinct
+    value in 119 samples while the healthy hub's feed produced **82** in the
+    same hour. So a one-hour run is evidence, and whether to act on it belongs
+    to ``frozen_min``, not to throwing the run away.
+    """
+    hours = [_hour(5, 418.6, 418.6), _hour(6, 100.0, 500.0), _hour(7, 418.6, 418.6)]
+    runs = integrity.frozen_runs(hours, min_samples=60)
+    assert sorted(n for n, _ in runs) == [1, 1], "two separate one-hour latches"
+
+
+def test_a_zero_pinned_hour_is_still_not_frozen() -> None:
+    """The rule that stopped 340 false positives on the healthy hub holds.
+
+    An idle circuit reporting 0.0 all hour is telling the truth. Loosening the
+    run length must not loosen this.
+    """
+    assert integrity.frozen_runs([_hour(5, 0.0, 0.0)], min_samples=60) == []
+
+
+def test_a_thinly_sampled_hour_is_not_evidence_of_a_latch() -> None:
+    """Nobody watched it, so it says nothing either way."""
+    assert integrity.frozen_runs([_hour(5, 418.6, 418.6, samples=4)], min_samples=60) == []
+
+
+def test_the_default_still_needs_two_consecutive_hours() -> None:
+    """Loosening `frozen_runs` must not change the archive-wide default.
+
+    The daily digest keeps its old sensitivity; only a caller that explicitly
+    asks for `--frozen-min-hours 1` gets the twitchier behaviour.
+    """
+    from energy_capture.config import get_settings
+
+    assert get_settings().integrity_frozen_min_hours == 2

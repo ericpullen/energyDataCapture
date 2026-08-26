@@ -1248,6 +1248,16 @@ def check_channels_cmd(
     bucket: Annotated[
         str | None, typer.Option("--bucket", help="Archive bucket. Default: S3_BUCKET.")
     ] = None,
+    frozen_min_hours: Annotated[
+        int | None,
+        typer.Option(
+            "--frozen-min-hours",
+            min=1,
+            help="Consecutive pinned hours before frozen_channel fires. "
+            "1 catches a latch within the hour. Default: "
+            "INTEGRITY_FROZEN_MIN_HOURS (2).",
+        ),
+    ] = None,
 ) -> None:
     """Ask whether the METERS can be trusted, not whether we observed them.
 
@@ -1275,9 +1285,19 @@ def check_channels_cmd(
     sees the failure even if the push could not be delivered.
 
         energycap check-channels --start 2026-08-17 --end 2026-08-24
+
+    WATCHING A REPAIR. The default needs two consecutive pinned hours, so a
+    relapse takes two hours to surface -- too slow to stand at a panel with.
+    `--frozen-min-hours 1` fires on a single pinned hour instead, which for a
+    CT is already conclusive: an analog clamp under load does not report one
+    value 120 times, and the healthy hub's feed produced 82 distinct values in
+    the hour its faulty twin produced one.
+
+        energycap check-channels --start today --end today --frozen-min-hours 1
     """
     result = _run_stage(
         "check-channels",
+        frozen_min_hours=frozen_min_hours,
         start=_parse_date(start, "--start"),
         end=_parse_date(end, "--end"),
         bucket=bucket,
