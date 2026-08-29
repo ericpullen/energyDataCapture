@@ -84,16 +84,40 @@ __all__ = [
     "push_message",
     "run",
     "should_notify",
+    "wire_priority",
 ]
 
 
 class Severity(IntEnum):
-    """Pushover priority levels, named for what they mean here."""
+    """Internal ranking of how bad an alarm is — NOT the Pushover wire priority.
+
+    The two used to be the same number, which is why a CRITICAL went out at
+    Pushover priority 1 ("High") — the one level that overrides the phone's quiet
+    hours. Nothing this collector reports is worth waking someone at 3am, so the
+    ranking is kept only for ordering (``worst``) and mapped to a capped wire
+    priority by :func:`wire_priority`.
+    """
 
     #: Something is degraded but data is still landing.
     WARNING = 0
     #: Data is being lost, or the collector is gone.
     CRITICAL = 1
+
+
+#: Pushover wire priorities. Deliberately capped at 0 ("Normal"): priority 1
+#: ("High") is the only one that bypasses Do-Not-Disturb, and we never send it.
+PUSHOVER_LOW = -1  # delivered silently, no sound or vibration
+PUSHOVER_NORMAL = 0  # a sound, but still held by the owner's quiet hours
+
+_WIRE_PRIORITY: dict[Severity, int] = {
+    Severity.WARNING: PUSHOVER_LOW,
+    Severity.CRITICAL: PUSHOVER_NORMAL,
+}
+
+
+def wire_priority(severity: Severity) -> int:
+    """The Pushover priority for a severity. Never above 0 — never bypasses DND."""
+    return _WIRE_PRIORITY.get(severity, PUSHOVER_NORMAL)
 
 
 @dataclass(frozen=True)
@@ -500,7 +524,7 @@ def push_message(
     message: str,
     token: str,
     user: str,
-    priority: int = int(Severity.WARNING),
+    priority: int = PUSHOVER_NORMAL,
     client: httpx.Client | None = None,
 ) -> bool:
     """Send one Pushover notification. Returns whether it was accepted.
@@ -560,7 +584,7 @@ def push(
         message=report.body(),
         token=token,
         user=user,
-        priority=int(report.worst) if not report.ok else int(Severity.WARNING),
+        priority=wire_priority(report.worst),
         client=client,
     )
 

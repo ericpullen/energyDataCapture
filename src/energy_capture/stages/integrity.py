@@ -467,6 +467,7 @@ def _negative_check(con, report, *, hourly, lo, hi, labels) -> None:
         report.findings.append(
             Finding(
                 rule="negative_reading",
+                key=f"negative_reading:{'/'.join(key)}",
                 headline=f"{name} reported {row['lo']:.1f} — a negative reading",
                 detail=(
                     f"metric {row['metric']} at "
@@ -518,6 +519,7 @@ def _frozen_check(
             report.findings.append(
                 Finding(
                     rule="frozen_channel",
+                    key=f"frozen_channel:{'/'.join(key)}",
                     headline=f"{name} reported exactly {value:.2f} W for {span}",
                     detail=(
                         f"{window}, {len(run) * 120} samples, one value. A "
@@ -538,9 +540,20 @@ def _frozen_check(
 def _feed_check(
     con, report, *, hourly, lo, hi, labels, excess_pct, excess_min_w, samples_floor
 ) -> None:
-    """A panel's children cannot outdraw its feed — everything passes through it."""
+    """A panel's children cannot outdraw its feed — everything passes through it.
+
+    One under-reading feed CT trips this every hour it is loaded, and the old
+    code emitted a finding PER HOUR — a single stuck clamp filled a nightly
+    digest with five or nine near-identical lines. The fault is the clamp, not
+    each hour, so offending hours are now collapsed into one finding per feed per
+    LOCAL DAY: the worst hour is named, the rest are counted. Nothing is hidden —
+    the count and the worst excess still say how bad and how persistent it was —
+    and the same clamp no longer pages once an hour.
+    """
     rows = _rows(con, FEED_SQL, [hourly, lo, hi, hourly, lo, hi])
     thin: set[str] = set()
+    # (device, local_day) -> the offending hours under it.
+    offences: dict[tuple[str, date], list[dict[str, Any]]] = {}
     for row in rows:
         device = row["device_id"]
         if int(row.get("samples") or 0) < samples_floor:
@@ -556,22 +569,38 @@ def _feed_check(
         tolerance = max(excess_pct / 100.0 * feed_w, excess_min_w)
         if excess <= tolerance:
             continue
+        hour = row["local_hour_start"]
+        day = hour.date() if hasattr(hour, "date") else hour
+        offences.setdefault((device, day), []).append(
+            {
+                "hour": hour,
+                "feed_w": feed_w,
+                "children_w": children_w,
+                "excess": excess,
+                "tolerance": tolerance,
+            }
+        )
+
+    for (device, day), hours in sorted(offences.items()):
+        worst = max(hours, key=lambda h: h["excess"])
+        n = len(hours)
         key = ("leviton", device, "ct_1_a")
-        name = _label(labels, key)
         report.findings.append(
             Finding(
                 rule="feed_below_children",
+                key=f"feed_below_children:{device}",
                 headline=(
-                    f"{device[-4:]} feed read {feed_w:.0f} W while its own "
-                    f"circuits drew {children_w:.0f} W"
+                    f"{device[-4:]} feed read less than its own circuits in "
+                    f"{n} hour{'s' if n != 1 else ''} on {day}"
                 ),
                 detail=(
-                    f"{row['local_hour_start']}: {excess:+.0f} W more downstream "
-                    f"than the feed clamp reported, against a {tolerance:.0f} W "
-                    "tolerance. Every one of those circuits passes through that "
-                    "clamp, so this cannot be true — the feed CT is under-"
-                    "reporting or has stopped updating. Independent of which "
-                    "failure mode is at work."
+                    f"Worst at {worst['hour']}: the feed clamp reported "
+                    f"{worst['feed_w']:.0f} W while {worst['children_w']:.0f} W "
+                    f"flowed through it downstream ({worst['excess']:+.0f} W over a "
+                    f"{worst['tolerance']:.0f} W tolerance). Every one of those "
+                    "circuits passes through that clamp, so this cannot be true — "
+                    "the feed CT is under-reporting or has stopped updating. "
+                    "Independent of which failure mode is at work."
                 ),
             )
         )
@@ -664,6 +693,7 @@ def _meter_check(
         report.findings.append(
             Finding(
                 rule="meter_disagreement",
+                key=f"meter_disagreement:{meter_device or 'panels'}",
                 headline=(
                     f"{day}: panels {panel_kwh:.1f} kWh against the meter's "
                     f"{meter_kwh:.1f} kWh ({diff_pct:+.1f}%)"

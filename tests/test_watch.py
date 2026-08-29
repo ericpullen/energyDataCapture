@@ -289,7 +289,9 @@ def test_pushover_gets_the_alarms_and_a_priority() -> None:
         assert push(report, token="tok", user="usr", client=client)
 
     assert "uploader" in sent["body"]
-    assert "priority=1" in sent["body"]
+    # A CRITICAL goes out at Pushover "Normal" (0), never "High" (1) — nothing
+    # this collector reports is allowed to bypass the owner's quiet hours.
+    assert "priority=0" in sent["body"]
 
 
 def test_a_rejected_push_reports_failure_rather_than_pretending() -> None:
