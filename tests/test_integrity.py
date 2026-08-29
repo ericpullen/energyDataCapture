@@ -238,6 +238,28 @@ def test_one_watt_past_tolerance_does_fire(con, tmp_path) -> None:
     assert "feed_below_children" in rules(report(con, tmp_path, inside))
 
 
+def test_many_offending_hours_collapse_to_one_finding_per_feed(con, tmp_path) -> None:
+    """A stuck feed clamp trips every loaded hour; that is ONE fault, not eight.
+
+    The digest re-paged nightly because each hour became its own finding. They
+    now collapse to a single finding per feed per day that counts the hours and
+    names the worst one — the fault is the clamp, not each hour it was loaded.
+    """
+    rows = []
+    for hour in range(8):
+        rows += feed_and_kids(
+            DAY, hour, feed=1000.0,
+            kids={"breaker_p1": 700.0, "breaker_p10": 700.0, "breaker_p14": 200.0},
+        )
+    rep = report(con, tmp_path, rows)
+    feed = [f for f in rep.findings if f.rule == "feed_below_children"]
+    assert len(feed) == 1, "eight bad hours on one feed must be one finding"
+    assert "8 hours" in feed[0].headline
+    # The stable key is the subject (the device), free of any hour or watt value,
+    # so the digest recognises the same fault tomorrow and stops re-paging.
+    assert feed[0].key == f"feed_below_children:{HUB_B}"
+
+
 def test_a_barely_metered_panel_is_unjudgeable_not_clean(con, tmp_path) -> None:
     rows = feed_and_kids(DAY, 3, feed=100.0, kids={"breaker_p1": 900.0})
     rep = report(con, tmp_path, rows)

@@ -374,3 +374,79 @@ def test_the_title_counts_the_findings(con, tmp_path) -> None:
     report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
     assert len(report.findings) == 1, report.body()
     assert "1 thing to look at" in report.title()
+
+
+# --------------------------------------------------- cross-day notify policy
+
+
+def _report_with(*findings: digest.Finding) -> digest.DigestReport:
+    rep = digest.DigestReport(local_day=DAY)
+    rep.findings.extend(findings)
+    return rep
+
+
+FROZEN = digest.Finding(
+    rule="frozen_channel", key="frozen_channel:leviton/HUBB/ct_1_a",
+    headline="Panel B feed A reported exactly 539.79 W for 4 consecutive hours",
+    detail="...",
+)
+
+
+def test_a_repeat_of_yesterdays_finding_does_not_page_again() -> None:
+    """The whole point: a latched CT is a finding every night, but one message.
+
+    Its headline carries the day's watt value and hour count, so it changes
+    nightly — only the stable ``key`` keeps it recognisable as the same fault.
+    """
+    prior = {"signatures": [FROZEN.signature()]}
+    # A DIFFERENT headline (new watts/hours) but the same subject key.
+    tonight = digest.Finding(
+        rule="frozen_channel", key=FROZEN.key,
+        headline="Panel B feed A reported exactly 482.10 W for 8 consecutive hours",
+        detail="...",
+    )
+    send, reason, _, new = digest._decide_push(
+        _report_with(tonight), prior, always_notify=False
+    )
+    assert send is False and reason == "unchanged" and new == []
+
+
+def test_a_new_finding_pages_even_while_an_old_one_persists() -> None:
+    new_finding = digest.Finding(rule="stuck_load", key="stuck_load:leviton/x/breaker_p23",
+                                 headline="breaker_p23 never switched off", detail="...")
+    prior = {"signatures": [FROZEN.signature()]}
+    send, reason, current, new = digest._decide_push(
+        _report_with(FROZEN, new_finding), prior, always_notify=False
+    )
+    assert send is True and reason == "changed"
+    assert new == [new_finding.signature()], "only the genuinely new one is 'new'"
+
+
+def test_the_first_ever_run_with_findings_pages() -> None:
+    send, reason, _, _ = digest._decide_push(_report_with(FROZEN), None, always_notify=False)
+    assert send is True and reason == "first"
+
+
+def test_a_clean_report_stays_quiet_and_forgets_the_cleared_fault() -> None:
+    prior = {"signatures": [FROZEN.signature()]}
+    send, reason, current, _ = digest._decide_push(
+        _report_with(), prior, always_notify=False
+    )
+    # No push for an all-clear, and the fault drops out of the remembered set so
+    # its RETURN tomorrow counts as new again.
+    assert send is False and reason == "clear" and current == []
+
+
+def test_state_round_trips_and_keeps_prior_notified_when_not_notified(tmp_path) -> None:
+    path = tmp_path / "digest-state.json"
+    now = datetime(2026, 8, 28, 14, 0)
+    digest._write_digest_state(path, [FROZEN.signature()], now=now, notified=True)
+    first = digest._read_digest_state(path)
+    assert first["signatures"] == [FROZEN.signature()]
+    assert first["notified_utc"]
+    # A later quiet run (nothing new, notified=False) must not blank the last
+    # time we actually reached the phone.
+    later = datetime(2026, 8, 29, 14, 0)
+    digest._write_digest_state(path, [FROZEN.signature()], now=later, notified=False)
+    second = digest._read_digest_state(path)
+    assert second["notified_utc"] == first["notified_utc"]

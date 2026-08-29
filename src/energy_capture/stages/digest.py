@@ -61,6 +61,7 @@ inflated by fixed daily charges and would overstate every finding.
 
 from __future__ import annotations
 
+import json
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -154,10 +155,21 @@ class Finding:
     #: Energy the finding is about, where that is meaningful.
     kwh: float | None = None
     cost_usd: float | None = None
+    #: A stable identity for the *subject* of the finding — the channel, device
+    #: or fixed concern it is about — deliberately free of the day's varying
+    #: numbers. The headline says "454.24 W for 8 hours" and changes every night;
+    #: this does not, so :func:`signature` can recognise the same ongoing fault
+    #: across days and the digest can stop re-paging for it. ``None`` falls back
+    #: to the headline, which means "treat every occurrence as new".
+    key: str | None = None
 
     def line(self) -> str:
         money = f"  (~${self.cost_usd:.2f})" if self.cost_usd else ""
         return f"• {self.headline}{money}\n  {self.detail}"
+
+    def signature(self) -> str:
+        """What makes two findings "the same issue" for cross-day de-duplication."""
+        return f"{self.rule}::{self.key or self.headline}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -438,6 +450,7 @@ def build_report(
             report.findings.append(
                 Finding(
                     rule="above_band",
+                    key=f"above_band:{'/'.join(key)}",
                     headline=f"{name} used {kwh:.1f} kWh, usually {band.median:.1f}",
                     detail=(
                         f"{excess:+.1f} kWh above its {band.days}-day median "
@@ -453,6 +466,7 @@ def build_report(
             report.findings.append(
                 Finding(
                     rule="circuit_went_quiet",
+                    key=f"circuit_went_quiet:{'/'.join(key)}",
                     headline=f"{name} used only {kwh:.1f} kWh, usually {band.median:.1f}",
                     detail=(
                         "A circuit drawing far less than it always has is a "
@@ -476,6 +490,7 @@ def build_report(
             report.findings.append(
                 Finding(
                     rule="stuck_load",
+                    key=f"stuck_load:{'/'.join(key)}",
                     headline=f"{name} never switched off ({drawing}/{hours} hours drawing)",
                     detail=(
                         f"Above {STUCK_MIN_WATTS:.0f} W in every hour, against a "
@@ -561,6 +576,7 @@ def _strip_heat_rule(con, report, *, daily, hourly, local_day, cost) -> None:
     report.findings.append(
         Finding(
             rule="strip_heat_in_mild_weather",
+            key="strip_heat_in_mild_weather:eheat",
             headline=f"Strip heat ran {eheat:.1f} kWh with an outdoor low of {float(low_f):.0f}°F",
             detail=(
                 "Resistance heat costs roughly three times what the heat pump "
@@ -620,6 +636,7 @@ def _barn_rule(con, report, *, meter, local_day, barn_device, cost, baseline_day
         report.findings.append(
             Finding(
                 rule="barn_envelope",
+                key="barn_envelope",
                 headline=(
                     f"Barn used {today_kwh:.1f} kWh "
                     f"(envelope {BARN_MIN_KWH:.1f}–{BARN_MAX_KWH:.0f})"
@@ -651,6 +668,7 @@ def _barn_rule(con, report, *, meter, local_day, barn_device, cost, baseline_day
     report.findings.append(
         Finding(
             rule="barn_envelope",
+            key="barn_envelope",
             headline=f"Barn has drawn under {BARN_MIN_KWH:.1f} kWh for {quiet} days running",
             detail=(
                 "This meter is ~100% EV charging and normally charges most days "
@@ -688,6 +706,7 @@ def _phantom_rule(con, report, *, hourly, local_day, lo, hi) -> None:
     report.findings.append(
         Finding(
             rule="phantom_load_growth",
+            key="phantom_load_growth:night_floor",
             headline=f"Overnight floor is {tonight:.0f} W, up from {median:.0f} W",
             detail=(
                 f"A floor that rises stays risen: {daily_kwh:.1f} kWh every day "
@@ -697,6 +716,71 @@ def _phantom_rule(con, report, *, hourly, local_day, lo, hi) -> None:
             kwh=round(daily_kwh, 2),
         )
     )
+
+
+# ----------------------------------------------------- cross-day notify policy
+#
+# The digest runs once a day and used to push whenever it found ANYTHING. A
+# hardware fault that persists for weeks — a latched CT, say — is a finding every
+# single night, so the owner got the same message over and over and learned to
+# ignore it, which is exactly how a real new problem then gets missed. So the
+# digest now remembers the SIGNATURES it reported last time (the stable
+# per-subject identity, not the headline with its nightly numbers) and pushes
+# only when something is NEW. Ongoing faults are still in the body and still on
+# /healthz; they just stop re-paging on their own.
+
+
+def _read_digest_state(path: Path) -> dict[str, Any] | None:
+    try:
+        body = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        # No history means "everything is new", which sends — failing toward a
+        # notification, never away from one.
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _decide_push(
+    report: DigestReport,
+    previous: Mapping[str, Any] | None,
+    *,
+    always_notify: bool,
+) -> tuple[bool, str, list[str], list[str]]:
+    """Return ``(send, reason, current_signatures, new_signatures)``.
+
+    Send when a finding appears that was not in the last report; stay quiet when
+    every current finding is one already reported. A finding that CLEARED is not
+    itself a reason to push — the digest never announced all-clears — but it does
+    drop out of the remembered set so its return would page again.
+    """
+    current = sorted({f.signature() for f in report.findings})
+    known = set(previous.get("signatures", [])) if previous else set()
+    new = [sig for sig in current if sig not in known]
+    if always_notify:
+        return True, "always-notify", current, new
+    if new:
+        return True, ("changed" if known else "first"), current, new
+    if current:
+        return False, "unchanged", current, new
+    return False, "clear", current, new
+
+
+def _write_digest_state(
+    path: Path, signatures: Sequence[str], *, now: Any, notified: bool
+) -> None:
+    previous = _read_digest_state(path) or {}
+    state = {
+        "signatures": list(signatures),
+        "checked_utc": timeutil.format_utc(now),
+        "notified_utc": timeutil.format_utc(now)
+        if notified
+        else previous.get("notified_utc"),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2) + "\n")
+    except OSError as exc:  # pragma: no cover - defensive
+        log.warning("digest_state_unwritable", path=str(path), error=str(exc))
 
 
 # ------------------------------------------------------------------- the run
@@ -868,16 +952,26 @@ def _run(
         skipped_untrusted=len(report.skipped_untrusted),
     )
 
+    state_path = settings.spool_dir / "digest-state.json"
+    previous_state = _read_digest_state(state_path)
+    send, reason, current_sigs, new_sigs = _decide_push(
+        report, previous_state, always_notify=always_notify
+    )
+
     delivered: bool | None = None
-    if notify and (report.findings or always_notify):
+    if notify and send:
         from energy_capture import watch
 
         token = settings.pushover_token.get_secret_value()
         user = settings.pushover_user.get_secret_value()
         if token and user:
+            body = report.body()
+            ongoing = len(current_sigs) - len(new_sigs)
+            if new_sigs and ongoing:
+                body = f"{len(new_sigs)} new, {ongoing} continuing from earlier.\n\n" + body
             delivered = watch.push_message(
                 title=report.title(),
-                message=report.body(),
+                message=body,
                 token=token,
                 user=user,
             )
@@ -888,8 +982,25 @@ def _run(
                 detail="findings were raised but PUSHOVER_* are unset",
             )
 
+    log.info(
+        "digest_notify",
+        send=send,
+        reason=reason,
+        new=len(new_sigs),
+        ongoing=len(current_sigs) - len(new_sigs),
+        delivered=delivered,
+    )
+    # A push that was DUE and did not land must not be recorded as reported, or
+    # the retry never happens — the same failing-open rule watch-state uses.
+    undelivered = bool(notify and send) and delivered is not True
+    if not undelivered:
+        _write_digest_state(
+            state_path, current_sigs, now=timeutil.now_utc(), notified=bool(delivered)
+        )
+
     result = report.to_dict()
     result["notified"] = delivered
+    result["notify_reason"] = reason
     result["marginal_rate_usd"] = float(rate) if rate else None
     result["integrity"] = integrity_report.to_dict()
     return result
