@@ -272,6 +272,13 @@ class Settings(BaseSettings):
     integrity_meter_disagree_pct: float = Field(default=10.0, gt=0.0)
     #: Hourly ``sample_count`` below this is skipped and named, never passed.
     integrity_min_samples: int = Field(default=100, ge=1)
+    #: Magnitude past which a reading is a corrupt sample, not a measurement. A
+    #: reversed clamp mirrors real load and reads a plausible small negative
+    #: (a house feed is at most ~48 kW); the Leviton fw-v2 spurious sample is
+    #: absurd — one read of -371,884 W on Panel A feed A (2026-08-28 14:00).
+    #: Below this a negative is a wiring change worth investigating; at or above
+    #: it, it is transient garbage, stored verbatim (rule 2) but named as such.
+    integrity_corrupt_reading_w: float = Field(default=100_000.0, gt=0.0)
 
     #: Which scheduled jobs this process runs. Empty (the default) means ALL of
     #: them, which is PLAN.md §5's one-container design and must stay the
