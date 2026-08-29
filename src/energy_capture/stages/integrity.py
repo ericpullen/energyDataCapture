@@ -9,8 +9,8 @@ human happened to eye a total.
 
 So this module asks the other question, and it is the only thing here that does.
 
-The four checks
----------------
+The checks
+----------
 
 ============================  =================================================
 finding                        what it catches
@@ -31,10 +31,12 @@ finding                        what it catches
                                wrong conductor — because such a channel varies,
                                never freezes, and may stay above its children.
                                Run it after touching any clamp
-``negative_reading``           a reversed clamp. Never yet observed in eight
-                               days, so this one is unproven rather than
-                               calibrated — but it is free, and a backwards
-                               clamp is a realistic outcome of re-seating work
+``negative_reading``           a reversed clamp — a plausible small negative,
+                               the realistic outcome of re-seating work
+``corrupt_reading``            an absurd-magnitude sample (a Leviton fw-v2
+                               spurious value like -371,884 W) that no real
+                               service can produce: transient garbage, kept
+                               verbatim but named as such, not a wiring change
 ============================  =================================================
 
 Why the thresholds are what they are
@@ -120,6 +122,7 @@ MIN_CHILDREN_FOR_FEED_CHECK: Final[int] = 3
 #: depends on the instrument being right.
 RULES: Final[tuple[str, ...]] = (
     "negative_reading",
+    "corrupt_reading",
     "frozen_channel",
     "feed_below_children",
     "meter_disagreement",
@@ -373,6 +376,7 @@ def build_report(
     feed_excess_min_w: float | None = None,
     meter_disagree_pct: float | None = None,
     min_samples: int | None = None,
+    corrupt_reading_w: float | None = None,
 ) -> IntegrityReport:
     """All four checks over ``start``..``end`` inclusive. Pure apart from ``con``."""
     settings = get_settings()
@@ -400,12 +404,19 @@ def build_report(
     samples_floor = (
         min_samples if min_samples is not None else settings.integrity_min_samples
     )
+    corrupt_w = (
+        corrupt_reading_w
+        if corrupt_reading_w is not None
+        else settings.integrity_corrupt_reading_w
+    )
 
     report = IntegrityReport(start=start, end=end)
     lo = timeutil.local_midnight_naive(start)
     hi = timeutil.local_midnight_naive(end + timedelta(days=1))
 
-    _negative_check(con, report, hourly=hourly, lo=lo, hi=hi, labels=labels)
+    _negative_check(
+        con, report, hourly=hourly, lo=lo, hi=hi, labels=labels, corrupt_w=corrupt_w
+    )
     _frozen_check(
         con,
         report,
@@ -459,24 +470,57 @@ def build_report(
 # ------------------------------------------------------------------- the rules
 
 
-def _negative_check(con, report, *, hourly, lo, hi, labels) -> None:
-    """A reversed clamp. Unproven — never observed — and free to check."""
+def _negative_check(con, report, *, hourly, lo, hi, labels, corrupt_w) -> None:
+    """A negative reading, split by whether its magnitude is physically possible.
+
+    Two very different faults both show up as ``min < 0`` and used to carry the
+    same "clamp fitted backwards" text:
+
+    * A **reversed clamp** mirrors real load, so it reads a plausible small
+      negative — a wiring change worth investigating, and the channel's whole
+      day is suspect, so it goes ``untrusted``.
+    * A **corrupt sample** (Leviton fw-v2) is an absurd value like -371,884 W
+      that no 48 kW service can produce. It is one bad sample in an otherwise
+      healthy hour, stored verbatim per cardinal rule 2 — not a wiring change,
+      and calling it one sent the owner looking for a clamp that is fine. It is
+      still worth naming (and it does poison that hour's mean, so the day stays
+      untrusted for the channel), but as the transient it is.
+    """
     for row in _rows(con, NEGATIVE_SQL, [hourly, lo, hi]):
         key = (row["source"], row["device_id"], row["channel_id"])
         name = _label(labels, key)
-        report.findings.append(
-            Finding(
-                rule="negative_reading",
-                key=f"negative_reading:{'/'.join(key)}",
-                headline=f"{name} reported {row['lo']:.1f} — a negative reading",
-                detail=(
-                    f"metric {row['metric']} at "
-                    f"{row['local_hour_start']}. A clamp fitted backwards reads "
-                    "negative; no Leviton channel here had ever done this before, "
-                    "so treat it as a wiring change rather than a known fault."
-                ),
+        value = float(row["lo"])
+        if abs(value) >= corrupt_w:
+            report.findings.append(
+                Finding(
+                    rule="corrupt_reading",
+                    key=f"corrupt_reading:{'/'.join(key)}",
+                    headline=f"{name} reported {value:,.0f} W — a corrupt sample",
+                    detail=(
+                        f"metric {row['metric']} at {row['local_hour_start']}. "
+                        "A value this far past anything the service can deliver is "
+                        "a spurious Leviton reading (fw-v2), not a measurement — "
+                        "one bad sample in the hour, kept verbatim rather than "
+                        "filtered. Treat it as a transient: no wiring is wrong. If "
+                        "the same channel keeps producing these, the hub is faulty."
+                    ),
+                )
             )
-        )
+        else:
+            report.findings.append(
+                Finding(
+                    rule="negative_reading",
+                    key=f"negative_reading:{'/'.join(key)}",
+                    headline=f"{name} reported {value:.1f} — a negative reading",
+                    detail=(
+                        f"metric {row['metric']} at "
+                        f"{row['local_hour_start']}. A clamp fitted backwards reads "
+                        "negative; no Leviton channel here had ever done this "
+                        "before, so treat it as a wiring change rather than a "
+                        "known fault."
+                    ),
+                )
+            )
         if key not in report.untrusted:
             report.untrusted.append(key)
 

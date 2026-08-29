@@ -396,6 +396,29 @@ def test_a_negative_reading_is_reported(con, tmp_path) -> None:
     assert "negative_reading" in rules(rep)
 
 
+def test_a_plausible_small_negative_is_a_wiring_change_not_corruption(con, tmp_path) -> None:
+    """A backwards clamp mirrors real load: a small negative, worth investigating."""
+    rows = live_day(DAY, "ct_1_a")
+    rows[3] = hour_row(DAY, 3, "ct_1_a", lo=-1600.0, hi=40.0, mean=-5.0)
+    rep = report(con, tmp_path, rows)
+    assert "negative_reading" in rules(rep)
+    assert "corrupt_reading" not in rules(rep)
+    assert (model.SOURCE_LEVITON, HUB_B, "ct_1_a") in rep.untrusted
+
+
+def test_an_absurd_negative_is_a_corrupt_sample_not_a_wiring_change(con, tmp_path) -> None:
+    """The -371,884 W that paged about "Panel A" — garbage, not a reversed clamp."""
+    rows = live_day(DAY, "ct_1_a")
+    rows[3] = hour_row(DAY, 3, "ct_1_a", lo=-371884.3, hi=4001.0, mean=-1630.0)
+    rep = report(con, tmp_path, rows)
+    assert "corrupt_reading" in rules(rep)
+    assert "negative_reading" not in rules(rep)
+    found = [f for f in rep.findings if f.rule == "corrupt_reading"][0]
+    assert "corrupt sample" in found.headline and "wiring" not in found.headline
+    # The corrupt sample still poisons the hour, so the channel stays untrusted.
+    assert (model.SOURCE_LEVITON, HUB_B, "ct_1_a") in rep.untrusted
+
+
 # ------------------------------------------------------------------- ordering
 
 
