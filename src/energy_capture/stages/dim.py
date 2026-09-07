@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -116,13 +117,16 @@ __all__ = [
     "InventoryDevice",
     "build",
     "build_table",
+    "channel_display",
     "default_live_channels_path",
+    "label_index",
     "load_channel_map",
     "load_inventory",
     "load_live_channels",
     "normalize_category",
     "normalize_slots",
     "resolve_rows",
+    "resolved_label_index",
 ]
 
 #: Log ``stage`` field.
@@ -1016,6 +1020,100 @@ def resolve_rows(
         raise DimBuildError(_problem_report(subject, errors))
     rows.sort(key=lambda row: row.key)
     return rows
+
+
+# ------------------------------------------------------ human-readable names
+
+_BREAKER_RE = re.compile(r"^breaker_p(\d+)$")
+_CT_RE = re.compile(r"^ct_(\d+)_([ab])$")
+
+
+def channel_display(
+    key: tuple[str, str, str],
+    meta: Mapping[str, Any] | None = None,
+) -> str:
+    """A human name for a channel, for notifications and digests.
+
+    The one place that turns ``('leviton', '…1D48', 'breaker_p10')`` into
+    ``Panel B breaker 10 — Heat pump outdoor unit (5-ton)``. Both panels have a
+    ``breaker_p10``, so the panel is not decoration: without it the same headline
+    names two different circuits. ``meta`` is the resolved label record (``label``
+    / ``short_label`` / ``panel``); any part may be missing, and the name degrades
+    one step at a time — panel+number without a name, bare number without a panel
+    — but never back to the raw ``breaker_p10`` token for a Leviton breaker.
+    """
+    source, _device, channel_id = key
+    meta = meta or {}
+    name = str(meta.get("short_label") or meta.get("label") or "").strip() or None
+    panel = str(meta.get("panel") or "").strip() or None
+
+    if source == model.SOURCE_LEVITON:
+        breaker = _BREAKER_RE.match(channel_id)
+        if breaker:
+            num = int(breaker.group(1))
+            head = f"Panel {panel} breaker {num}" if panel else f"breaker {num}"
+            return f"{head} — {name}" if name else head
+        if name:
+            return name
+        ct = _CT_RE.match(channel_id)
+        if ct:
+            kind = "feed" if ct.group(1) == "1" else "subpanel"
+            leg = ct.group(2).upper()
+            return f"Panel {panel} {kind} {leg}" if panel else f"{kind} {leg}"
+    return name or channel_id
+
+
+def label_index(rows: Iterable[Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """``key -> {label, short_label, panel}`` from entries or resolved rows.
+
+    Accepts either raw :class:`ChannelEntry` or joined :class:`DimRow` (both carry
+    ``key`` / ``label`` / ``short_label`` / ``panel``). ``panel`` is back-filled
+    from a sibling on the same device that DOES know its panel — a breaker carries
+    no panel of its own, but its feed CT does — so :func:`channel_display` can name
+    the panel even for a channel the inventory left panel-less.
+    """
+    rows = list(rows)
+    device_panel: dict[str, str] = {}
+    for r in rows:
+        p = getattr(r, "panel", None)
+        if p:
+            device_panel.setdefault(r.device_id, p)
+    index: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for r in rows:
+        index[r.key] = {
+            "label": getattr(r, "label", None),
+            "short_label": getattr(r, "short_label", None),
+            "panel": getattr(r, "panel", None) or device_panel.get(r.device_id),
+        }
+    return index
+
+
+def resolved_label_index(
+    map_path: Path | str,
+    inventory_path: Path | str | None,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Label lookup for digests/notifications, with blackstart names applied.
+
+    The consumers used to build this from :func:`load_channel_map` alone, which
+    returns only what an entry states OUTRIGHT — so every breaker, whose name
+    lives in the inventory, came back nameless and printed as ``breaker_p10``.
+    This joins the inventory the way :func:`build` does, so the real circuit name
+    and panel appear. It never raises: a host without ``montfort.json`` (build-dim
+    runs on the Mac, not necessarily the collector) falls back to the explicit
+    fields — exactly the old behaviour, never worse, better where the inventory is
+    present.
+    """
+    entries = load_channel_map(map_path)
+    if inventory_path:
+        try:
+            inventory = load_inventory(inventory_path)
+            rows = resolve_rows(entries, inventory, updated_at=timeutil.now_utc())
+            return label_index(rows)
+        except Exception as exc:  # noqa: BLE001 - labels are a nicety, not the point
+            log.warning(
+                "dim_label_join_unavailable", error=f"{type(exc).__name__}: {exc}"
+            )
+    return label_index(entries)
 
 
 def build_table(rows: Sequence[DimRow]) -> pa.Table:
