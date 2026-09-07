@@ -111,6 +111,14 @@ STUCK_DUTY: Final[float] = 0.98
 STUCK_NORMAL_DUTY: Final[float] = 0.90
 #: Only for circuits that actually pull power; ignores always-on electronics.
 STUCK_MIN_WATTS: Final[float] = 200.0
+#: Span of the compressor's hourly-mean RPM over the day, above which a
+#: variable-speed HVAC circuit counts as MODULATING rather than stuck. An
+#: inverter compressor legitimately runs 24/7 in a heat wave, ramping its speed
+#: to hold setpoint — observed 0–2700 rpm — so "drew all day" is not a fault for
+#: it the way it is for a well pump. Only a compressor whose speed is PINNED
+#: (span below this) is actually stuck. 300 rpm cleanly separates the two: real
+#: modulation here spans thousands, a stuck unit would be flat.
+STUCK_HVAC_MODULATION_RPM: Final[float] = 300.0
 
 #: The barn is ~100% EV charging (STATE.md).
 BARN_MIN_KWH: Final[float] = 3.6
@@ -345,6 +353,15 @@ WHERE metric = 'kwh_interval' AND interval_s = ?
 GROUP BY 1, 2
 """
 
+#: The span of the HVAC compressor's hourly-mean RPM over a day — how much it
+#: modulated. Read straight from the unit (Bryant), not inferred from the panel.
+COMPRESSOR_RPM_SQL: Final[str] = """
+SELECT max(mean) - min(mean) AS mean_span, count(*) AS hours
+FROM read_parquet(?, union_by_name := true)
+WHERE metric = 'compressor_rpm' AND source = 'bryant'
+  AND local_hour_start >= ? AND local_hour_start < ?
+"""
+
 
 def _rows(con: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
     cur = con.execute(sql, list(params))
@@ -355,6 +372,31 @@ def _rows(con: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
 def _expected_seconds(local_day: date) -> int:
     """Seconds in a LOCAL day — 23, 24 or 25 hours' worth."""
     return len(list(timeutil.iter_local_hours(local_day))) * 3600
+
+
+def _compressor_modulated(
+    con: Any, hourly: str, local_day: date, *, min_span: float
+) -> bool | None:
+    """Did the HVAC compressor vary its speed over ``local_day``?
+
+    ``True`` it modulated (variable-speed unit riding out a load — not stuck),
+    ``False`` its speed was pinned (a real stuck compressor looks like this), and
+    ``None`` when there is no compressor telemetry to judge by — in which case the
+    caller must not suppress, because "cannot tell" is not "fine".
+    """
+    lo = timeutil.local_midnight_naive(local_day)
+    hi = timeutil.local_midnight_naive(local_day + timedelta(days=1))
+    try:
+        rows = _rows(con, COMPRESSOR_RPM_SQL, [hourly, lo, hi])
+    except Exception as exc:  # noqa: BLE001 - a missing metric is not a crash
+        log.warning("digest_compressor_rpm_unavailable", error=f"{type(exc).__name__}: {exc}")
+        return None
+    if not rows or not rows[0].get("hours"):
+        return None
+    span = rows[0].get("mean_span")
+    if span is None:
+        return None
+    return float(span) >= min_span
 
 
 def _label(labels: Mapping[tuple[str, str, str], Any], key: tuple[str, str, str]) -> str:
@@ -488,22 +530,48 @@ def build_report(
         past_duty = duty_history.get(key, [])
         normally_cycles = bool(past_duty) and statistics.median(past_duty) < STUCK_NORMAL_DUTY
         if hours >= 20 and drawing >= STUCK_DUTY * hours and normally_cycles:
-            usual = statistics.median(past_duty)
-            report.findings.append(
-                Finding(
-                    rule="stuck_load",
-                    key=f"stuck_load:{'/'.join(key)}",
-                    headline=f"{name} never switched off ({drawing}/{hours} hours drawing)",
-                    detail=(
-                        f"Above {STUCK_MIN_WATTS:.0f} W in every hour, against a "
-                        f"usual {usual:.0%} of the day. A thermostatic load that "
-                        "stops cycling is a stuck element, a failed thermostat "
-                        "or a leak."
-                    ),
-                    kwh=round(kwh, 2),
-                    cost_usd=cost(kwh),
+            # A variable-speed HVAC compressor legitimately runs 24/7 in a heat
+            # wave, MODULATING its speed to hold setpoint — that is not stuck. We
+            # collect the compressor's own RPM, so ask it directly: only a
+            # compressor whose speed was PINNED is actually stuck. A non-HVAC
+            # circuit, or one with no compressor telemetry, is judged as before.
+            is_hvac = (labels.get(key) or {}).get("category") == "hvac"
+            modulated = (
+                _compressor_modulated(
+                    con, hourly, local_day, min_span=STUCK_HVAC_MODULATION_RPM
                 )
+                if is_hvac
+                else None
             )
+            if modulated:
+                report.notes.append(
+                    f"{name} ran continuously but its compressor was modulating "
+                    "(variable-speed HVAC holding setpoint through sustained "
+                    "load) — normal operation, not a stuck load."
+                )
+            else:
+                usual = statistics.median(past_duty)
+                stuck_detail = (
+                    f"Above {STUCK_MIN_WATTS:.0f} W in every hour, against a "
+                    f"usual {usual:.0%} of the day. "
+                ) + (
+                    "Its compressor speed was pinned rather than modulating — a "
+                    "variable-speed unit that stops varying is a stuck compressor "
+                    "or a failed control."
+                    if is_hvac
+                    else "A thermostatic load that stops cycling is a stuck "
+                    "element, a failed thermostat or a leak."
+                )
+                report.findings.append(
+                    Finding(
+                        rule="stuck_load",
+                        key=f"stuck_load:{'/'.join(key)}",
+                        headline=f"{name} never switched off ({drawing}/{hours} hours drawing)",
+                        detail=stuck_detail,
+                        kwh=round(kwh, 2),
+                        cost_usd=cost(kwh),
+                    )
+                )
 
     _strip_heat_rule(con, report, daily=daily, hourly=hourly, local_day=local_day, cost=cost)
     _barn_rule(

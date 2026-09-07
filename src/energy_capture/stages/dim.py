@@ -1084,6 +1084,7 @@ def label_index(rows: Iterable[Any]) -> dict[tuple[str, str, str], dict[str, Any
             "label": getattr(r, "label", None),
             "short_label": getattr(r, "short_label", None),
             "panel": getattr(r, "panel", None) or device_panel.get(r.device_id),
+            "category": getattr(r, "category", None),
         }
     return index
 

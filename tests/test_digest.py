@@ -278,6 +278,57 @@ def test_a_load_still_cycling_normally_is_not_called_stuck(con, tmp_path) -> Non
     assert not any(f.rule == "stuck_load" for f in report.findings)
 
 
+def rpm_rows(day, means):
+    """Bryant ``compressor_rpm`` hourly rows; ``means`` cycles across the 24."""
+    rows = []
+    for hour in range(24):
+        local = datetime.combine(day, datetime.min.time()) + timedelta(hours=hour)
+        m = means[hour % len(means)]
+        rows.append({
+            "hour_start_utc": local + timedelta(hours=4), "local_hour_start": local,
+            "source": model.SOURCE_BRYANT, "device_id": "serial", "channel_id": "system",
+            "metric": "compressor_rpm", "unit": "rpm",
+            "mean": m, "min": m, "max": m, "p95": m, "sample_count": 120,
+            "first_ts_utc": local + timedelta(hours=4), "last_ts_utc": local + timedelta(hours=4),
+            "kwh": None, "observed_seconds": None,
+        })
+    return rows
+
+
+HVAC_KEY = (model.SOURCE_LEVITON, HUB, "breaker_p10")
+HVAC_LABELS = {HVAC_KEY: {"short_label": "Heat pump", "panel": "B", "category": "hvac"}}
+
+
+def test_a_modulating_hvac_compressor_running_all_day_is_not_stuck(con, tmp_path) -> None:
+    """A variable-speed heat pump runs 24/7 in a heat wave, ramping its speed to
+    hold setpoint. That is correct operation — the unit's own RPM proves it — not
+    a stuck compressor, and it must not page."""
+    rows = cycling_history("breaker_p10", on_watts=1500.0)
+    rows += hourly_rows(DAY, "breaker_p10", watts=1500.0)   # drawing all 24 hours
+    rows += rpm_rows(DAY, [500.0, 2500.0])                  # compressor MODULATING
+
+    report = digest.build_report(
+        con, local_day=DAY, labels=HVAC_LABELS, **sources(tmp_path, rows)
+    )
+    assert not any(f.rule == "stuck_load" for f in report.findings), report.body()
+    assert any("modulating" in n for n in report.notes), report.notes
+
+
+def test_a_pinned_hvac_compressor_running_all_day_is_still_flagged(con, tmp_path) -> None:
+    """The real fault the rule must keep: a variable-speed compressor whose speed
+    is PINNED while it draws all day is stuck, and still fires."""
+    rows = cycling_history("breaker_p10", on_watts=1500.0)
+    rows += hourly_rows(DAY, "breaker_p10", watts=1500.0)
+    rows += rpm_rows(DAY, [1500.0])                         # compressor PINNED
+
+    report = digest.build_report(
+        con, local_day=DAY, labels=HVAC_LABELS, **sources(tmp_path, rows)
+    )
+    found = [f for f in report.findings if f.rule == "stuck_load"]
+    assert len(found) == 1, report.body()
+    assert "pinned" in found[0].detail
+
+
 def test_strip_heat_on_a_mild_day_is_reported(con, tmp_path) -> None:
     """The most expensive silent fault available here, and the best measured:
     `eheat` kWh/day and `outdoor_temp_f` were both already collected and
