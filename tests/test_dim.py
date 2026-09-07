@@ -1254,3 +1254,47 @@ def test_a_placeholder_does_not_consume_the_one_primary_slot(tmp_path) -> None:
     )
     entries = dim.load_channel_map(path)
     assert [e.device_id for e in entries if e.primary and not e.placeholder] == ["1308468"]
+
+
+# ------------------------------------------------- human-readable channel names
+
+
+def test_channel_display_names_panel_number_and_circuit() -> None:
+    """The whole point: `breaker_p10` reads as a panel, a number, and a name."""
+    L = model.SOURCE_LEVITON
+    meta = {"short_label": "Heat pump outdoor unit (5-ton)", "panel": "B"}
+    assert (
+        dim.channel_display((L, "1000_0046_1D48", "breaker_p10"), meta)
+        == "Panel B breaker 10 — Heat pump outdoor unit (5-ton)"
+    )
+    # Panel + number even when the inventory gave no name.
+    assert (
+        dim.channel_display((L, "d", "breaker_p10"), {"panel": "B"})
+        == "Panel B breaker 10"
+    )
+    # No meta at all: still a number, never the raw `breaker_p10` token.
+    assert dim.channel_display((L, "d", "breaker_p11"), None) == "breaker 11"
+    # A named CT keeps its inventory name.
+    assert (
+        dim.channel_display((L, "d", "ct_1_a"), {"short_label": "Panel B feed A"})
+        == "Panel B feed A"
+    )
+
+
+def test_label_index_backfills_panel_from_a_sibling_on_the_device() -> None:
+    """A breaker carries no panel; its feed CT does, and they share a device."""
+    L = model.SOURCE_LEVITON
+
+    class Row:
+        def __init__(self, ch, panel, short):
+            self.device_id, self.channel_id, self.panel, self.short_label, self.label = (
+                "1000_0046_1D48", ch, panel, short, None,
+            )
+
+        @property
+        def key(self):
+            return (L, self.device_id, self.channel_id)
+
+    idx = dim.label_index([Row("ct_1_a", "B", "Panel B feed A"), Row("breaker_p10", None, None)])
+    # The panel-less breaker inherits panel B from its feed sibling.
+    assert idx[(L, "1000_0046_1D48", "breaker_p10")]["panel"] == "B"

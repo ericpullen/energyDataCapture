@@ -167,7 +167,7 @@ def test_a_half_watched_day_is_skipped_not_reported_as_a_drop(con, tmp_path) -> 
 
     assert report.findings == [], report.body()
     assert report.compared == 0
-    assert report.skipped_incomplete == ["breaker_p11"]
+    assert report.skipped_incomplete == ["breaker 11"]
 
 
 def test_incomplete_days_are_kept_out_of_the_baseline_too(con, tmp_path) -> None:
@@ -194,7 +194,7 @@ def test_a_circuit_with_no_history_is_named_not_judged(con, tmp_path) -> None:
     report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
     assert report.findings == []
     assert report.compared == 0
-    assert report.skipped_unbaselined == ["breaker_p11"]
+    assert report.skipped_unbaselined == ["breaker 11"]
 
 
 def test_an_empty_archive_says_so_rather_than_reporting_all_clear(con, tmp_path) -> None:

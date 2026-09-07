@@ -358,13 +358,15 @@ def _expected_seconds(local_day: date) -> int:
 
 
 def _label(labels: Mapping[tuple[str, str, str], Any], key: tuple[str, str, str]) -> str:
-    meta = labels.get(key)
-    if isinstance(meta, Mapping):
-        for field_name in ("short_label", "label"):
-            value = meta.get(field_name)
-            if isinstance(value, str) and value.strip():
-                return value
-    return f"{key[2]}"
+    """A human name for a channel — panel, breaker number, and circuit name.
+
+    Delegates to the one naming authority (:func:`dim.channel_display`) so a
+    digest line reads ``Panel B breaker 10 — Heat pump outdoor unit`` rather than
+    ``breaker_p10``.
+    """
+    from energy_capture.stages import dim
+
+    return dim.channel_display(key, labels.get(key))
 
 
 # ----------------------------------------------------------------- the rules
@@ -878,9 +880,12 @@ def _run(
     entries: list[Any] = []
     try:
         entries = dim.load_channel_map(map_path or compare.DEFAULT_CHANNEL_MAP)
-        labels = {
-            e.key: {"label": e.label, "short_label": e.short_label} for e in entries
-        }
+        # Resolve through the blackstart inventory so breakers carry their real
+        # name and panel, not just the ones the map states outright.
+        labels = dim.resolved_label_index(
+            map_path or compare.DEFAULT_CHANNEL_MAP,
+            settings.blackstart_inventory_path,
+        )
     except Exception as exc:  # noqa: BLE001 - labels are a nicety, not the point
         log.warning("digest_labels_unavailable", error=f"{type(exc).__name__}: {exc}")
 
