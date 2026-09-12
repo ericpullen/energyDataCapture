@@ -400,7 +400,7 @@ def test_the_scheduled_purge_deletes_only_uploaded_rows_past_the_floor(
 
     # Nothing is uploaded yet: age alone must not delete un-landed data.
     now = timeutil.local_naive_to_utc(datetime(2026, 8, 17, 1, 30))
-    assert asyncio.run(runtime._job_spool_purge(now, spool=spool)) == {"purged_rows": 0}
+    assert asyncio.run(runtime._job_spool_purge(now, spool=spool)) == {"purged_rows": 0, "vacuumed": True}
     assert spool.stats().total_rows == total
 
     uploader.run(spool=spool, bucket=BUCKET, client=s3, status=status, now=now)
@@ -408,7 +408,7 @@ def test_the_scheduled_purge_deletes_only_uploaded_rows_past_the_floor(
 
     # Now both interlocks are satisfied for the 30-day-old rows only.
     result = asyncio.run(runtime._job_spool_purge(now, spool=spool))
-    assert result == {"purged_rows": 8}
+    assert result == {"purged_rows": 8, "vacuumed": True}
     assert spool.stats().total_rows == total - 8
 
 

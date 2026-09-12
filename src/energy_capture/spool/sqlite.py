@@ -615,8 +615,15 @@ class SpoolDB:
                 cutoff_utc=timeutil.format_utc(cutoff),
             )
         if vacuum:
-            # Outside a transaction by definition.
-            self.connect().execute("VACUUM")
+            # Outside a transaction by definition. VACUUM rebuilds the file, but
+            # in WAL mode the rebuilt pages land in the -wal file first, so the
+            # main db is not shrunk on disk until a checkpoint folds them back and
+            # truncates. On a RAM-tight box the whole point is returning the freed
+            # space, so checkpoint immediately (TRUNCATE is best-effort — it does
+            # nothing harmful if a reader is mid-snapshot).
+            conn = self.connect()
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return deleted
 
     # ----------------------------------------------------------------- reads
