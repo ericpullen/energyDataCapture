@@ -405,8 +405,11 @@ async def _job_spool_purge(now: datetime, *, spool: SpoolDB | None = None) -> An
     """
     if spool is None:  # pragma: no cover - only when no runtime owns the spool
         return {"skipped": "no_spool"}
-    deleted = await _call(spool.purge, now=now)
-    return {"purged_rows": deleted}
+    from energy_capture.config import get_settings
+
+    vacuum = get_settings().spool_vacuum_on_purge
+    deleted = await _call(spool.purge, now=now, vacuum=vacuum)
+    return {"purged_rows": deleted, "vacuumed": vacuum}
 
 
 async def _job_daily_maintenance(

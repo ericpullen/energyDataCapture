@@ -224,6 +224,14 @@ class Settings(BaseSettings):
     leviton_discovery_interval_s: int = Field(default=3600, ge=60)
     spool_dir: Path = Path("/data")
     spool_retention_days: int = Field(default=7, ge=1)
+    #: VACUUM the spool after each nightly purge. The purge deletes rows but
+    #: SQLite keeps the freed pages, so the file holds its high-water mark
+    #: forever — which is how it crept to 296 MB on the 1 GB box (2026-09-12)
+    #: after a transient backlog, narrowing the RAM margin the 2026-08-29 outage
+    #: was fixed to widen. VACUUM runs in the owning process right after the
+    #: purge, so the file tracks its true size daily. On by default; the DB is
+    #: tens of MB and nothing here is performance-sensitive.
+    spool_vacuum_on_purge: bool = True
     health_port: int = Field(default=8080, ge=1, le=65535)
     log_level: str = "INFO"
 

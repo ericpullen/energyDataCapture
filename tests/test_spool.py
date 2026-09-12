@@ -417,6 +417,31 @@ def test_purge_defaults_to_the_configured_retention(spool: SpoolDB) -> None:
     assert spool.stats().total_rows == 1
 
 
+def test_purge_with_vacuum_reclaims_disk_a_plain_purge_leaves_behind(tmp_path) -> None:
+    """2026-09-12: a plain purge frees SQLite pages but the file keeps its
+    high-water mark — how the spool crept to 296 MB on the 1 GB box. A vacuuming
+    purge reclaims it in the owning process."""
+    db_path = tmp_path / "spool.db"
+    spool = SpoolDB(db_path)
+    try:
+        now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+        old = now - timedelta(days=30)
+        spool.append([obs(old, channel=f"breaker_p{i}") for i in range(6000)])
+        rows = _all_rows(spool)
+        spool.mark_uploaded(rows[0].local_date, rows[0].local_hour)
+
+        # Plain purge deletes every row but the pages stay in the file.
+        assert spool.purge(1, now=now) == 6000
+        spool.connect().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        high_water = db_path.stat().st_size
+
+        # A vacuuming purge (nothing left to delete) reclaims the freed pages.
+        assert spool.purge(1, now=now, vacuum=True) == 0
+        assert db_path.stat().st_size < high_water
+    finally:
+        spool.close()
+
+
 # -------------------------------------------------------------------- stats
 
 

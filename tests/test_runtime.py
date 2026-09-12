@@ -2064,3 +2064,23 @@ def test_a_batch_only_process_does_not_get_the_purge_warning(caplog) -> None:
     assert not any(
         "scheduled_jobs_no_purge" in record.getMessage() for record in caplog.records
     )
+
+
+def test_daily_purge_vacuums_by_default() -> None:
+    """2026-09-12: the nightly purge now VACUUMs so the file can't hold a
+    high-water mark, which is what let the spool creep toward the box's RAM."""
+
+    class FakeSpool:
+        def __init__(self):
+            self.calls = []
+
+        def purge(self, *, now, vacuum):
+            self.calls.append(vacuum)
+            return 5
+
+    fake = FakeSpool()
+    result = asyncio.run(
+        runtime._job_spool_purge(datetime(2026, 9, 12, 1, 30), spool=fake)
+    )
+    assert fake.calls == [True]
+    assert result == {"purged_rows": 5, "vacuumed": True}
