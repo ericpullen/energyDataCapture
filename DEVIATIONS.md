@@ -5054,3 +5054,86 @@ unchanged.
 value from the same stale store, so nothing since the repair tests the CTs. The
 first honest measurement is whatever `ws` mode records from now on, and the first
 real verdict is tomorrow's 10:00 digest over a full day.
+
+
+## 198. The digest paged every morning and was cut off 41 times in 46 — signal over noise
+
+Not a deviation from PLAN.md, which never specified the digest; a deviation from what #191
+said it would be. #191's whole design rule was *"not crying wolf"*. Measured, it cried wolf
+every single day, and the owner stopped reading it — which is exactly how #180 hid for six days.
+
+### What the replay showed
+
+Every digest from 2026-10-10 to 2026-11-24 re-run against the archive with `--no-notify`:
+
+| | |
+|---|---|
+| days with a push | **46 of 46** |
+| pushes over Pushover's ~1,000-char limit | **41** (typically 2,000–6,000 chars) |
+| findings | 314 — **240 (76%) instrument findings**, almost all the one known Panel B fault (#180) |
+| of those, "strip heat feed frozen" | 110 — the blower at a steady speed (below), not a fault |
+| consumption findings worth reading | a handful: dryer 15.1 kWh ($1.73), oven self-clean 9 kWh, a bedroom space heater |
+
+Five causes, each fixed:
+
+1. **One-night memory.** `_decide_push` compared tonight's signatures with *last night's* only,
+   so any finding that skipped a day was "new" again. State now keeps 30 days of per-day
+   signatures and the day each one last paged; a finding that already paged stays quiet until
+   it has been **absent for 7 days** (`REPEAT_AFTER_DAYS`). The old one-night state file is
+   read as "seen and paged yesterday", so deploying this does not re-page everything at once.
+2. **A known instrument fault paged forever.** An instrument finding on a hub that had one on
+   ≥3 of the last 14 days is now *known*: one status line ("Panel B readings inconsistent 15 of
+   the last 15 days (known fault, not paging)"), never a push on its own. An instrument problem
+   on a clean hub still pages.
+3. **No materiality floor.** Cooking, lights and a fridge at $0.07–0.20 paged. A priced
+   finding now pages only at `DIGEST_MIN_COST_USD` (default **$0.50**, the owner's choice);
+   below it, it rides along under "Also noticed (not paging)". Unpriced findings (a circuit gone
+   quiet) are not subject to it. The overnight-floor finding is now priced, so it is.
+4. **The message was built to be truncated.** Each finding carried its ~400-char explanation,
+   and instrument findings sorted first, so the cut always fell on the house. The push is now
+   one line per finding, cost-ordered, built by `render_push` to fit under 1,000 chars, and
+   says `+N more in the log` when it drops anything. Full detail is still in every
+   `digest_finding` log line and in `/healthz`.
+5. **Rules that were wrong for this house:**
+   - *Feed totals in the band.* `ct_1_*` are each panel's total; a band on them repeats the
+     breakers and they are the channels that freeze. Excluded (`FEED_CHANNELS`).
+   - *"Went quiet" on noise.* Main-floor lights at 2.8 vs 3.6 kWh. Now needs a usual ≥1 kWh/day
+     and a drop to ≤50%.
+   - *"Stuck load" on a feeder.* The HVAC subpanel CT draws all day whenever the thermostat fan
+     is set to run continuously — a setting. `stuck_load` is now breakers only; a strip heater
+     that truly sticks is tens of kWh and trips the cost band anyway.
+   - *Subpanel CT "frozen" while the blower is steady.* In November 93% of hours with the
+     blower at a steady ~1230 rpm and the compressor off had one `ct_2` value, while it updated
+     normally whenever the compressor cycled. Bryant's own RPM now exempts those runs
+     (`STEADY_BLOWER_RPM_SPAN = 100`); no telemetry means "cannot tell" and still fires.
+     **The feed CT never gets this exemption** — its faults come with physically impossible
+     readings.
+   - *The overnight floor had effectively never run*: it read the feed CTs and skipped itself
+     whenever one was untrusted, i.e. nearly every night. It now reads the **utility meter's**
+     15-minute intervals, excluding hours the heat pump's compressor turned (a cold night runs
+     it till dawn and raises the floor with nothing left on).
+
+### A second instrument fault the replay surfaced
+
+**Panel A's water-heater breaker (`breaker_p19`) sometimes reports a steady 4,725 W while
+Panel A's feed reads ~1 kW** (2026-10-15 01:00: breaker min = max = 4,725 W, feed 573–1,026 W).
+The digest then billed it: "Water heater used 21.3 kWh, usually 8.1 (+$1.63)" — false.
+`feed_below_children` caught the impossibility but only marked the *feed* untrusted. It now
+names any circuit that **alone** outdraws a visibly live feed (varying, non-zero) and marks it
+untrusted for the day, so it is neither billed nor baselined. A feed latched at zero or pinned
+never implicates a child — on Panel B that rule first blamed an honest 300 W heat pump.
+
+### Result, same 46 days replayed through the new policy
+
+**16 pushes, not 46: 7 Monday summaries and 9 daily alerts (the first of them the
+empty-state cold start), largest 891 chars, none truncated.** The alerts that survive are the ones worth a look — the dryer, the oven's
+self-clean, the bedroom space heater's first day, the mini-split coming on for the season, the
+dehumidifier switched off, a 250 W rise in the overnight floor.
+
+### Monday is now a weekly summary
+
+The Monday heartbeat (#191/N3) was a bare "nothing unusual". It is now the week: house kWh and
+~$ from the meter against the week before and the same week last year (364 days back, so
+weekdays align), HVAC energy by component from Bryant, the three circuits that moved most, and
+the instrument status — still always sent, so it is still the heartbeat. `energycap digest
+--weekly` runs it on demand; `_job_digest` passes `weekly=` on `DIGEST_HEARTBEAT_WEEKDAY`.

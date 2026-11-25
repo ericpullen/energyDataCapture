@@ -391,18 +391,105 @@ def test_a_normal_barn_day_is_silent(con, tmp_path) -> None:
     assert not any(f.rule == "barn_envelope" for f in report.findings)
 
 
+def meter_night(day, *, kwh_per_interval, device=HOUSE):
+    """900 s meter intervals across the whole day (the rule reads 01:00-05:59)."""
+    rows = []
+    for q in range(96):
+        local = datetime.combine(day, datetime.min.time()) + timedelta(minutes=15 * q)
+        rows.append({
+            "ts_utc": local + timedelta(hours=4), "ts_local": local,
+            "source": model.SOURCE_LGE, "device_id": device,
+            "channel_id": "electric_main", "metric": "kwh_interval",
+            "value": kwh_per_interval, "unit": "kWh", "interval_s": 900,
+        })
+    return rows
+
+
 def test_a_rising_overnight_floor_is_reported(con, tmp_path) -> None:
     """A 200 W fault is 3% of a busy day and invisible in the total, but it is
-    a third of the floor at 03:00 — and 4.8 kWh every single day."""
-    rows = []
+    a third of the floor at 03:00 — and 4.8 kWh every single day. Read from the
+    utility meter, so a frozen clamp can no longer silence it."""
+    meter = []
     for n in range(14, 0, -1):
-        for leg in ("ct_1_a", "ct_1_b"):
-            rows += hourly_rows(DAY - timedelta(days=n), leg, watts=200.0)
-    for leg in ("ct_1_a", "ct_1_b"):
-        rows += hourly_rows(DAY, leg, watts=500.0)
+        meter += meter_night(DAY - timedelta(days=n), kwh_per_interval=0.25)  # 1,000 W
+    meter += meter_night(DAY, kwh_per_interval=0.35)                          # 1,400 W
 
-    report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
+    report = digest.build_report(
+        con, local_day=DAY, meter_device=HOUSE, rate_usd=0.12,
+        **sources(tmp_path, [], None, meter),
+    )
+    found = [f for f in report.findings if f.rule == "phantom_load_growth"]
+    assert len(found) == 1, report.body()
+    assert "1400 W, up from 1000 W" in found[0].headline
+    assert found[0].cost_usd == pytest.approx(9.6 * 0.12, abs=0.01)
+
+
+def test_the_overnight_floor_ignores_hours_the_heat_pump_ran(con, tmp_path) -> None:
+    """A cold night runs the compressor till dawn. That raises the floor without
+    anything having been left on, so those hours are not the floor."""
+    meter = []
+    for n in range(14, 0, -1):
+        meter += meter_night(DAY - timedelta(days=n), kwh_per_interval=0.25)
+    meter += meter_night(DAY, kwh_per_interval=0.75)                          # 3 kW all night
+    hourly = rpm_rows(DAY, [2400.0])                                          # compressor on
+
+    report = digest.build_report(
+        con, local_day=DAY, meter_device=HOUSE,
+        **sources(tmp_path, hourly, None, meter),
+    )
+    assert not any(f.rule == "phantom_load_growth" for f in report.findings)
+    assert any("heat pump ran all night" in n for n in report.notes), report.notes
+
+
+def test_a_frozen_feed_clamp_no_longer_silences_the_overnight_floor(con, tmp_path) -> None:
+    """It used to skip whenever a feed CT was untrusted — nearly every night
+    with Panel B's clamps — so the check had effectively never run."""
+    meter = []
+    for n in range(14, 0, -1):
+        meter += meter_night(DAY - timedelta(days=n), kwh_per_interval=0.25)
+    meter += meter_night(DAY, kwh_per_interval=0.35)
+    report = digest.build_report(
+        con, local_day=DAY, meter_device=HOUSE,
+        untrusted=[(model.SOURCE_LEVITON, HUB, "ct_1_a")],
+        **sources(tmp_path, [], None, meter),
+    )
     assert any(f.rule == "phantom_load_growth" for f in report.findings), report.body()
+
+
+def test_a_feeder_ct_drawing_all_day_is_not_a_stuck_load(con, tmp_path) -> None:
+    """The HVAC subpanel CT with the fan set to run continuously: a setting,
+    not a stuck element. Paged every fortnight in the replay."""
+    rows = cycling_history("ct_2_a", on_watts=420.0)
+    rows += hourly_rows(DAY, "ct_2_a", watts=420.0)
+    report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
+    assert not any(f.rule == "stuck_load" for f in report.findings), report.body()
+
+
+def test_feed_totals_are_not_judged_against_a_band(con, tmp_path) -> None:
+    """A feed CT is the panel's total; a band on it repeats what the breakers
+    beneath already said (the replay paged "Panel A feed A used 36.5 kWh")."""
+    rows = steady_history("ct_1_a", watts=1000.0)
+    rows += hourly_rows(DAY, "ct_1_a", watts=3000.0)
+    report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
+    assert not any(f.rule == "above_band" for f in report.findings), report.body()
+
+
+def test_a_modest_dip_on_a_busy_circuit_is_not_went_quiet(con, tmp_path) -> None:
+    """Main-floor lights at 2.8 kWh against 3.6 is a quiet evening, not a
+    failure. Only a drop to half or less counts."""
+    rows = steady_history("breaker_p16", watts=150.0)            # 3.6 kWh/day
+    rows += hourly_rows(DAY, "breaker_p16", watts=117.0)          # 2.8 kWh
+    report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
+    assert not any(f.rule == "circuit_went_quiet" for f in report.findings), report.body()
+
+
+def test_a_circuit_that_barely_draws_cannot_go_quiet(con, tmp_path) -> None:
+    """A kitchen circuit that "usually" uses 0.8 kWh and some days is not used
+    at all is not a failure on the days it is not used."""
+    rows = steady_history("breaker_p10", watts=33.0)             # 0.8 kWh/day
+    rows += hourly_rows(DAY, "breaker_p10", watts=0.0)
+    report = digest.build_report(con, local_day=DAY, **sources(tmp_path, rows))
+    assert not any(f.rule == "circuit_went_quiet" for f in report.findings), report.body()
 
 
 # --------------------------------------------------------------- the report
@@ -437,67 +524,171 @@ def _report_with(*findings: digest.Finding) -> digest.DigestReport:
 
 
 FROZEN = digest.Finding(
-    rule="frozen_channel", key="frozen_channel:leviton/HUBB/ct_1_a",
+    rule="frozen_channel", key="frozen_channel:leviton/HUBB/ct_1_a", device="HUBB",
     headline="Panel B feed A reported exactly 539.79 W for 4 consecutive hours",
     detail="...",
 )
+DRYER = digest.Finding(
+    rule="above_band", key="above_band:leviton/HUBA/breaker_p1",
+    headline="Panel A breaker 1 — Dryer outlet used 15.1 kWh, usually 1.1",
+    detail="...", kwh=14.0, cost_usd=1.73,
+)
+OVEN = digest.Finding(
+    rule="above_band", key="above_band:leviton/HUBB/breaker_p14",
+    headline="Panel B breaker 14 — Double oven used 0.6 kWh, usually 0.0",
+    detail="...", kwh=0.6, cost_usd=0.08,
+)
 
 
-def test_a_repeat_of_yesterdays_finding_does_not_page_again() -> None:
-    """The whole point: a latched CT is a finding every night, but one message.
+def _state(**days: list[digest.Finding]) -> dict:
+    """``d3=[FROZEN]`` means: seen 3 days before DAY, and paged that day."""
+    out: dict = {"days": {}, "pushed": {}}
+    for name, findings in days.items():
+        day = (DAY - timedelta(days=int(name[1:]))).isoformat()
+        out["days"][day] = {
+            "signatures": [f.signature() for f in findings],
+            "instrument_devices": sorted({f.device for f in findings if f.instrument and f.device}),
+        }
+        for f in findings:
+            out["pushed"].setdefault(f.signature(), day)
+    return out
 
-    Its headline carries the day's watt value and hour count, so it changes
-    nightly — only the stable ``key`` keeps it recognisable as the same fault.
-    """
-    prior = {"signatures": [FROZEN.signature()]}
-    # A DIFFERENT headline (new watts/hours) but the same subject key.
+
+def decide(report, state=None, **kw):
+    kw.setdefault("min_cost_usd", 0.50)
+    return digest._decide_push(report, state, local_day=DAY, **kw)
+
+
+def test_a_material_new_finding_pages() -> None:
+    plan = decide(_report_with(DRYER))
+    assert plan.send and plan.reason == "new" and plan.alerts == [DRYER]
+
+
+def test_a_finding_below_the_cost_floor_rides_along_but_does_not_page() -> None:
+    """Ordinary cooking was a page every few days at $0.07-0.20."""
+    plan = decide(_report_with(OVEN))
+    assert not plan.send and plan.alerts == [] and plan.also == [OVEN]
+
+
+def test_a_repeat_does_not_page_even_after_skipping_a_day() -> None:
+    """THE regression. The old rule compared with last night only, so a fault
+    that skipped one day paged again — 8 of 9 mornings in November 2026."""
     tonight = digest.Finding(
-        rule="frozen_channel", key=FROZEN.key,
-        headline="Panel B feed A reported exactly 482.10 W for 8 consecutive hours",
+        rule="above_band", key=DRYER.key, headline="Dryer used 12.0 kWh, usually 1.1",
+        detail="...", cost_usd=1.36,
+    )
+    plan = decide(_report_with(tonight), _state(d2=[DRYER]))   # absent yesterday
+    assert not plan.send and plan.also == [tonight]
+
+
+def test_a_finding_absent_for_more_than_a_week_pages_again() -> None:
+    plan = decide(_report_with(DRYER), _state(d9=[DRYER]))
+    assert plan.send and plan.alerts == [DRYER]
+
+
+def test_a_known_instrument_fault_is_one_status_line_not_a_page() -> None:
+    """Three quarters of every replayed message was one Panel B clamp fault."""
+    other_channel = digest.Finding(
+        rule="frozen_channel", key="frozen_channel:leviton/HUBB/ct_2_a", device="HUBB",
+        headline="Strip heat feed A reported exactly 421.36 W for 10 consecutive hours",
         detail="...",
     )
-    send, reason, _, new = digest._decide_push(
-        _report_with(tonight), prior, always_notify=False
+    plan = decide(_report_with(other_channel), _state(d1=[FROZEN], d3=[FROZEN], d5=[FROZEN]))
+    assert not plan.send
+    assert plan.alerts == [] and plan.known_instrument == {"HUBB": 4}
+
+
+def test_an_instrument_problem_on_a_clean_hub_still_pages() -> None:
+    fresh = digest.Finding(
+        rule="feed_below_children", key="feed_below_children:HUBA", device="HUBA",
+        headline="HUBA feed read less than its own circuits in 3 hours", detail="...",
     )
-    assert send is False and reason == "unchanged" and new == []
+    plan = decide(_report_with(fresh), _state(d1=[FROZEN], d3=[FROZEN], d5=[FROZEN]))
+    assert plan.send and plan.alerts == [fresh]
 
 
-def test_a_new_finding_pages_even_while_an_old_one_persists() -> None:
-    new_finding = digest.Finding(rule="stuck_load", key="stuck_load:leviton/x/breaker_p23",
-                                 headline="breaker_p23 never switched off", detail="...")
-    prior = {"signatures": [FROZEN.signature()]}
-    send, reason, current, new = digest._decide_push(
-        _report_with(FROZEN, new_finding), prior, always_notify=False
-    )
-    assert send is True and reason == "changed"
-    assert new == [new_finding.signature()], "only the genuinely new one is 'new'"
+def test_the_weekly_run_always_sends() -> None:
+    plan = decide(_report_with(), weekly=True)
+    assert plan.send and plan.reason == "weekly"
 
 
-def test_the_first_ever_run_with_findings_pages() -> None:
-    send, reason, _, _ = digest._decide_push(_report_with(FROZEN), None, always_notify=False)
-    assert send is True and reason == "first"
+def test_a_clean_night_stays_quiet() -> None:
+    plan = decide(_report_with(), _state(d1=[DRYER]))
+    assert not plan.send and plan.reason == "clear"
 
 
-def test_a_clean_report_stays_quiet_and_forgets_the_cleared_fault() -> None:
-    prior = {"signatures": [FROZEN.signature()]}
-    send, reason, current, _ = digest._decide_push(
-        _report_with(), prior, always_notify=False
-    )
-    # No push for an all-clear, and the fault drops out of the remembered set so
-    # its RETURN tomorrow counts as new again.
-    assert send is False and reason == "clear" and current == []
+def test_the_one_night_state_format_is_upgraded_without_repaging() -> None:
+    """Deploying this must not page every ongoing finding at once."""
+    plan = decide(_report_with(DRYER), {"signatures": [DRYER.signature()]})
+    assert not plan.send and plan.also == [DRYER]
 
 
-def test_state_round_trips_and_keeps_prior_notified_when_not_notified(tmp_path) -> None:
+def test_state_keeps_history_and_only_marks_delivered_alerts_pushed(tmp_path) -> None:
     path = tmp_path / "digest-state.json"
-    now = datetime(2026, 8, 28, 14, 0)
-    digest._write_digest_state(path, [FROZEN.signature()], now=now, notified=True)
+    plan = decide(_report_with(DRYER, OVEN))
+    now = datetime(2026, 8, 24, 15, 0)
+    digest._write_digest_state(path, plan, local_day=DAY, previous=None, now=now, notified=False)
     first = digest._read_digest_state(path)
-    assert first["signatures"] == [FROZEN.signature()]
-    assert first["notified_utc"]
-    # A later quiet run (nothing new, notified=False) must not blank the last
-    # time we actually reached the phone.
-    later = datetime(2026, 8, 29, 14, 0)
-    digest._write_digest_state(path, [FROZEN.signature()], now=later, notified=False)
+    assert first["days"][DAY.isoformat()]["signatures"] == sorted(
+        [DRYER.signature(), OVEN.signature()]
+    )
+    assert first["pushed"] == {} and first["notified_utc"] is None
+    digest._write_digest_state(path, plan, local_day=DAY, previous=first, now=now, notified=True)
     second = digest._read_digest_state(path)
-    assert second["notified_utc"] == first["notified_utc"]
+    assert second["pushed"] == {DRYER.signature(): DAY.isoformat()}, "OVEN never paged"
+    assert second["notified_utc"]
+
+
+# ----------------------------------------------------------- the push itself
+
+
+def test_the_push_always_fits_and_says_what_it_dropped() -> None:
+    """41 of 46 replayed digests were cut off mid-sentence by Pushover."""
+    many = [
+        digest.Finding(
+            rule="above_band", key=f"above_band:leviton/HUBA/breaker_p{n}",
+            headline=f"Panel A breaker {n} — Some circuit with a long name used 9.9 kWh, usually 1.0",
+            detail="x" * 400, cost_usd=1.0 + n / 100,
+        )
+        for n in range(30)
+    ]
+    report = _report_with(*many)
+    title, message = digest.render_push(report, decide(report))
+    assert len(message) <= digest.PUSH_MAX_CHARS
+    assert message.splitlines()[-1].startswith("+") and "more in the log" in message
+    assert "xxxx" not in message, "the long detail belongs in the log, not the push"
+    assert "30 new things" in title
+
+
+def test_the_push_puts_the_known_fault_on_one_line() -> None:
+    other = digest.Finding(
+        rule="frozen_channel", key="frozen_channel:leviton/HUBB/ct_2_a", device="HUBB",
+        headline="Strip heat feed A reported exactly 421.36 W for 10 consecutive hours",
+        detail="...",
+    )
+    report = _report_with(DRYER, other, FROZEN)
+    plan = decide(report, _state(d1=[FROZEN], d3=[FROZEN], d5=[FROZEN]))
+    labels = {("leviton", "HUBB", "ct_1_a"): {"panel": "B"}}
+    title, message = digest.render_push(report, plan, labels=labels)
+    assert "1 new thing" in title
+    assert message.count("Panel B readings inconsistent") == 1
+    assert "421.36" not in message and "Dryer outlet" in message
+
+
+def test_the_weekly_summary_compares_with_the_week_before_and_last_year(con, tmp_path) -> None:
+    meter = []
+    for n in range(14):
+        kwh = 0.5 if n < 7 else 0.4                       # this week 48/day, before 38.4
+        meter += meter_night(DAY - timedelta(days=n), kwh_per_interval=kwh)
+    for n in range(7):
+        meter += meter_night(DAY - timedelta(days=364 + n), kwh_per_interval=1.0)
+    src = sources(tmp_path, [], None, meter)
+    summary = digest.build_weekly(
+        con, hourly=src["hourly"], daily=src["daily"], meter=src["meter"],
+        meter_device=HOUSE, week_end=DAY, rate_usd=0.12,
+        instrument_days={"HUBB": 5}, labels={("leviton", "HUBB", "ct_1_a"): {"panel": "B"}},
+    )
+    assert "336 kWh" in summary.title and "~$40" in summary.title
+    assert "week before +25%" in summary.lines[0]
+    assert "same week last year -50%" in summary.lines[0]
+    assert any("Panel B readings inconsistent 5 of 7 days" in line for line in summary.lines)

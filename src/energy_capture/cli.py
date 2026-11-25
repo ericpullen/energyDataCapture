@@ -1202,6 +1202,13 @@ def digest_cmd(
         bool,
         typer.Option("--always-notify", help="Push even when nothing is unusual."),
     ] = False,
+    weekly: Annotated[
+        bool,
+        typer.Option(
+            "--weekly",
+            help="Lead with a summary of the 7 days ending --day, and always push.",
+        ),
+    ] = False,
     bucket: Annotated[
         str | None, typer.Option("--bucket", help="Archive bucket. Default: S3_BUCKET.")
     ] = None,
@@ -1223,7 +1230,11 @@ def digest_cmd(
     Findings are priced at the marginal rate from config/tariff.json -- the
     cost of one more kWh, not the average, which fixed daily charges inflate.
 
-    Scheduled at 06:00 local as `digest_daily`.
+    Only what is NEW and worth at least DIGEST_MIN_COST_USD a day pages; a
+    finding that already paged stays quiet until it has been gone a week, and a
+    known instrument fault is one status line. Everything is still logged.
+
+    Scheduled at 10:00 local as `digest_daily`; Monday's is the weekly summary.
     """
     _run_stage(
         "digest",
@@ -1231,6 +1242,7 @@ def digest_cmd(
         bucket=bucket,
         notify=notify,
         always_notify=always_notify,
+        weekly=weekly,
     )
 
 

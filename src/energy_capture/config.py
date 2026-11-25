@@ -287,6 +287,13 @@ class Settings(BaseSettings):
     #: Below this a negative is a wiring change worth investigating; at or above
     #: it, it is transient garbage, stored verbatim (rule 2) but named as such.
     integrity_corrupt_reading_w: float = Field(default=100_000.0, gt=0.0)
+    #: The smallest daily cost, in dollars at the marginal rate, at which a
+    #: usage anomaly pages. Below it the finding still rides along in a push that
+    #: happens anyway, and is always logged. Replayed over 2026-10-10..11-24,
+    #: $0.50 keeps the dryer, the oven's self-clean and a space heater, and
+    #: drops ordinary cooking and lights. Findings with no price (a circuit
+    #: gone quiet) are not subject to it.
+    digest_min_cost_usd: float = Field(default=0.50, ge=0.0)
 
     #: Which scheduled jobs this process runs. Empty (the default) means ALL of
     #: them, which is PLAN.md §5's one-container design and must stay the

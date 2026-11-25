@@ -179,10 +179,11 @@ GREENBUTTON_DAILY_AT = (9, 15)
 #: rather than the literal, so moving a fetch cannot silently re-open this.
 DIGEST_DAILY_AT = (10, 0)
 
-#: One firing a week pushes even with nothing to report — Monday. A digest that
-#: only ever speaks when something is wrong is indistinguishable, on a phone,
-#: from a digest that died three weeks ago; the weekly "all quiet" is what makes
-#: the silence on the other six days mean something. ``0`` is Monday
+#: One firing a week pushes even with nothing to report — Monday, as a summary
+#: of the week just ended. A digest that only ever speaks when something is
+#: wrong is indistinguishable, on a phone, from a digest that died three weeks
+#: ago; the weekly summary is what makes the silence on the other six days mean
+#: something. ``0`` is Monday
 #: (``date.weekday()``).
 DIGEST_HEARTBEAT_WEEKDAY = 0
 #: Days of overlap re-read on every run, so a revised interval lands.
@@ -677,9 +678,10 @@ async def _job_digest(now: datetime) -> Any:
     why; this now matches it. Only "the submodule is not in this image" is
     survivable — anything else propagates and is recorded as the failure it is.
 
-    ``always_notify`` on one weekday makes the digest its own heartbeat. A quiet
-    night and a dead digest are the same silence otherwise, and the point of
-    #191 was to stop treating silence as health.
+    ``weekly`` on one weekday makes the digest its own heartbeat: that morning
+    always pushes, as a summary of the week. A quiet night and a dead digest are
+    the same silence otherwise, and the point of #191 was to stop treating
+    silence as health.
     """
     module_name = "energy_capture.stages.digest"
     try:
@@ -701,7 +703,7 @@ async def _job_digest(now: datetime) -> Any:
     return await _call(
         digest.run,
         local_day=local_day,
-        always_notify=timeutil.local_date_of(now).weekday() == DIGEST_HEARTBEAT_WEEKDAY,
+        weekly=timeutil.local_date_of(now).weekday() == DIGEST_HEARTBEAT_WEEKDAY,
     )
 
 
