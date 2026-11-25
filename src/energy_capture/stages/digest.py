@@ -142,6 +142,45 @@ NIGHT_HOURS: Final[tuple[int, int]] = (1, 5)
 #: Growth in that floor worth reporting.
 PHANTOM_GROWTH_W: Final[float] = 150.0
 
+#: "Went quiet" only means something for a circuit that normally draws real
+#: energy, and only for a real drop. The replay of 2026-10-10..11-24 fired it on
+#: main-floor lights at 2.8 kWh against 3.6 — a quiet evening — and on a
+#: kitchen circuit that "usually" uses 0.8 kWh and some days is not used at all.
+QUIET_MIN_MEDIAN_KWH: Final[float] = 1.0
+QUIET_MAX_FRACTION: Final[float] = 0.5
+
+#: The service-feed CTs. They are each panel's TOTAL, so a band on them repeats
+#: whatever the breakers beneath already said, and they are exactly the channels
+#: that freeze (#180). The panel total is judged against the utility meter by
+#: ``integrity`` instead.
+FEED_CHANNELS: Final[frozenset[str]] = frozenset({"ct_1_a", "ct_1_b"})
+
+#: Rules about the meters rather than the house; mirrors ``integrity.RULES``
+#: (which imports this module, so the list cannot be imported from there).
+INSTRUMENT_RULES: Final[frozenset[str]] = frozenset({
+    "negative_reading", "corrupt_reading", "frozen_channel",
+    "feed_below_children", "meter_disagreement",
+})
+
+# -- push policy ---------------------------------------------------------------
+
+#: Pushover's own limit is 1,024 characters; stay under it by building the
+#: message to fit rather than cutting it mid-line.
+PUSH_MAX_CHARS: Final[int] = 1000
+
+#: A finding that already paged stays quiet until it has been ABSENT this long.
+#: Comparing against yesterday only (the old rule) re-paged every fault that
+#: skipped a day — 8 of 9 mornings in November 2026.
+REPEAT_AFTER_DAYS: Final[int] = 7
+
+#: An instrument finding seen on this many of the last :data:`CHRONIC_WINDOW_DAYS`
+#: is a KNOWN fault: it is summarised in one status line and never pages alone.
+CHRONIC_WINDOW_DAYS: Final[int] = 14
+CHRONIC_MIN_DAYS: Final[int] = 3
+
+#: Days of per-day signature history kept in ``digest-state.json``.
+STATE_HISTORY_DAYS: Final[int] = 30
+
 __all__ = [
     "BASELINE_DAYS",
     "Band",
@@ -170,10 +209,23 @@ class Finding:
     #: across days and the digest can stop re-paging for it. ``None`` falls back
     #: to the headline, which means "treat every occurrence as new".
     key: str | None = None
+    #: The hub an INSTRUMENT finding is about, so a push can say "Panel B
+    #: clamps" once instead of listing every channel of the same fault.
+    device: str | None = None
+
+    @property
+    def instrument(self) -> bool:
+        """About the meters themselves, rather than about the house."""
+        return self.rule in INSTRUMENT_RULES
 
     def line(self) -> str:
         money = f"  (~${self.cost_usd:.2f})" if self.cost_usd else ""
         return f"• {self.headline}{money}\n  {self.detail}"
+
+    def short(self) -> str:
+        """One phone-sized line. The ``detail`` stays in the log and /healthz."""
+        money = f" (+${self.cost_usd:.2f})" if self.cost_usd else ""
+        return f"• {self.headline}{money}"
 
     def signature(self) -> str:
         """What makes two findings "the same issue" for cross-day de-duplication."""
@@ -186,6 +238,8 @@ class Finding:
             "detail": self.detail,
             "kwh": self.kwh,
             "cost_usd": self.cost_usd,
+            "device": self.device,
+            "key": self.key,
         }
 
 
@@ -303,24 +357,37 @@ WHERE h.metric = 'watts'
 GROUP BY 1, 2, 3, 4
 """
 
-#: The overnight floor: the quietest hour of the small hours, per day.
+#: The overnight floor, per night, from the UTILITY METER: the quietest
+#: 15-minute interval of the small hours, as watts.
+#:
+#: It used to read the panel feed CTs, and skipped itself whenever one was
+#: untrusted — which, with Panel B's clamps (#180), was nearly every night, so
+#: the one rule that finds "something left on" never ran. The meter is
+#: independent of every clamp.
+#:
+#: Hours in which the heat pump's compressor turned are excluded: in a cold
+#: snap it runs all night, which raises the floor without anything having been
+#: left on. A night with no compressor-free interval yields no floor at all.
 NIGHT_FLOOR_SQL: Final[str] = """
-SELECT
-    h.local_hour_start::DATE AS local_day,
-    min(nightly.total_w)     AS floor_w
-FROM (
-    SELECT
-        local_hour_start,
-        sum(mean) AS total_w
+WITH m AS (
+    SELECT ts_local, value
+    FROM read_parquet(?)
+    WHERE metric = 'kwh_interval' AND interval_s = 900 AND device_id = ?
+      AND ts_local >= ? AND ts_local < ?
+      AND hour(ts_local) BETWEEN ? AND ?
+),
+hvac AS (
+    SELECT local_hour_start, max(max) AS compressor_max
     FROM read_parquet(?, union_by_name := true)
-    WHERE metric = 'watts'
-      AND channel_id IN ('ct_1_a', 'ct_1_b')
-      AND hour(local_hour_start) BETWEEN ? AND ?
-    GROUP BY local_hour_start
-) nightly
-JOIN read_parquet(?, union_by_name := true) h
-  ON h.local_hour_start = nightly.local_hour_start
-WHERE h.local_hour_start >= ? AND h.local_hour_start < ?
+    WHERE source = 'bryant' AND metric = 'compressor_rpm'
+      AND local_hour_start >= ? AND local_hour_start < ?
+    GROUP BY 1
+)
+SELECT m.ts_local::DATE      AS local_day,
+       min(m.value) * 4000.0 AS floor_w,
+       count(*)              AS intervals
+FROM m LEFT JOIN hvac ON hvac.local_hour_start = date_trunc('hour', m.ts_local)
+WHERE coalesce(hvac.compressor_max, 0) = 0
 GROUP BY 1
 """
 
@@ -425,6 +492,7 @@ def build_report(
     baseline_days: int = BASELINE_DAYS,
     rate_usd: Decimal | float | None = None,
     barn_device: str | None = None,
+    meter_device: str | None = None,
     untrusted: Sequence[tuple[str, str, str]] = (),
 ) -> DigestReport:
     """Everything the digest knows, for one local day. Pure apart from ``con``.
@@ -465,6 +533,8 @@ def build_report(
             # Excluded from BOTH sides: not judged today, and not admitted to
             # the history that will judge it tomorrow.
             continue
+        if key[2] in FEED_CHANNELS:
+            continue
         if day == local_day:
             today[key] = {**row, "kwh": kwh, "complete": complete}
         elif complete:
@@ -475,7 +545,8 @@ def build_report(
             history.setdefault(key, []).append(kwh)
 
     for key in sorted(untrusted_keys):
-        report.skipped_untrusted.append(_label(labels, key))
+        if key[2] not in FEED_CHANNELS:
+            report.skipped_untrusted.append(_label(labels, key))
 
     for key, row in sorted(today.items()):
         name = _label(labels, key)
@@ -504,7 +575,11 @@ def build_report(
                     cost_usd=cost(excess),
                 )
             )
-        elif kwh < band.low and abs(band.median - kwh) >= MIN_ABSOLUTE_KWH:
+        elif (
+            kwh < band.low
+            and band.median >= QUIET_MIN_MEDIAN_KWH
+            and kwh <= QUIET_MAX_FRACTION * band.median
+        ):
             # The failure that looks like an improvement. A freezer that stops
             # running uses less power right up until the food spoils.
             report.findings.append(
@@ -529,7 +604,17 @@ def build_report(
         drawing = int(row["hours_drawing"] or 0)
         past_duty = duty_history.get(key, [])
         normally_cycles = bool(past_duty) and statistics.median(past_duty) < STUCK_NORMAL_DUTY
-        if hours >= 20 and drawing >= STUCK_DUTY * hours and normally_cycles:
+        # Breakers only. A CT measures a feeder, not a thermostatic load: the
+        # HVAC subpanel CT draws all day whenever the thermostat's fan is set to
+        # run continuously, which is a setting, not a stuck element — the replay
+        # paged it as "never switched off" every fortnight. A strip heater that
+        # really sticks on is tens of kWh and trips the cost band regardless.
+        if (
+            key[2].startswith("breaker_")
+            and hours >= 20
+            and drawing >= STUCK_DUTY * hours
+            and normally_cycles
+        ):
             # A variable-speed HVAC compressor legitimately runs 24/7 in a heat
             # wave, MODULATING its speed to hold setpoint — that is not stuck. We
             # collect the compressor's own RPM, so ask it directly: only a
@@ -583,17 +668,17 @@ def build_report(
         cost=cost,
         baseline_days=baseline_days,
     )
-    # The overnight-floor rule reads the feed CTs directly, and those are
-    # exactly the channels that freeze (#180). A stuck feed gives a perfectly
-    # flat night floor, which this rule would read as a clean baseline — so an
-    # untrusted feed silences it rather than being quietly believed.
-    if any(key[2].startswith("ct_1") for key in untrusted_keys):
-        report.notes.append(
-            "Overnight-floor check skipped: a service-feed channel is untrusted "
-            "for this day, and that rule reads the feed CTs directly."
-        )
-    else:
-        _phantom_rule(con, report, hourly=hourly, local_day=local_day, lo=lo, hi=hi)
+    _phantom_rule(
+        con,
+        report,
+        meter=meter,
+        meter_device=meter_device,
+        hourly=hourly,
+        local_day=local_day,
+        lo=lo,
+        hi=hi,
+        cost=cost,
+    )
 
     if not report.compared and not report.findings:
         report.notes.append(
@@ -751,25 +836,40 @@ def _barn_rule(con, report, *, meter, local_day, barn_device, cost, baseline_day
     )
 
 
-def _phantom_rule(con, report, *, hourly, local_day, lo, hi) -> None:
+def _phantom_rule(
+    con, report, *, meter, meter_device, hourly, local_day, lo, hi, cost
+) -> None:
     """The overnight floor, which is where a small always-on fault hides.
 
     A 200 W fault is 3% of a busy day and invisible in the total, but it is a
     third of the floor at 03:00 and 4.8 kWh every single day.
     """
+    if not meter_device:
+        report.notes.append(
+            "overnight-floor check skipped: no primary meter in the channel map"
+        )
+        return
     try:
         rows = _rows(
-            con, NIGHT_FLOOR_SQL, [hourly, NIGHT_HOURS[0], NIGHT_HOURS[1], hourly, lo, hi]
+            con,
+            NIGHT_FLOOR_SQL,
+            [meter, meter_device, lo, hi, NIGHT_HOURS[0], NIGHT_HOURS[1], hourly, lo, hi],
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_phantom_unavailable", error=f"{type(exc).__name__}: {exc}")
+        report.notes.append("overnight-floor check could not read the meter")
         return
     floors = {r["local_day"]: float(r["floor_w"] or 0.0) for r in rows}
     tonight = floors.pop(local_day, None)
-    if tonight is None or len(floors) < MIN_BASELINE_DAYS:
+    if tonight is None:
+        report.notes.append(
+            f"overnight-floor check skipped: no compressor-free meter interval "
+            f"for {local_day} (not yet published, or the heat pump ran all night)"
+        )
         return
-    history = sorted(floors.values())
-    median = statistics.median(history)
+    if len(floors) < MIN_BASELINE_DAYS:
+        return
+    median = statistics.median(floors.values())
     if tonight - median < PHANTOM_GROWTH_W:
         return
     daily_kwh = (tonight - median) * 24 / 1000.0
@@ -781,23 +881,53 @@ def _phantom_rule(con, report, *, hourly, local_day, lo, hi) -> None:
             detail=(
                 f"A floor that rises stays risen: {daily_kwh:.1f} kWh every day "
                 "until it is found. Look for something switched on and forgotten "
-                "rather than something used."
+                "rather than something used. Read from the utility meter, with "
+                "heat-pump hours excluded."
             ),
             kwh=round(daily_kwh, 2),
+            cost_usd=cost(daily_kwh),
         )
     )
 
 
 # ----------------------------------------------------- cross-day notify policy
 #
-# The digest runs once a day and used to push whenever it found ANYTHING. A
-# hardware fault that persists for weeks — a latched CT, say — is a finding every
-# single night, so the owner got the same message over and over and learned to
-# ignore it, which is exactly how a real new problem then gets missed. So the
-# digest now remembers the SIGNATURES it reported last time (the stable
-# per-subject identity, not the headline with its nightly numbers) and pushes
-# only when something is NEW. Ongoing faults are still in the body and still on
-# /healthz; they just stop re-paging on their own.
+# The digest runs once a day. A hardware fault that persists for weeks — a
+# latched CT, say — is a finding every single night, and the first version of
+# this policy only compared against the PREVIOUS night: a fault that skipped a
+# day came back as "new" and paged again. Replayed over 2026-10-10..11-24 that
+# pushed on 46 of 46 days, 41 of them past Pushover's length limit, with three
+# quarters of every message about one known Panel B clamp fault. The owner
+# stopped reading them, which is the failure this whole stage exists to prevent.
+#
+# So the policy now separates three things:
+#
+# * an ALERT pages: a house finding worth at least ``DIGEST_MIN_COST_USD`` a day
+#   (or one with no price, like a circuit gone quiet), or an instrument problem
+#   on a hub that has been clean — and only if it has not already paged and
+#   stayed present since (:data:`REPEAT_AFTER_DAYS`);
+# * a KNOWN instrument fault (:data:`CHRONIC_MIN_DAYS` of the last
+#   :data:`CHRONIC_WINDOW_DAYS` on that hub) becomes one status line;
+# * everything else rides along, below the alerts, if there is room.
+#
+# Nothing is dropped from the record: every finding is still logged with its
+# full detail and published to /healthz.
+
+
+@dataclass
+class PushPlan:
+    """What to send for one digest run, and why."""
+
+    send: bool
+    reason: str
+    alerts: list[Finding] = field(default_factory=list)
+    #: House findings not paging today: below the cost floor, or already paged.
+    also: list[Finding] = field(default_factory=list)
+    #: Hub -> days in the chronic window with an instrument finding (incl. today),
+    #: for hubs whose instrument findings are known and not paging.
+    known_instrument: dict[str, int] = field(default_factory=dict)
+    signatures: list[str] = field(default_factory=list)
+    instrument_devices: list[str] = field(default_factory=list)
 
 
 def _read_digest_state(path: Path) -> dict[str, Any] | None:
@@ -810,47 +940,393 @@ def _read_digest_state(path: Path) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
+def _normalise_state(state: Mapping[str, Any] | None, *, local_day: date) -> dict[str, Any]:
+    """Current-format state, upgrading the one-night ``signatures`` form.
+
+    The old form remembered only last night's set. Reading it as "seen and
+    paged yesterday" means the first run after this change does not re-page
+    every ongoing fault at once.
+    """
+    if not state:
+        return {"days": {}, "pushed": {}}
+    if "days" in state:
+        return {
+            "days": dict(state.get("days") or {}),
+            "pushed": dict(state.get("pushed") or {}),
+            "notified_utc": state.get("notified_utc"),
+        }
+    yesterday = (local_day - timedelta(days=1)).isoformat()
+    sigs = list(state.get("signatures") or [])
+    return {
+        "days": {yesterday: {"signatures": sigs, "instrument_devices": []}},
+        "pushed": {sig: yesterday for sig in sigs},
+        "notified_utc": state.get("notified_utc"),
+    }
+
+
 def _decide_push(
     report: DigestReport,
-    previous: Mapping[str, Any] | None,
+    state: Mapping[str, Any] | None,
     *,
-    always_notify: bool,
-) -> tuple[bool, str, list[str], list[str]]:
-    """Return ``(send, reason, current_signatures, new_signatures)``.
+    local_day: date,
+    min_cost_usd: float,
+    always_notify: bool = False,
+    weekly: bool = False,
+) -> PushPlan:
+    """Sort tonight's findings into alerts, ride-alongs and known faults."""
+    st = _normalise_state(state, local_day=local_day)
+    prior: dict[date, dict[str, Any]] = {}
+    for day_s, entry in st["days"].items():
+        try:
+            day = date.fromisoformat(day_s)
+        except ValueError:
+            continue
+        if day < local_day:
+            prior[day] = entry if isinstance(entry, dict) else {"signatures": list(entry)}
+    window_start = local_day - timedelta(days=CHRONIC_WINDOW_DAYS)
 
-    Send when a finding appears that was not in the last report; stay quiet when
-    every current finding is one already reported. A finding that CLEARED is not
-    itself a reason to push — the digest never announced all-clears — but it does
-    drop out of the remembered set so its return would page again.
-    """
-    current = sorted({f.signature() for f in report.findings})
-    known = set(previous.get("signatures", [])) if previous else set()
-    new = [sig for sig in current if sig not in known]
-    if always_notify:
-        return True, "always-notify", current, new
-    if new:
-        return True, ("changed" if known else "first"), current, new
-    if current:
-        return False, "unchanged", current, new
-    return False, "clear", current, new
+    def last_seen(sig: str) -> date | None:
+        days = [d for d, e in prior.items() if sig in (e.get("signatures") or [])]
+        return max(days) if days else None
+
+    def device_days(device: str) -> int:
+        return sum(
+            1 for d, e in prior.items()
+            if d >= window_start and device in (e.get("instrument_devices") or [])
+        )
+
+    plan = PushPlan(send=False, reason="clear")
+    plan.signatures = sorted({f.signature() for f in report.findings})
+    plan.instrument_devices = sorted({f.device for f in report.findings if f.instrument and f.device})
+
+    for f in report.findings:
+        sig = f.signature()
+        seen = last_seen(sig)
+        repeat = (
+            sig in st["pushed"]
+            and seen is not None
+            and (local_day - seen).days <= REPEAT_AFTER_DAYS
+        )
+        if f.instrument:
+            if f.device and device_days(f.device) >= CHRONIC_MIN_DAYS:
+                plan.known_instrument[f.device] = device_days(f.device) + 1
+                continue
+            if repeat:
+                plan.also.append(f)
+            else:
+                plan.alerts.append(f)
+            continue
+        material = f.cost_usd is None or f.cost_usd >= min_cost_usd
+        if material and not repeat:
+            plan.alerts.append(f)
+        else:
+            plan.also.append(f)
+
+    by_cost = lambda f: -(f.cost_usd or 0.0)  # noqa: E731
+    plan.alerts.sort(key=lambda f: (f.instrument, by_cost(f)))
+    plan.also.sort(key=by_cost)
+
+    if weekly:
+        plan.send, plan.reason = True, "weekly"
+    elif plan.alerts:
+        plan.send, plan.reason = True, "new"
+    elif always_notify:
+        plan.send, plan.reason = True, "always-notify"
+    elif report.findings:
+        plan.reason = "nothing-new"
+    return plan
 
 
 def _write_digest_state(
-    path: Path, signatures: Sequence[str], *, now: Any, notified: bool
+    path: Path,
+    plan: PushPlan,
+    *,
+    local_day: date,
+    previous: Mapping[str, Any] | None,
+    now: Any,
+    notified: bool,
 ) -> None:
-    previous = _read_digest_state(path) or {}
+    st = _normalise_state(previous, local_day=local_day)
+    days = st["days"]
+    days[local_day.isoformat()] = {
+        "signatures": plan.signatures,
+        "instrument_devices": plan.instrument_devices,
+    }
+    keep_from = (local_day - timedelta(days=STATE_HISTORY_DAYS)).isoformat()
+    days = {d: e for d, e in days.items() if d >= keep_from}
+    pushed = dict(st["pushed"])
+    if notified:
+        for f in plan.alerts:
+            pushed[f.signature()] = local_day.isoformat()
+    pushed = {s: d for s, d in pushed.items() if d >= keep_from}
     state = {
-        "signatures": list(signatures),
+        "days": dict(sorted(days.items())),
+        "pushed": dict(sorted(pushed.items())),
         "checked_utc": timeutil.format_utc(now),
-        "notified_utc": timeutil.format_utc(now)
-        if notified
-        else previous.get("notified_utc"),
+        "notified_utc": timeutil.format_utc(now) if notified else st.get("notified_utc"),
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2) + "\n")
     except OSError as exc:  # pragma: no cover - defensive
         log.warning("digest_state_unwritable", path=str(path), error=str(exc))
+
+
+def _panel_of(device: str, labels: Mapping[tuple[str, str, str], Any]) -> str:
+    for key, meta in labels.items():
+        if key[1] == device and (meta or {}).get("panel"):
+            return f"Panel {meta['panel']}"
+    return f"hub {device[-4:]}"
+
+
+def _fit(sections: Sequence[tuple[str | None, Sequence[str]]], limit: int) -> str:
+    """Join titled sections of lines, dropping the LAST lines first to fit.
+
+    Sections are in priority order, so what falls off is the least important —
+    and it says so, instead of a sentence stopping mid-word.
+    """
+    flat: list[tuple[str | None, str]] = [
+        (title, line) for title, lines in sections for line in lines
+    ]
+
+    def render(items: list[tuple[str | None, str]], dropped: int) -> str:
+        out: list[str] = []
+        current: object = object()
+        for title, line in items:
+            if title != current:
+                if out:
+                    out.append("")
+                if title:
+                    out.append(title)
+                current = title
+            out.append(line)
+        if dropped:
+            out.append(f"+{dropped} more in the log")
+        return "\n".join(out)
+
+    keep = len(flat)
+    while keep and len(render(flat[:keep], len(flat) - keep)) > limit:
+        keep -= 1
+    return render(flat[:keep], len(flat) - keep)
+
+
+def render_push(
+    report: DigestReport,
+    plan: PushPlan,
+    *,
+    labels: Mapping[tuple[str, str, str], Any] | None = None,
+    weekly: WeeklySummary | None = None,
+    limit: int = PUSH_MAX_CHARS,
+) -> tuple[str, str]:
+    """``(title, message)`` for the phone — short lines, always under ``limit``."""
+    labels = labels or {}
+    day = f"{report.local_day:%a %b} {report.local_day.day}"
+    n = len(plan.alerts)
+    if weekly is not None:
+        title = weekly.title
+    elif n:
+        title = f"energycap {day}: {n} new thing{'s' if n != 1 else ''} to look at"
+    else:
+        title = f"energycap {day}: nothing new"
+
+    sections: list[tuple[str | None, Sequence[str]]] = []
+    if weekly is not None:
+        sections.append((None, weekly.lines))
+    if plan.alerts:
+        sections.append(("New:" if weekly is not None else None, [f.short() for f in plan.alerts]))
+    status = [
+        f"• {_panel_of(dev, labels)} readings inconsistent {days} of the last "
+        f"{CHRONIC_WINDOW_DAYS + 1} days (known fault, not paging)"
+        for dev, days in sorted(plan.known_instrument.items())
+    ]
+    if status:
+        sections.append(("Instruments:", status))
+    if plan.also:
+        sections.append(("Also noticed (not paging):", [f.short() for f in plan.also]))
+    if not plan.alerts and weekly is None:
+        sections.append((None, [f"All {report.compared} circuits inside their usual range."]
+                         if not report.findings else []))
+    return title, _fit(sections, limit)
+
+
+# ------------------------------------------------------------- weekly summary
+#
+# Monday's push used to be a bare "nothing unusual" heartbeat: proof the digest
+# was alive, and nothing else. It is now a summary of the week — the heartbeat
+# still, but one worth opening.
+
+#: Same-week-last-year is 364 days back, so the weekdays line up.
+YEAR_AGO_DAYS: Final[int] = 364
+
+#: Circuits must move at least this much week-on-week to be named.
+WEEKLY_MOVER_MIN_KWH: Final[float] = 2.0
+
+WEEK_METER_SQL: Final[str] = """
+SELECT sum(value) AS kwh, count(*) AS intervals
+FROM read_parquet(?)
+WHERE metric = 'kwh_interval' AND interval_s = 900 AND device_id = ?
+  AND ts_local >= ? AND ts_local < ?
+"""
+
+WEEK_CIRCUITS_SQL: Final[str] = """
+SELECT source, device_id, channel_id,
+       sum(kwh) FILTER (WHERE local_hour_start >= ?) AS this_week,
+       sum(kwh) FILTER (WHERE local_hour_start <  ?) AS last_week
+FROM read_parquet(?, union_by_name := true)
+WHERE metric = 'watts' AND source = 'leviton'
+  AND (channel_id LIKE 'breaker_%' OR channel_id LIKE 'ct_2%')
+  AND local_hour_start >= ? AND local_hour_start < ?
+GROUP BY 1, 2, 3
+"""
+
+WEEK_HVAC_SQL: Final[str] = """
+SELECT channel_id, sum(value) AS kwh
+FROM read_parquet(?)
+WHERE metric = 'kwh_day' AND ts_local >= ? AND ts_local < ?
+GROUP BY 1
+"""
+
+#: Bryant component -> the words a person uses for it.
+_HVAC_NAMES: Final[dict[str, str]] = {
+    "hpheat": "heat pump heating",
+    "cooling": "cooling",
+    "eheat": "strip heat",
+    "fan": "fan",
+    "reheat": "reheat",
+}
+
+
+@dataclass
+class WeeklySummary:
+    title: str
+    lines: list[str]
+
+
+def _pct(now: float, then: float | None) -> str:
+    if not then:
+        return "n/a"
+    return f"{100.0 * (now - then) / then:+.0f}%"
+
+
+def build_weekly(
+    con: Any,
+    *,
+    hourly: str,
+    daily: str,
+    meter: str,
+    meter_device: str | None,
+    week_end: date,
+    labels: Mapping[tuple[str, str, str], Any] | None = None,
+    rate_usd: Decimal | float | None = None,
+    instrument_days: Mapping[str, int] | None = None,
+) -> WeeklySummary:
+    """The seven local days ending ``week_end``, against the week before and a year ago."""
+    labels = labels or {}
+    rate = float(rate_usd) if rate_usd is not None else None
+    start = week_end - timedelta(days=6)
+    lo = timeutil.local_midnight_naive(start)
+    hi = timeutil.local_midnight_naive(week_end + timedelta(days=1))
+    prev_lo = timeutil.local_midnight_naive(start - timedelta(days=7))
+    expected = sum(
+        len(list(timeutil.iter_local_hours(start + timedelta(days=n)))) * 4 for n in range(7)
+    )
+    span = f"{start:%b} {start.day}–{week_end:%b} {week_end.day}"
+    lines: list[str] = []
+    title = f"energycap week {span}"
+
+    def meter_kwh(a, b) -> tuple[float | None, int]:
+        if not meter_device:
+            return None, 0
+        try:
+            rows = _rows(con, WEEK_METER_SQL, [meter, meter_device, a, b])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("digest_weekly_meter_unavailable", error=f"{type(exc).__name__}: {exc}")
+            return None, 0
+        if not rows or rows[0]["kwh"] is None:
+            return None, 0
+        return float(rows[0]["kwh"]), int(rows[0]["intervals"] or 0)
+
+    kwh, intervals = meter_kwh(lo, hi)
+    if kwh is None:
+        lines.append("House: no meter data for the week yet.")
+    else:
+        partial = intervals < 0.95 * expected
+        before, before_n = meter_kwh(prev_lo, lo)
+        ago, ago_n = meter_kwh(
+            timeutil.local_midnight_naive(start - timedelta(days=YEAR_AGO_DAYS)),
+            timeutil.local_midnight_naive(week_end + timedelta(days=1 - YEAR_AGO_DAYS)),
+        )
+        money = f" (~${kwh * rate:.0f})" if rate else ""
+        title = f"energycap week {span}: {kwh:.0f} kWh{money}"
+        compare = [f"week before {_pct(kwh, before)}"] if before and before_n >= 0.95 * expected else []
+        if ago and ago_n >= 0.95 * expected:
+            compare.append(f"same week last year {_pct(kwh, ago)}")
+        lines.append(
+            f"House {kwh:.0f} kWh{money}"
+            + (f" — {', '.join(compare)}" if compare else "")
+            + (f" (meter {100 * intervals / expected:.0f}% published)" if partial else "")
+        )
+
+    try:
+        hvac = {
+            r["channel_id"]: float(r["kwh"] or 0.0)
+            for r in _rows(con, WEEK_HVAC_SQL, [daily, lo, hi])
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_weekly_hvac_unavailable", error=f"{type(exc).__name__}: {exc}")
+        hvac = {}
+    parts = [
+        f"{_HVAC_NAMES[c]} {hvac[c]:.0f}"
+        for c in _HVAC_NAMES
+        if hvac.get(c, 0.0) >= 0.5
+    ]
+    if parts:
+        total = sum(hvac.get(c, 0.0) for c in _HVAC_NAMES)
+        lines.append(f"HVAC {total:.0f} kWh: " + ", ".join(parts))
+
+    try:
+        circuits = _rows(con, WEEK_CIRCUITS_SQL, [lo, lo, hourly, prev_lo, hi])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_weekly_circuits_unavailable", error=f"{type(exc).__name__}: {exc}")
+        circuits = []
+    movers = []
+    for r in circuits:
+        now_, then_ = r["this_week"], r["last_week"]
+        if now_ is None or then_ is None:
+            continue
+        delta = float(now_) - float(then_)
+        if abs(delta) >= WEEKLY_MOVER_MIN_KWH:
+            key = (r["source"], r["device_id"], r["channel_id"])
+            meta = labels.get(key) or {}
+            name = str(meta.get("short_label") or meta.get("label") or "").strip()
+            movers.append((abs(delta), delta, name or _label(labels, key)))
+    movers.sort(reverse=True)
+    if movers:
+        lines.append(
+            "Biggest changes: "
+            + ", ".join(f"{name} {delta:+.0f} kWh" for _, delta, name in movers[:3])
+        )
+
+    for dev, days in sorted((instrument_days or {}).items()):
+        lines.append(f"{_panel_of(dev, labels)} readings inconsistent {days} of 7 days")
+    return WeeklySummary(title=title, lines=lines)
+
+
+def _instrument_days(
+    state: Mapping[str, Any] | None, plan: PushPlan, *, local_day: date
+) -> dict[str, int]:
+    """Hub -> days of the last seven (tonight included) with an instrument finding."""
+    st = _normalise_state(state, local_day=local_day)
+    counts: dict[str, int] = {dev: 1 for dev in plan.instrument_devices}
+    for day_s, entry in st["days"].items():
+        try:
+            day = date.fromisoformat(day_s)
+        except ValueError:
+            continue
+        if local_day - timedelta(days=6) <= day < local_day and isinstance(entry, dict):
+            for dev in entry.get("instrument_devices") or []:
+                counts[dev] = counts.get(dev, 0) + 1
+    return counts
 
 
 # ------------------------------------------------------------------- the run
@@ -862,6 +1338,7 @@ def run(
     bucket: str | None = None,
     notify: bool = True,
     always_notify: bool = False,
+    weekly: bool = False,
     map_path: Path | None = None,
 ) -> dict[str, Any]:
     """``energycap digest`` — yesterday by default, pushed to Pushover.
@@ -883,6 +1360,7 @@ def run(
             bucket=bucket,
             notify=notify,
             always_notify=always_notify,
+            weekly=weekly,
             map_path=map_path,
         )
     except Exception as exc:
@@ -934,6 +1412,7 @@ def _run(
     bucket: str | None = None,
     notify: bool = True,
     always_notify: bool = False,
+    weekly: bool = False,
     map_path: Path | None = None,
 ) -> dict[str, Any]:
     """The digest proper. See :func:`run` for why the status wrapper is separate."""
@@ -1004,13 +1483,36 @@ def _run(
             labels=labels,
             rate_usd=rate,
             barn_device=barn_device,
+            meter_device=primary,
             untrusted=integrity_report.untrusted,
         )
+        report.findings[:0] = integrity_report.findings
+        report.notes.extend(integrity_report.notes)
+        state_path = settings.spool_dir / "digest-state.json"
+        previous_state = _read_digest_state(state_path)
+        plan = _decide_push(
+            report,
+            previous_state,
+            local_day=day,
+            min_cost_usd=settings.digest_min_cost_usd,
+            always_notify=always_notify,
+            weekly=weekly,
+        )
+        summary: WeeklySummary | None = None
+        if weekly:
+            summary = build_weekly(
+                con,
+                hourly=hourly_glob,
+                daily=f"s3://{target_bucket}/{s3io.DAILY_PREFIX}/*/*.parquet",
+                meter=meter_glob,
+                meter_device=primary,
+                week_end=day,
+                labels=labels,
+                rate_usd=rate,
+                instrument_days=_instrument_days(previous_state, plan, local_day=day),
+            )
     finally:
         con.close()
-
-    report.findings[:0] = integrity_report.findings
-    report.notes.extend(integrity_report.notes)
 
     for finding in report.findings:
         log.warning("digest_finding", **finding.to_dict())
@@ -1025,26 +1527,17 @@ def _run(
         skipped_untrusted=len(report.skipped_untrusted),
     )
 
-    state_path = settings.spool_dir / "digest-state.json"
-    previous_state = _read_digest_state(state_path)
-    send, reason, current_sigs, new_sigs = _decide_push(
-        report, previous_state, always_notify=always_notify
-    )
-
     delivered: bool | None = None
-    if notify and send:
+    title, message = render_push(report, plan, labels=labels, weekly=summary)
+    if notify and plan.send:
         from energy_capture import watch
 
         token = settings.pushover_token.get_secret_value()
         user = settings.pushover_user.get_secret_value()
         if token and user:
-            body = report.body()
-            ongoing = len(current_sigs) - len(new_sigs)
-            if new_sigs and ongoing:
-                body = f"{len(new_sigs)} new, {ongoing} continuing from earlier.\n\n" + body
             delivered = watch.push_message(
-                title=report.title(),
-                message=body,
+                title=title,
+                message=message,
                 token=token,
                 user=user,
             )
@@ -1057,23 +1550,31 @@ def _run(
 
     log.info(
         "digest_notify",
-        send=send,
-        reason=reason,
-        new=len(new_sigs),
-        ongoing=len(current_sigs) - len(new_sigs),
+        send=plan.send,
+        reason=plan.reason,
+        alerts=len(plan.alerts),
+        also=len(plan.also),
+        known_instrument=sorted(plan.known_instrument),
+        chars=len(message),
         delivered=delivered,
     )
     # A push that was DUE and did not land must not be recorded as reported, or
     # the retry never happens — the same failing-open rule watch-state uses.
-    undelivered = bool(notify and send) and delivered is not True
+    undelivered = bool(notify and plan.send) and delivered is not True
     if not undelivered:
         _write_digest_state(
-            state_path, current_sigs, now=timeutil.now_utc(), notified=bool(delivered)
+            state_path,
+            plan,
+            local_day=day,
+            previous=previous_state,
+            now=timeutil.now_utc(),
+            notified=bool(delivered),
         )
 
     result = report.to_dict()
     result["notified"] = delivered
-    result["notify_reason"] = reason
+    result["notify_reason"] = plan.reason
+    result["push"] = {"title": title, "message": message}
     result["marginal_rate_usd"] = float(rate) if rate else None
     result["integrity"] = integrity_report.to_dict()
     return result

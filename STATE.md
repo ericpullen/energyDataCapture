@@ -12,6 +12,25 @@ on 2026-08-18. `energycap-implementation` is merged and kept, not deleted.
 
 ---
 
+## The digest was rebuilt to page only when something is real — 2026-11-25
+
+It had pushed **every one of 46 days**, 41 of them truncated, three quarters about the one known
+Panel B fault. Replayed through the new policy the same 46 days give **16 pushes (7 weekly
+summaries), none truncated**. One line per finding; a $0.50/day floor (`DIGEST_MIN_COST_USD`);
+a finding pages once and stays quiet until absent a week; a known instrument fault is one status
+line; Monday is a summary of the week. DEVIATIONS #198 has the numbers and every rule change.
+
+Two things it found on the way, both still open:
+
+- **Panel A's water-heater breaker sometimes pins at 4,725 W** while the feed reads ~1 kW — a
+  second Leviton instrument fault, on the hub that was supposed to be the healthy control. The
+  digest now names it and stops billing it.
+- **The barn meter (`1326254`) has had no data since 2026-08-23.** LG&E Connect now returns
+  only the house meter; the daily fetch "succeeds" with one. Needs re-authorising the barn's
+  UsagePoint (see `docs/lge-greenbutton.md`). Until then the barn envelope rule is skipped.
+
+---
+
 ## What exists
 
 All seven build-order steps of `PLAN.md` §16, plus two things the spec did not ask for:

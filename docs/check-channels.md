@@ -332,8 +332,13 @@ inert.
   non-zero on any finding.
 - `digest` runs it **first**, prepends its findings, and gates its own rules on the result: an
   untrusted channel is neither judged against its band **nor admitted to the baseline that
-  will judge it tomorrow**, and an untrusted service feed also silences the overnight-floor
-  rule, which reads the feed CTs directly.
+  will judge it tomorrow**. (An untrusted service feed used to silence the overnight-floor
+  rule too; since DEVIATIONS #198 that rule reads the utility meter instead and no longer
+  depends on any clamp.)
+- Since #198: a pinned **subpanel** CT is not reported while Bryant shows the blower at a
+  steady speed with the compressor off (`STEADY_BLOWER_RPM_SPAN`), and a failed
+  feed-vs-children check names any circuit that **alone** outdraws the feed and marks it
+  untrusted for the day.
 - `/healthz` gains an `integrity` section; `ok` starts `None`, never `True`.
 - Five `INTEGRITY_*` settings, all documented in `.env.example`.
 - 29 tests in `tests/test_integrity.py`, including two calibration pins and four

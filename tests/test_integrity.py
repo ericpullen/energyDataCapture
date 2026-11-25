@@ -197,6 +197,59 @@ def test_the_real_healthy_hub_shape_does_not(con, tmp_path) -> None:
     assert rep.ok, rules(rep)
 
 
+def hvac_hour(day: date, hour: int, *, compressor: float, blower_lo: float, blower_hi: float):
+    rows = []
+    for metric, lo, hi in (
+        ("compressor_rpm", compressor, compressor),
+        ("blower_rpm", blower_lo, blower_hi),
+    ):
+        row = hour_row(day, hour, "system", lo=lo, hi=hi, device="serial")
+        row.update(source=model.SOURCE_BRYANT, metric=metric, unit="rpm",
+                   kwh=None, observed_seconds=None)
+        rows.append(row)
+    return rows
+
+
+def pinned_subpanel(hours=range(14, 24)):
+    rows = live_day(DAY, "ct_2_a")
+    for h in hours:
+        rows[h] = hour_row(DAY, h, "ct_2_a", lo=421.36, hi=421.36, mean=421.36)
+    return rows
+
+
+def test_a_steady_blower_explains_a_pinned_subpanel_ct(con, tmp_path) -> None:
+    """November 2026: fan on high, compressor off, blower at ~1230 rpm — the
+    subpanel CT reported one value for 10 hours, every day, and paged as a
+    frozen clamp. A constant load reported only on change is not a fault."""
+    rows = pinned_subpanel()
+    for h in range(14, 24):
+        rows += hvac_hour(DAY, h, compressor=0.0, blower_lo=1215.0, blower_hi=1249.0)
+    rep = report(con, tmp_path, rows)
+    assert "frozen_channel" not in rules(rep)
+    assert any("blower held a steady speed" in n for n in rep.notes), rep.notes
+
+
+def test_a_pinned_subpanel_ct_while_the_compressor_runs_is_still_frozen(con, tmp_path) -> None:
+    rows = pinned_subpanel()
+    for h in range(14, 24):
+        rows += hvac_hour(DAY, h, compressor=2400.0 if h == 18 else 0.0,
+                          blower_lo=1215.0, blower_hi=1249.0)
+    assert "frozen_channel" in rules(report(con, tmp_path, rows))
+
+
+def test_a_pinned_subpanel_ct_without_hvac_telemetry_is_still_frozen(con, tmp_path) -> None:
+    """No telemetry is "cannot tell", never a pass."""
+    assert "frozen_channel" in rules(report(con, tmp_path, pinned_subpanel()))
+
+
+def test_the_steady_blower_exemption_never_covers_the_feed(con, tmp_path) -> None:
+    rows = live_day(DAY, "ct_1_a")
+    for h in range(14, 24):
+        rows[h] = hour_row(DAY, h, "ct_1_a", lo=519.16, hi=519.16, mean=519.16)
+        rows += hvac_hour(DAY, h, compressor=0.0, blower_lo=1215.0, blower_hi=1249.0)
+    assert "frozen_channel" in rules(report(con, tmp_path, rows))
+
+
 # ----------------------------------------------------------- feed vs children
 
 
@@ -219,6 +272,40 @@ def test_children_outdrawing_the_feed_is_impossible_and_reported(con, tmp_path) 
     )
     rep = report(con, tmp_path, rows)
     assert "feed_below_children" in rules(rep)
+
+
+def test_a_circuit_that_alone_outdraws_the_feed_is_named_and_untrusted(con, tmp_path) -> None:
+    """2026-10-15: Panel A's water-heater breaker pinned at 4,725 W against a
+    ~1 kW feed, and the digest then billed it as "water heater used 21.3 kWh"."""
+    rows = feed_and_kids(
+        DAY, 1, feed=1000.0,
+        kids={"breaker_p19": 4725.0, "breaker_p11": 60.0, "breaker_p26": 80.0},
+    )
+    labels = {(model.SOURCE_LEVITON, HUB_B, "breaker_p19"): {"panel": "A", "short_label": "Water heater"}}
+    rep = report(con, tmp_path, rows, labels=labels)
+    found = [f for f in rep.findings if f.rule == "feed_below_children"]
+    assert len(found) == 1
+    assert "Panel A breaker 19 — Water heater alone read 4725 W" in found[0].detail
+    assert (model.SOURCE_LEVITON, HUB_B, "breaker_p19") in rep.untrusted
+    assert (model.SOURCE_LEVITON, HUB_B, "breaker_p11") not in rep.untrusted
+
+
+def test_a_latched_feed_never_blames_an_honest_circuit(con, tmp_path) -> None:
+    """2026-11-22: Panel B's feed pinned, and the heat-pump breaker drawing a
+    real 300 W beneath it was named the suspect. A pinned or zero feed is
+    itself the liar."""
+    rows = [
+        hour_row(DAY, 5, "ct_1_a", lo=0.0, hi=0.0, mean=0.0),
+        hour_row(DAY, 5, "ct_1_b", lo=0.0, hi=0.0, mean=0.0),
+        hour_row(DAY, 5, "breaker_p10", lo=290.0, hi=310.0, mean=301.0),
+        hour_row(DAY, 5, "breaker_p26", lo=19.0, hi=21.0, mean=20.0),
+        hour_row(DAY, 5, "breaker_p1", lo=0.0, hi=0.0, mean=0.0),
+    ]
+    rep = report(con, tmp_path, rows)
+    found = [f for f in rep.findings if f.rule == "feed_below_children"]
+    assert len(found) == 1
+    assert "suspect" not in found[0].detail
+    assert (model.SOURCE_LEVITON, HUB_B, "breaker_p10") not in rep.untrusted
 
 
 def test_an_excess_inside_tolerance_stays_quiet(con, tmp_path) -> None:
@@ -440,34 +527,18 @@ def test_an_untrusted_channel_is_not_judged_against_its_band(con, tmp_path) -> N
 
     history = []
     for n in range(14, 0, -1):
-        history += hourly_rows(DAY - timedelta(days=n), "ct_1_a", watts=500.0,
+        history += hourly_rows(DAY - timedelta(days=n), "breaker_p10", watts=500.0,
                               device=HUB_B)
-    today = hourly_rows(DAY, "ct_1_a", watts=5000.0, device=HUB_B)
+    today = hourly_rows(DAY, "breaker_p10", watts=5000.0, device=HUB_B)
     paths = sources(tmp_path, history + today)
     rep = digest.build_report(con, local_day=DAY, **paths)
     assert "above_band" in [f.rule for f in rep.findings], "control: it fires"
 
     gated = digest.build_report(
-        con, local_day=DAY, untrusted=[(model.SOURCE_LEVITON, HUB_B, "ct_1_a")], **paths
+        con, local_day=DAY, untrusted=[(model.SOURCE_LEVITON, HUB_B, "breaker_p10")], **paths
     )
     assert "above_band" not in [f.rule for f in gated.findings]
     assert gated.skipped_untrusted
-
-
-def test_an_untrusted_feed_also_silences_the_overnight_floor_rule(con, tmp_path) -> None:
-    """That rule reads the feed CTs directly, so a stuck feed reads as a clean floor."""
-    from tests.test_digest import hourly_rows, sources
-
-    rows = []
-    for n in range(14, 0, -1):
-        rows += hourly_rows(DAY - timedelta(days=n), "ct_1_a", watts=500.0, device=HUB_B)
-    rows += hourly_rows(DAY, "ct_1_a", watts=5000.0, device=HUB_B)
-    paths = sources(tmp_path, rows)
-    gated = digest.build_report(
-        con, local_day=DAY, untrusted=[(model.SOURCE_LEVITON, HUB_B, "ct_1_a")], **paths
-    )
-    assert "phantom_load_growth" not in [f.rule for f in gated.findings]
-    assert any("Overnight-floor check skipped" in n for n in gated.notes)
 
 
 def test_an_untrusted_day_never_becomes_the_baseline(con, tmp_path) -> None:
@@ -476,11 +547,11 @@ def test_an_untrusted_day_never_becomes_the_baseline(con, tmp_path) -> None:
 
     rows = []
     for n in range(14, 0, -1):
-        rows += hourly_rows(DAY - timedelta(days=n), "ct_1_a", watts=500.0, device=HUB_B)
-    rows += hourly_rows(DAY, "ct_1_a", watts=500.0, device=HUB_B)
+        rows += hourly_rows(DAY - timedelta(days=n), "breaker_p10", watts=500.0, device=HUB_B)
+    rows += hourly_rows(DAY, "breaker_p10", watts=500.0, device=HUB_B)
     paths = sources(tmp_path, rows)
     rep = digest.build_report(
-        con, local_day=DAY, untrusted=[(model.SOURCE_LEVITON, HUB_B, "ct_1_a")], **paths
+        con, local_day=DAY, untrusted=[(model.SOURCE_LEVITON, HUB_B, "breaker_p10")], **paths
     )
     assert rep.compared == 0, "an untrusted channel must not be compared at all"
 

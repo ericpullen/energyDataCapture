@@ -112,6 +112,14 @@ SUBPANEL_PREFIX: Final[str] = "ct_2"
 #:   anyway, which needs no per-channel threshold at all.
 CT_PREFIX: Final[str] = "ct_"
 
+#: Span of the blower's hourly RPM (max - min) at or below which the air handler
+#: counts as running STEADY. Calibrated on November 2026: with the fan held on
+#: high in fan-only mode the blower sat at 1215-1249 rpm, and 93% of those hours
+#: the subpanel CT reported one value — while every hour the compressor cycled
+#: it updated normally. A constant load the hub re-reports only on change is not
+#: a stuck clamp, and paging on it daily is what got the digest ignored.
+STEADY_BLOWER_RPM_SPAN: Final[float] = 100.0
+
 #: A panel needs at least this many distinct metered children before
 #: feed-vs-children means anything. Below it, an excess is far more likely to be
 #: an unmetered circuit than a fault, so the panel is reported as unjudgeable.
@@ -155,7 +163,8 @@ ORDER BY h.source, h.device_id, h.channel_id, h.local_hour_start
 FEED_SQL: Final[str] = """
 WITH feed AS (
     SELECT device_id, local_hour_start,
-           sum(mean) AS feed_w, min(sample_count) AS samples, count(*) AS legs
+           sum(mean) AS feed_w, min(sample_count) AS samples, count(*) AS legs,
+           bool_and(min < max AND min > 0) AS feed_live
     FROM read_parquet(?, union_by_name := true)
     WHERE metric = 'watts' AND source = 'leviton' AND channel_id IN ('ct_1_a', 'ct_1_b')
       AND local_hour_start >= ? AND local_hour_start < ?
@@ -170,11 +179,36 @@ kids AS (
       AND local_hour_start >= ? AND local_hour_start < ?
     GROUP BY 1, 2
 )
-SELECT f.device_id, f.local_hour_start, f.feed_w, f.samples, f.legs,
+SELECT f.device_id, f.local_hour_start, f.feed_w, f.samples, f.legs, f.feed_live,
        k.children_w, k.series
 FROM feed f JOIN kids k
   ON f.device_id = k.device_id AND f.local_hour_start = k.local_hour_start
 ORDER BY f.device_id, f.local_hour_start
+"""
+
+#: Each child's own hourly mean, for naming WHICH circuit a failed feed check
+#: implicates. One breaker that alone outdraws the whole feed is the suspect —
+#: Panel A's water-heater breaker pinned at 4,725 W against a ~1 kW feed
+#: (2026-10-15) is the case that motivated it.
+CHILDREN_SQL: Final[str] = """
+SELECT device_id, channel_id, local_hour_start, mean AS mean_w
+FROM read_parquet(?, union_by_name := true)
+WHERE metric = 'watts' AND source = 'leviton'
+  AND (channel_id LIKE 'breaker_%' OR channel_id LIKE 'ct_2%')
+  AND local_hour_start >= ? AND local_hour_start < ?
+"""
+
+#: The air handler's state per hour, read from the unit itself (Bryant), for
+#: telling a STEADY subpanel load apart from a frozen subpanel clamp.
+HVAC_STATE_SQL: Final[str] = """
+SELECT local_hour_start,
+       max(max) FILTER (WHERE metric = 'compressor_rpm') AS compressor_max,
+       min(min) FILTER (WHERE metric = 'blower_rpm')     AS blower_min,
+       max(max) FILTER (WHERE metric = 'blower_rpm')     AS blower_max
+FROM read_parquet(?, union_by_name := true)
+WHERE source = 'bryant' AND metric IN ('compressor_rpm', 'blower_rpm')
+  AND local_hour_start >= ? AND local_hour_start < ?
+GROUP BY 1
 """
 
 #: Panel energy per local day, from the feed CTs only.
@@ -497,6 +531,7 @@ def _negative_check(con, report, *, hourly, lo, hi, labels, corrupt_w) -> None:
                 Finding(
                     rule="corrupt_reading",
                     key=f"corrupt_reading:{'/'.join(key)}",
+                    device=key[1],
                     headline=f"{name} reported {value:,.0f} W — a corrupt sample",
                     detail=(
                         f"metric {row['metric']} at {row['local_hour_start']}. "
@@ -513,6 +548,7 @@ def _negative_check(con, report, *, hourly, lo, hi, labels, corrupt_w) -> None:
                 Finding(
                     rule="negative_reading",
                     key=f"negative_reading:{'/'.join(key)}",
+                    device=key[1],
                     headline=f"{name} reported {value:.1f} — a negative reading",
                     detail=(
                         f"metric {row['metric']} at "
@@ -536,6 +572,8 @@ def _frozen_check(
     for row in rows:
         key = (row["source"], row["device_id"], row["channel_id"])
         by_channel.setdefault(key, []).append(row)
+    hvac: dict[Any, Mapping[str, Any]] | None = None
+    steady_hours = 0
 
     for key, hours in sorted(by_channel.items()):
         name = _label(labels, key)
@@ -553,6 +591,12 @@ def _frozen_check(
         for length, run in frozen_runs(hours, min_samples=samples_floor):
             if length < frozen_min:
                 continue
+            if key[2].startswith(SUBPANEL_PREFIX):
+                if hvac is None:
+                    hvac = _hvac_state(con, hourly=hourly, lo=lo, hi=hi)
+                if _blower_steady_throughout(run, hvac):
+                    steady_hours += length
+                    continue
             value = run[0]["mean_w"]
             first = run[0]["local_hour_start"]
             last = run[-1]["local_hour_start"]
@@ -566,6 +610,7 @@ def _frozen_check(
                 Finding(
                     rule="frozen_channel",
                     key=f"frozen_channel:{'/'.join(key)}",
+                    device=key[1],
                     headline=f"{name} reported exactly {value:.2f} W for {span}",
                     detail=(
                         f"{window}, {len(run) * 120} samples, one value. A "
@@ -581,6 +626,50 @@ def _frozen_check(
             )
             if key not in report.untrusted:
                 report.untrusted.append(key)
+    if steady_hours:
+        report.notes.append(
+            f"{steady_hours} pinned subpanel-CT hour(s) not reported: the air "
+            "handler's blower held a steady speed with the compressor off, so "
+            "one unchanging reading is the load, not a stuck clamp."
+        )
+
+
+def _hvac_state(con, *, hourly, lo, hi) -> dict[Any, Mapping[str, Any]]:
+    """Bryant compressor/blower RPM per hour. Empty when there is no telemetry."""
+    try:
+        return {r["local_hour_start"]: r for r in _rows(con, HVAC_STATE_SQL, [hourly, lo, hi])}
+    except Exception as exc:  # noqa: BLE001 - no HVAC data means "cannot tell"
+        log.warning("integrity_hvac_state_unavailable", error=f"{type(exc).__name__}: {exc}")
+        return {}
+
+
+def _blower_steady_throughout(
+    run: Sequence[Mapping[str, Any]], hvac: Mapping[Any, Mapping[str, Any]]
+) -> bool:
+    """Was the subpanel's load genuinely constant for every hour of ``run``?
+
+    Blower turning at a steady speed AND compressor off, in every hour. Any hour
+    without telemetry means "cannot tell", which keeps the finding — silence is
+    never a pass here.
+    """
+    for row in run:
+        state = hvac.get(row["local_hour_start"])
+        if not state:
+            return False
+        comp, bmin, bmax = (
+            state.get("compressor_max"), state.get("blower_min"), state.get("blower_max")
+        )
+        if comp is None or bmin is None or bmax is None:
+            return False
+        if comp > 0 or bmin <= 0 or (bmax - bmin) > STEADY_BLOWER_RPM_SPAN:
+            return False
+    return True
+
+
+def _panel_name(device: str, labels: Mapping[tuple[str, str, str], Any]) -> str:
+    from energy_capture.stages.digest import _panel_of
+
+    return _panel_of(device, labels)
 
 
 def _feed_check(
@@ -624,19 +713,51 @@ def _feed_check(
                 "children_w": children_w,
                 "excess": excess,
                 "tolerance": tolerance,
+                "feed_live": bool(row.get("feed_live")),
             }
         )
+
+    children: dict[tuple[str, Any], list[tuple[str, float]]] = {}
+    if offences:
+        for row in _rows(con, CHILDREN_SQL, [hourly, lo, hi]):
+            children.setdefault((row["device_id"], row["local_hour_start"]), []).append(
+                (row["channel_id"], float(row["mean_w"] or 0.0))
+            )
 
     for (device, day), hours in sorted(offences.items()):
         worst = max(hours, key=lambda h: h["excess"])
         n = len(hours)
         key = ("leviton", device, "ct_1_a")
+        # A child that ALONE outdraws the whole feed is implicated by name: one
+        # of the two readings is false, and either way that circuit's kWh for
+        # the day cannot be believed. It goes untrusted so the digest neither
+        # bills it as an anomaly nor folds it into the circuit's baseline.
+        #
+        # Only in an hour the feed was visibly LIVE — varying, never zero. A
+        # feed latched at zero or pinned (#180) is itself the liar, and naming
+        # the heat pump drawing an honest 300 W beneath it would send the owner
+        # to the wrong circuit.
+        suspects: dict[str, float] = {}
+        for h in hours:
+            if not h["feed_live"]:
+                continue
+            for channel, mean_w in children.get((device, h["hour"]), []):
+                if mean_w > h["feed_w"] + h["tolerance"]:
+                    suspects[channel] = max(mean_w, suspects.get(channel, 0.0))
+        named = ""
+        if suspects:
+            channel, watts = max(suspects.items(), key=lambda kv: kv[1])
+            named = (
+                f" {_label(labels, ('leviton', device, channel))} alone read "
+                f"{watts:.0f} W in an hour the feed saw less — suspect that circuit."
+            )
         report.findings.append(
             Finding(
                 rule="feed_below_children",
                 key=f"feed_below_children:{device}",
+                device=device,
                 headline=(
-                    f"{device[-4:]} feed read less than its own circuits in "
+                    f"{_panel_name(device, labels)} feed read less than its own circuits in "
                     f"{n} hour{'s' if n != 1 else ''} on {day}"
                 ),
                 detail=(
@@ -645,13 +766,14 @@ def _feed_check(
                     f"flowed through it downstream ({worst['excess']:+.0f} W over a "
                     f"{worst['tolerance']:.0f} W tolerance). Every one of those "
                     "circuits passes through that clamp, so this cannot be true — "
-                    "the feed CT is under-reporting or has stopped updating. "
-                    "Independent of which failure mode is at work."
+                    "the feed CT is under-reporting or has stopped updating, or a "
+                    "circuit below it is over-reporting." + named
                 ),
             )
         )
-        if key not in report.untrusted:
-            report.untrusted.append(key)
+        for suspect in [key, *(("leviton", device, c) for c in sorted(suspects))]:
+            if suspect not in report.untrusted:
+                report.untrusted.append(suspect)
     for device in sorted(thin):
         report.skipped_unjudgeable.append(
             f"{device[-4:]} feed vs children (fewer than "
